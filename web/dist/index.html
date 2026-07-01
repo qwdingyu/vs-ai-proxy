@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VS AI Proxy</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .page { min-height: 100vh; }
+    .header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: rgba(15,17,21,0.9); backdrop-filter: blur(6px); }
+    .header h1 { font-size: 16px; margin: 0; }
+    .nav { display: flex; gap: 10px; }
+    .nav-item { color: var(--text); text-decoration: none; padding: 6px 10px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
+    .nav-item:hover { border-color: var(--border); }
+    .main { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .stat { background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+    .label { color: var(--muted); font-size: 12px; }
+    .value { font-size: 20px; margin-top: 6px; }
+    .table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); }
+    .ok { color: #3fb950; }
+    .warn { color: #d29922; }
+    .err { color: #f85149; }
+    .empty { color: var(--muted); text-align: center; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+    .btn { background: #21262d; color: var(--text); border: 1px solid var(--border); padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+    .primary { background: #238636; border-color: #238636; color: white; }
+    .danger { background: #da3633; border-color: #da3633; color: white; }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; }
+    .modal { background: #161b22; border: 1px solid #30363d; padding: 16px; border-radius: 8px; width: 360px; display: flex; flex-direction: column; gap: 10px; }
+    label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #8b949e; }
+    input, select { background: #0f1115; color: #e6edf3; border: 1px solid #30363d; padding: 8px; border-radius: 6px; }
+    .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+    .hint { color: var(--muted); }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <h1>VS AI Proxy</h1>
+      <nav class="nav">
+        <a class="nav-item" href="#/providers">提供商</a>
+        <a class="nav-item" href="#/models">模型</a>
+        <a class="nav-item" href="#/logs">日志</a>
+      </nav>
+    </header>
+
+    <main class="main">
+      <section id="page-dashboard" class="panel">
+        <h2>快速状态</h2>
+        <div class="stats">
+          <div class="stat">
+            <div class="label">总请求</div>
+            <div class="value" id="totalRequests">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">成功</div>
+            <div class="value" id="successCount">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">失败</div>
+            <div class="value" id="failureCount">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">平均延迟</div>
+            <div class="value" id="avgLatency">-</div>
+          </div>
+        </div>
+
+        <h3>最近日志</h3>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>方法</th>
+              <th>路径</th>
+              <th>状态</th>
+              <th>延迟</th>
+            </tr>
+          </thead>
+          <tbody id="dashboardLogs">
+            <tr><td colspan="5" class="empty">暂无日志</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="page-providers" class="panel hidden">
+        <h2>提供商</h2>
+        <div class="toolbar">
+          <button class="btn primary" id="btnAddProvider">新增提供商</button>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>Base URL</th>
+              <th>启用</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="providerTable">
+            <tr><td colspan="5" class="empty">加载中...</td></tr>
+          </tbody>
+        </table>
+        <div id="providerModal" class="modal-backdrop hidden">
+          <div class="modal">
+            <h3 id="providerModalTitle">新增提供商</h3>
+            <label>名称 <input id="pName" /></label>
+            <label>类型
+              <select id="pType">
+                <option value="openai">OpenAI</option>
+                <option value="ollama">Ollama</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label>Base URL <input id="pBase" /></label>
+            <label>API Key <input id="pKey" /></label>
+            <label>启用 <input type="checkbox" id="pEnabled" checked /></label>
+            <div class="actions">
+              <button class="btn" id="btnCancelProvider">取消</button>
+              <button class="btn primary" id="btnSaveProvider">保存</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-models" class="panel hidden">
+        <h2>模型</h2>
+        <div class="toolbar">
+          <button class="btn primary" id="btnAddModel">新增模型</button>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>提供商</th>
+              <th>上下文长度</th>
+              <th>最大输出</th>
+              <th>启用</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="modelTable">
+            <tr><td colspan="6" class="empty">加载中...</td></tr>
+          </tbody>
+        </table>
+        <div id="modelModal" class="modal-backdrop hidden">
+          <div class="modal">
+            <h3 id="modelModalTitle">新增模型</h3>
+            <label>名称 <input id="mName" /></label>
+            <label>提供商 <input id="mProvider" /></label>
+            <label>上下文长度 <input type="number" id="mCtx" /></label>
+            <label>最大输出 <input type="number" id="mMax" /></label>
+            <label>启用 <input type="checkbox" id="mEnabled" checked /></label>
+            <div class="actions">
+              <button class="btn" id="btnCancelModel">取消</button>
+              <button class="btn primary" id="btnSaveModel">保存</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-logs" class="panel hidden">
+        <h2>日志</h2>
+        <div class="toolbar">
+          <button class="btn danger" id="btnClearLogs">清空日志</button>
+          <button class="btn" id="btnRefreshLogs">刷新</button>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>方法</th>
+              <th>路径</th>
+              <th>状态</th>
+              <th>延迟</th>
+            </tr>
+          </thead>
+          <tbody id="logTable">
+            <tr><td colspan="5" class="empty">加载中...</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    // API 基础路径常量，统一指向后端管理接口前缀
+    const API_BASE = '/api';
+    // 轻量辅助函数：按 id 获取 DOM 元素
+    const $ = (id) => document.getElementById(id);
+    // 根据 HTTP 状态码映射状态样式类
+    const statusClass = (code) => {
+      if (code < 400) return 'ok';
+      if (code < 500) return 'warn';
+      return 'err';
+    };
+    // 将后端时间戳/时间字符串转换为本地展示格式
+    const formatTime = (ts) => {
+      if (!ts) return '';
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return ts;
+      return d.toLocaleString();
+    };
+    // 统一 fetch JSON 请求封装，失败时抛出来统一处理
+    const fetchJSON = async (path, opts = {}) => {
+      const res = await fetch(API_BASE + path, opts);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '请求失败');
+      return data;
+    };
+
+    // 页面切换：根据前端 hash 路由显示对应面板
+    const showPage = (page) => {
+      ['dashboard', 'providers', 'models', 'logs'].forEach((name) => {
+        const el = $('page-' + name);
+        if (!el) return;
+        if (name === page) el.classList.remove('hidden');
+        else el.classList.add('hidden');
+      });
+      if (page === 'dashboard') loadDashboard();
+      if (page === 'providers') loadProviders();
+      if (page === 'models') loadModels();
+      if (page === 'logs') loadLogs();
+    };
+
+    // 加载仪表盘统计数据与最近日志
+    const loadDashboard = async () => {
+      try {
+        const [stats, logsRes] = await Promise.all([
+          fetchJSON('/statistics'),
+          fetchJSON('/logs?limit=20')
+        ]);
+        $('totalRequests').textContent = stats.total_requests ?? '-';
+        $('successCount').textContent = stats.success_count ?? '-';
+        $('failureCount').textContent = stats.failure_count ?? '-';
+        $('avgLatency').textContent = stats.avg_latency_ms != null ? stats.avg_latency_ms.toFixed(0) + ' ms' : '-';
+        const tbody = $('dashboardLogs');
+        const logs = logsRes.logs || [];
+        if (!logs.length) {
+          tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无日志</td></tr>';
+          return;
+        }
+        tbody.innerHTML = logs.map(log => `
+          <tr>
+            <td>${formatTime(log.timestamp)}</td>
+            <td>${log.method}</td>
+            <td>${log.path}</td>
+            <td><span class="${statusClass(log.status_code)}">${log.status_code}</span></td>
+            <td>${Number(log.elapsed_ms).toFixed(0)} ms</td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    // 加载提供商列表
+    const loadProviders = async () => {
+      try {
+        const res = await fetchJSON('/providers');
+        const items = res.providers || [];
+        const tbody = $('providerTable');
+        if (!items.length) {
+          tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无提供商</td></tr>';
+          return;
+        }
+        tbody.innerHTML = items.map(item => `
+          <tr>
+            <td>${item.name}</td>
+            <td>${item.type}</td>
+            <td>${item.base_url}</td>
+            <td>${item.enabled ? '是' : '否'}</td>
+            <td>
+              <button class="btn" data-action="edit-provider" data-name="${item.name}">编辑</button>
+              <button class="btn danger" data-action="delete-provider" data-name="${item.name}">删除</button>
+              <button class="btn" data-action="test-provider" data-name="${item.name}">测试</button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    // 加载模型列表
+    const loadModels = async () => {
+      try {
+        const res = await fetchJSON('/models');
+        const items = res.models || [];
+        const tbody = $('modelTable');
+        if (!items.length) {
+          tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无模型</td></tr>';
+          return;
+        }
+        tbody.innerHTML = items.map(item => `
+          <tr>
+            <td>${item.name}</td>
+            <td>${item.provider}</td>
+            <td>${item.context_length}</td>
+            <td>${item.max_output_tokens}</td>
+            <td>${item.enabled ? '是' : '否'}</td>
+            <td>
+              <button class="btn" data-action="edit-model" data-name="${item.name}">编辑</button>
+              <button class="btn danger" data-action="delete-model" data-name="${item.name}">删除</button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    // 加载日志列表
+    const loadLogs = async () => {
+      try {
+        const res = await fetchJSON('/logs?limit=200');
+        const logs = res.logs || [];
+        const tbody = $('logTable');
+        if (!logs.length) {
+          tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无日志</td></tr>';
+          return;
+        }
+        tbody.innerHTML = logs.map(log => `
+          <tr>
+            <td>${formatTime(log.timestamp)}</td>
+            <td>${log.method}</td>
+            <td>${log.path}</td>
+            <td><span class="${statusClass(log.status_code)}">${log.status_code}</span></td>
+            <td>${Number(log.elapsed_ms).toFixed(0)} ms</td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    // 导航点击处理：读取当前元素的 hash 用于前端路由切换
+    // 注意：这里使用 el.hash，避免对仅包含 hash 的链接调用 new URL() 触发异常
+    document.querySelectorAll('.nav-item').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        // 读取链接的 hash 值作为页面标识，例如 "#/providers" -> "providers"
+        const page = (el.hash || '').replace('#/', '');
+        window.location.hash = page;
+      });
+    });
+
+    // 监听 hash 变化并切换页面
+    window.addEventListener('hashchange', () => {
+      const page = location.hash.replace('#/', '') || 'dashboard';
+      showPage(page);
+    });
+
+    // 日志工具栏操作
+    $('btnRefreshLogs').addEventListener('click', loadLogs);
+    $('btnClearLogs').addEventListener('click', async () => {
+      await fetchJSON('/logs', { method: 'DELETE' });
+      loadLogs();
+    });
+
+    // 提供商弹窗状态
+    let editingProviderName = null;
+
+    // 打开新增提供商弹窗
+    $('btnAddProvider').addEventListener('click', () => {
+      editingProviderName = null;
+      $('providerModalTitle').textContent = '新增提供商';
+      $('pName').value = '';
+      $('pName').disabled = false;
+      $('pType').value = 'openai';
+      $('pBase').value = '';
+      $('pKey').value = '';
+      $('pEnabled').checked = true;
+      $('providerModal').classList.remove('hidden');
+    });
+    // 关闭新增/编辑提供商弹窗
+    $('btnCancelProvider').addEventListener('click', () => {
+      $('providerModal').classList.add('hidden');
+    });
+    // 保存提供商
+    $('btnSaveProvider').addEventListener('click', async () => {
+      const payload = {
+        name: $('pName').value.trim(),
+        type: $('pType').value,
+        base_url: $('pBase').value.trim(),
+        api_key: $('pKey').value.trim(),
+        enabled: $('pEnabled').checked
+      };
+      if (!payload.name) return alert('名称不能为空');
+      if (editingProviderName) {
+        await fetchJSON('/providers/' + encodeURIComponent(editingProviderName), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      } else {
+        await fetchJSON('/providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      }
+      $('providerModal').classList.add('hidden');
+      editingProviderName = null;
+      loadProviders();
+    });
+
+    // 打开新增模型弹窗
+    $('btnAddModel').addEventListener('click', () => {
+      $('modelModalTitle').textContent = '新增模型';
+      $('mName').value = '';
+      $('mProvider').value = '';
+      $('mCtx').value = 8192;
+      $('mMax').value = 4096;
+      $('mEnabled').checked = true;
+      $('modelModal').classList.remove('hidden');
+    });
+    // 关闭新增/编辑模型弹窗
+    $('btnCancelModel').addEventListener('click', () => $('modelModal').classList.add('hidden'));
+    // 保存模型
+    $('btnSaveModel').addEventListener('click', async () => {
+      const payload = {
+        name: $('mName').value.trim(),
+        provider: $('mProvider').value.trim(),
+        context_length: Number($('mCtx').value || 0),
+        max_output_tokens: Number($('mMax').value || 0),
+        enabled: $('mEnabled').checked
+      };
+      if (!payload.name) return alert('名称不能为空');
+      await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify([payload]) });
+      $('modelModal').classList.add('hidden');
+      loadModels();
+    });
+
+    // 表格内操作按钮统一处理：编辑、删除、测试
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const action = btn.getAttribute('data-action');
+      const name = btn.getAttribute('data-name');
+      if (action === 'delete-provider') {
+        await fetchJSON('/providers/' + encodeURIComponent(name), { method: 'DELETE' });
+        loadProviders();
+      }
+      if (action === 'edit-provider') {
+        editingProviderName = name;
+        $('providerModalTitle').textContent = '编辑提供商';
+        $('pName').disabled = true;
+        const res = await fetchJSON('/providers');
+        const item = (res.providers || []).find((x) => x.name === name);
+        if (!item) return;
+        $('pName').value = item.name;
+        $('pType').value = item.type;
+        $('pBase').value = item.base_url;
+        $('pKey').value = item.api_key || '';
+        $('pEnabled').checked = item.enabled;
+        $('providerModal').classList.remove('hidden');
+      }
+      if (action === 'test-provider') {
+        const res = await fetchJSON('/providers');
+        const item = (res.providers || []).find((x) => x.name === name);
+        if (!item) return;
+        const test = await fetchJSON('/test/connection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: item }) });
+        alert(test.success ? '连接成功' : '连接失败: ' + test.message);
+      }
+      if (action === 'delete-model') {
+        const res = await fetchJSON('/models');
+        const next = (res.models || []).filter((x) => x.name !== name);
+        await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
+        loadModels();
+      }
+      if (action === 'edit-model') {
+        $('modelModalTitle').textContent = '编辑模型';
+        const res = await fetchJSON('/models');
+        const item = (res.models || []).find((x) => x.name === name);
+        if (!item) return;
+        $('mName').value = item.name;
+        $('mProvider').value = item.provider;
+        $('mCtx').value = item.context_length || 0;
+        $('mMax').value = item.max_output_tokens || 0;
+        $('mEnabled').checked = item.enabled;
+        $('modelModal').classList.remove('hidden');
+      }
+    });
+
+    // 初始页面加载时读取当前 hash 并渲染对应面板
+    document.addEventListener('DOMContentLoaded', () => {
+      const page = location.hash.replace('#/', '') || 'dashboard';
+      showPage(page);
+    });
+  </script>
+</body>
+</html>

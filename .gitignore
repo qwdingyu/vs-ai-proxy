@@ -1,0 +1,17 @@
+# 构建产物
+/vs-ai-proxy
+/vs-ai-proxy.exe
+/dist/
+
+# 本地配置与运行时数据
+/.vs-ai-proxy/
+/.config/
+
+# IDE / 系统文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

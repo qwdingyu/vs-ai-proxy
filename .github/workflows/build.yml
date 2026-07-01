@@ -1,0 +1,56 @@
+# VS AI Proxy 自动构建工作流
+# 触发条件:
+#   - push/PR 到 main: 编译验证 + go vet
+#   - 推送 v* 标签: 全平台编译 + 创建 GitHub Release
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: [v*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─── 编译验证 ──────────────────────────────
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 静态检查
+        run: go vet ./...
+
+      - name: 编译（当前平台）
+        run: go build ./cmd/server
+
+  # ─── 全平台构建 + 发布 ─────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 允许创建 Release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 跨平台编译 + 打包
+        run: make release
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
