@@ -14,23 +14,26 @@ import (
 
 // ChatRequest 聊天请求
 type ChatRequest struct {
-	Model       string            `json:"model"`
-	Messages    []Message         `json:"messages"`
-	Temperature *float64          `json:"temperature,omitempty"`
-	TopP        *float64          `json:"top_p,omitempty"`
-	MaxTokens   *int              `json:"max_tokens,omitempty"`
-	Stream      bool              `json:"stream"`
-	Tools       []Tool            `json:"tools,omitempty"`
-	Stop        []string          `json:"stop,omitempty"`
+	Model           string                     `json:"model"`
+	Messages        []Message                  `json:"messages"`
+	Temperature     *float64                   `json:"temperature,omitempty"`
+	TopP            *float64                   `json:"top_p,omitempty"`
+	TopK            *int                       `json:"top_k,omitempty"`
+	MaxTokens       *int                       `json:"max_tokens,omitempty"`
+	ReasoningEffort string                     `json:"reasoning_effort,omitempty"`
+	Stream          bool                       `json:"stream"`
+	Tools           []Tool                     `json:"tools,omitempty"`
+	Stop            []string                   `json:"stop,omitempty"`
+	Extra           map[string]json.RawMessage `json:"-"`
 }
 
 // Message 消息
 type Message struct {
-	Role         string     `json:"role"`
-	Content      string     `json:"content"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID   string     `json:"tool_call_id,omitempty"`
-	Reasoning    string     `json:"reasoning_content,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Reasoning  string     `json:"reasoning_content,omitempty"`
 }
 
 // ToolCall 工具调用
@@ -48,8 +51,8 @@ type FunctionCall struct {
 
 // Tool 工具定义
 type Tool struct {
-	Type     string    `json:"type"`
-	Function ToolFunc  `json:"function"`
+	Type     string   `json:"type"`
+	Function ToolFunc `json:"function"`
 }
 
 // ToolFunc 工具函数
@@ -61,13 +64,13 @@ type ToolFunc struct {
 
 // ChatResponse 聊天响应
 type ChatResponse struct {
-	ID                string    `json:"id"`
-	Object            string    `json:"object"`
-	Created           int64     `json:"created"`
-	Model             string    `json:"model"`
-	Choices           []Choice  `json:"choices"`
-	Usage             *Usage    `json:"usage,omitempty"`
-	Error             *APIError `json:"error,omitempty"`
+	ID      string    `json:"id"`
+	Object  string    `json:"object"`
+	Created int64     `json:"created"`
+	Model   string    `json:"model"`
+	Choices []Choice  `json:"choices"`
+	Usage   *Usage    `json:"usage,omitempty"`
+	Error   *APIError `json:"error,omitempty"`
 }
 
 // Choice 选择
@@ -93,12 +96,12 @@ type APIError struct {
 
 // StreamChunk 流式响应块
 type StreamChunk struct {
-	ID                string    `json:"id"`
-	Object            string    `json:"object"`
-	Created           int64     `json:"created"`
-	Model             string    `json:"model"`
-	Choices           []Choice  `json:"choices"`
-	Usage             *Usage    `json:"usage,omitempty"`
+	ID      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created int64    `json:"created"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   *Usage   `json:"usage,omitempty"`
 }
 
 // Provider 定义 AI 提供商接口
@@ -121,12 +124,12 @@ type Provider interface {
 
 // OpenAIProvider OpenAI 兼容提供商
 type OpenAIProvider struct {
-	NameStr   string
-	APIKey    string
-	BaseURL   string
-	Enabled   bool
-	Client    *http.Client
-	Timeout   time.Duration
+	NameStr string
+	APIKey  string
+	BaseURL string
+	Enabled bool
+	Client  *http.Client
+	Timeout time.Duration
 }
 
 // NewOpenAIProvider 创建 OpenAI 提供商
@@ -135,12 +138,12 @@ func NewOpenAIProvider(name, apiKey, baseURL string, enabled bool, timeout time.
 		timeout = 60 * time.Second
 	}
 	return &OpenAIProvider{
-		NameStr:  name,
-		APIKey:   apiKey,
-		BaseURL:  strings.TrimRight(baseURL, "/"),
-		Enabled:  enabled,
+		NameStr: name,
+		APIKey:  apiKey,
+		BaseURL: strings.TrimRight(baseURL, "/"),
+		Enabled: enabled,
 		Client:  &http.Client{Timeout: timeout},
-		Timeout:  timeout,
+		Timeout: timeout,
 	}
 }
 
@@ -159,7 +162,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.chatURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
@@ -197,7 +200,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.chatURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
@@ -220,7 +223,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 }
 
 func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", p.BaseURL+"/v1/models", nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", p.modelsURL(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +262,39 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 	return models, nil
 }
 
+func (p *OpenAIProvider) chatURL() string {
+	return p.capabilityURL("chat", "v1/chat/completions")
+}
+
+func (p *OpenAIProvider) modelsURL() string {
+	return p.capabilityURL("models", "v1/models")
+}
+
+func (p *OpenAIProvider) capabilityURL(kind, fallbackPath string) string {
+	caps := GetCapabilities(p.NameStr)
+	path := fallbackPath
+	switch kind {
+	case "chat":
+		if strings.TrimSpace(caps.ChatPath) != "" {
+			path = caps.ChatPath
+		}
+	case "models":
+		if strings.TrimSpace(caps.ModelsPath) != "" {
+			path = caps.ModelsPath
+		}
+	}
+	return joinURLPath(p.BaseURL, path)
+}
+
+func joinURLPath(baseURL, path string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	path = strings.TrimLeft(path, "/")
+	if path == "" {
+		return baseURL
+	}
+	return baseURL + "/" + path
+}
+
 // OllamaProvider Ollama 提供商
 type OllamaProvider struct {
 	NameStr string
@@ -289,28 +325,7 @@ func (p *OllamaProvider) IsEnabled() bool {
 }
 
 func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	// 转换为 Ollama 格式
-	ollamaReq := map[string]any{
-		"model":  req.Model,
-		"messages": make([]map[string]any, 0, len(req.Messages)),
-		"stream": false,
-	}
-
-	if req.Temperature != nil {
-		ollamaReq["options"] = map[string]any{"temperature": *req.Temperature}
-	}
-
-	for _, msg := range req.Messages {
-		m := map[string]any{
-			"role":    msg.Role,
-			"content": msg.Content,
-		}
-		if len(msg.ToolCalls) > 0 {
-			m["tool_calls"] = msg.ToolCalls
-		}
-		ollamaReq["messages"] = append(ollamaReq["messages"].([]map[string]any), m)
-	}
-
+	ollamaReq := p.buildChatRequest(req, false)
 	body, err := json.Marshal(ollamaReq)
 	if err != nil {
 		return nil, err
@@ -345,12 +360,12 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 
 	message, _ := ollamaResp["message"].(map[string]any)
 	content := ""
+	reasoning := ""
 	if message != nil {
 		content, _ = message["content"].(string)
-		if content == "" {
-			if thinking, ok := message["thinking"].(string); ok {
-				content = thinking
-			}
+		reasoning, _ = message["thinking"].(string)
+		if reasoning == "" {
+			reasoning, _ = message["reasoning_content"].(string)
 		}
 	}
 
@@ -361,7 +376,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		Model:   req.Model,
 		Choices: []Choice{{
 			Index:        0,
-			Message:      Message{Role: "assistant", Content: content},
+			Message:      Message{Role: "assistant", Content: content, Reasoning: reasoning},
 			FinishReason: "stop",
 		}},
 	}
@@ -384,7 +399,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 
 func (p *OllamaProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.ReadCloser, error) {
 	req.Stream = true
-	body, err := json.Marshal(req)
+	body, err := json.Marshal(p.buildChatRequest(req, true))
 	if err != nil {
 		return nil, err
 	}
@@ -406,6 +421,53 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	}
 
 	return resp.Body, nil
+}
+
+func (p *OllamaProvider) buildChatRequest(req *ChatRequest, stream bool) map[string]any {
+	messages := make([]map[string]any, 0, len(req.Messages))
+	for _, msg := range req.Messages {
+		m := map[string]any{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+		if len(msg.ToolCalls) > 0 {
+			m["tool_calls"] = msg.ToolCalls
+		}
+		if strings.TrimSpace(msg.Reasoning) != "" {
+			m["reasoning_content"] = msg.Reasoning
+		}
+		messages = append(messages, m)
+	}
+
+	options := map[string]any{}
+	if req.Temperature != nil {
+		options["temperature"] = *req.Temperature
+	}
+	if req.TopP != nil {
+		options["top_p"] = *req.TopP
+	}
+	if req.TopK != nil {
+		options["top_k"] = *req.TopK
+	}
+	if req.MaxTokens != nil {
+		options["max_tokens"] = *req.MaxTokens
+	}
+	if strings.TrimSpace(req.ReasoningEffort) != "" {
+		options["reasoning_effort"] = req.ReasoningEffort
+	}
+
+	ollamaReq := map[string]any{
+		"model":    req.Model,
+		"messages": messages,
+		"stream":   stream,
+	}
+	if len(options) > 0 {
+		ollamaReq["options"] = options
+	}
+	if len(req.Tools) > 0 {
+		ollamaReq["tools"] = req.Tools
+	}
+	return ollamaReq
 }
 
 func (p *OllamaProvider) ListModels(ctx context.Context) ([]string, error) {

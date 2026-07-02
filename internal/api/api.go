@@ -146,19 +146,16 @@ func (s *Server) getConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, s.configMgr.Get())
 }
 
-// saveConfig 保存配置
-// 仅做持久化验证并刷新本地缓存，不直接热重启 proxy server。
+// saveConfig 保存配置，并热更新代理路由。
 func (s *Server) saveConfig(c *gin.Context) {
 	var cfg config.AppConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := s.configMgr.Save(&cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if !s.saveAndApplyConfig(c, &cfg) {
 		return
 	}
-	s.config = s.configMgr.Get()
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
@@ -167,16 +164,18 @@ func (s *Server) listProviders(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"providers": s.config.Providers})
 }
 
-// addProvider 新增提供商
-// 当前仅追加到内存配置并持久化，不立即校验连通性。
+// addProvider 新增提供商并热更新代理路由。
 func (s *Server) addProvider(c *gin.Context) {
 	var p config.ProviderConfig
 	if err := c.ShouldBindJSON(&p); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	s.config.Providers = append(s.config.Providers, p)
-	s.configMgr.Save(s.config)
+	cfg := s.cloneConfig()
+	cfg.Providers = append(cfg.Providers, p)
+	if !s.saveAndApplyConfig(c, cfg) {
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
@@ -189,10 +188,13 @@ func (s *Server) updateProvider(c *gin.Context) {
 		return
 	}
 
-	for i, prov := range s.config.Providers {
+	cfg := s.cloneConfig()
+	for i, prov := range cfg.Providers {
 		if prov.Name == name {
-			s.config.Providers[i] = p
-			s.configMgr.Save(s.config)
+			cfg.Providers[i] = p
+			if !s.saveAndApplyConfig(c, cfg) {
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"success": true})
 			return
 		}
@@ -203,10 +205,13 @@ func (s *Server) updateProvider(c *gin.Context) {
 // deleteProvider 删除提供商
 func (s *Server) deleteProvider(c *gin.Context) {
 	name := c.Param("name")
-	for i, prov := range s.config.Providers {
+	cfg := s.cloneConfig()
+	for i, prov := range cfg.Providers {
 		if prov.Name == name {
-			s.config.Providers = append(s.config.Providers[:i], s.config.Providers[i+1:]...)
-			s.configMgr.Save(s.config)
+			cfg.Providers = append(cfg.Providers[:i], cfg.Providers[i+1:]...)
+			if !s.saveAndApplyConfig(c, cfg) {
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"success": true})
 			return
 		}
@@ -226,9 +231,32 @@ func (s *Server) saveModels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	s.config.Models = models
-	s.configMgr.Save(s.config)
+	cfg := s.cloneConfig()
+	cfg.Models = append([]config.ModelConfig(nil), models...)
+	if !s.saveAndApplyConfig(c, cfg) {
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func (s *Server) cloneConfig() *config.AppConfig {
+	src := s.configMgr.Get()
+	cfg := *src
+	cfg.Providers = append([]config.ProviderConfig(nil), src.Providers...)
+	cfg.Models = append([]config.ModelConfig(nil), src.Models...)
+	return &cfg
+}
+
+func (s *Server) saveAndApplyConfig(c *gin.Context, cfg *config.AppConfig) bool {
+	if err := s.configMgr.Save(cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return false
+	}
+	s.config = s.configMgr.Get()
+	if s.proxy != nil {
+		s.proxy.Reconfigure(s.config)
+	}
+	return true
 }
 
 // testConnection 测试提供商连接
@@ -266,8 +294,8 @@ func (s *Server) testConnection(c *gin.Context) {
 func (s *Server) testChat(c *gin.Context) {
 	var req struct {
 		Provider config.ProviderConfig `json:"provider"`
-		Message  string                 `json:"message"`
-		Model    string                 `json:"model"`
+		Message  string                `json:"message"`
+		Model    string                `json:"model"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

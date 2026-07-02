@@ -20,8 +20,9 @@ func main() {
 	// 创建控制台日志器
 	logger := log.NewConsole()
 
-	// 初始化配置管理器；空字符串表示使用默认配置路径
-	configMgr, err := config.NewManager("")
+	// 初始化配置管理器；优先使用 CONFIG_PATH 环境变量指定的配置文件
+	configPath := os.Getenv("CONFIG_PATH")
+	configMgr, err := config.NewManager(configPath)
 	if err != nil {
 		logger.Error("加载配置失败: %v", err)
 		os.Exit(1)
