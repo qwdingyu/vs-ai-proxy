@@ -9,6 +9,7 @@ APP_NAME     := vs-ai-proxy
 MAIN_PATH    := ./cmd/server
 OUTPUT_DIR   := ./dist
 VERSION      := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION_TAG  := $(patsubst v%,%,$(VERSION))
 
 # 构建参数
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -40,7 +41,7 @@ build-all:
 		GOOS=$$(echo $$plat | cut -d/ -f1); \
 		GOARCH=$$(echo $$plat | cut -d/ -f2); \
 		EXT=$$( [ "$$GOOS" = "windows" ] && echo ".exe" || echo "" ); \
-		NAME="$(APP_NAME)-v$(VERSION)-$${GOOS}-$${GOARCH}$${EXT}"; \
+		NAME="$(APP_NAME)-v$(VERSION_TAG)-$${GOOS}-$${GOARCH}$${EXT}"; \
 		echo "  → $$GOOS/$$GOARCH ..."; \
 		GOOS=$$GOOS GOARCH=$$GOARCH go build -ldflags="$(LDFLAGS)" -o "$(OUTPUT_DIR)/$$NAME" $(MAIN_PATH); \
 	done
@@ -54,8 +55,8 @@ release: build-all
 		GOOS=$$(echo $$plat | cut -d/ -f1); \
 		GOARCH=$$(echo $$plat | cut -d/ -f2); \
 		EXT=$$( [ "$$GOOS" = "windows" ] && echo ".exe" || echo "" ); \
-		DIR="$(APP_NAME)-v$(VERSION)-$${GOOS}-$${GOARCH}"; \
-		BIN="$(APP_NAME)-v$(VERSION)-$${GOOS}-$${GOARCH}$${EXT}"; \
+		DIR="$(APP_NAME)-v$(VERSION_TAG)-$${GOOS}-$${GOARCH}"; \
+		BIN="$(APP_NAME)-v$(VERSION_TAG)-$${GOOS}-$${GOARCH}$${EXT}"; \
 		mkdir -p "$(OUTPUT_DIR)/$$DIR"; \
 		cp "$(OUTPUT_DIR)/$$BIN" "$(OUTPUT_DIR)/$$DIR/$(APP_NAME)$${EXT}"; \
 		cp README.md LICENSE "$(OUTPUT_DIR)/$$DIR/" 2>/dev/null || true; \
