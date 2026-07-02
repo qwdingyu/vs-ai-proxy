@@ -1,0 +1,13 @@
+.git
+.omx
+.bin
+.qwen
+docs
+tests
+dist
+tmp
+*.log
+*.md
+vs-ai-proxy
+Dockerfile
+docker-compose.yml

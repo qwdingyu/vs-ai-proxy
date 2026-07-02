@@ -69,6 +69,9 @@ func shouldDropAssistantPlaceholder(msg provider.Message) bool {
 	if strings.TrimSpace(msg.Reasoning) != "" {
 		return false
 	}
+	if len(msg.ContentRaw) > 0 {
+		return false
+	}
 	return strings.TrimSpace(msg.Content) == ""
 }
 
@@ -148,6 +151,54 @@ func (s *Server) applyGlobalDefaults(req *provider.ChatRequest) {
 	}
 }
 
+func (s *Server) applyProfileDefaults(
+	req *provider.ChatRequest,
+	profile provider.ModelProfile,
+	prov provider.Provider,
+) {
+	if req == nil {
+		return
+	}
+	caps := provider.GetCapabilities(prov.Name())
+	isNativeReasoner := caps.SupportsReasoningEffort && strings.TrimSpace(profile.ReasoningEffort) != ""
+
+	if profile.OverrideClientParams {
+		if profile.Temperature != nil {
+			req.Temperature = profile.Temperature
+		}
+		if profile.TopP != nil && !isNativeReasoner {
+			req.TopP = profile.TopP
+		}
+		if profile.MaxTokens != nil {
+			req.MaxTokens = profile.MaxTokens
+		}
+		if strings.TrimSpace(profile.ReasoningEffort) != "" && caps.SupportsReasoningEffort {
+			req.ReasoningEffort = profile.ReasoningEffort
+		}
+	} else {
+		if req.Temperature == nil && profile.Temperature != nil {
+			req.Temperature = profile.Temperature
+		}
+		if req.TopP == nil && profile.TopP != nil && !isNativeReasoner {
+			req.TopP = profile.TopP
+		}
+		if req.MaxTokens == nil && profile.MaxTokens != nil {
+			req.MaxTokens = profile.MaxTokens
+		}
+		if strings.TrimSpace(req.ReasoningEffort) == "" && strings.TrimSpace(profile.ReasoningEffort) != "" && caps.SupportsReasoningEffort {
+			req.ReasoningEffort = profile.ReasoningEffort
+		}
+	}
+	if profile.ContextLength != nil && *profile.ContextLength > 0 {
+		if req.MaxTokens == nil || *req.MaxTokens > *profile.ContextLength {
+			req.MaxTokens = intPtr(*profile.ContextLength)
+		}
+	}
+	if !caps.SupportsReasoningEffort {
+		req.ReasoningEffort = ""
+	}
+}
+
 func cloneChatRequest(req *provider.ChatRequest) *provider.ChatRequest {
 	if req == nil {
 		return nil
@@ -172,11 +223,22 @@ func cloneChatRequest(req *provider.ChatRequest) *provider.ChatRequest {
 	}
 	out.Messages = append([]provider.Message(nil), req.Messages...)
 	for i := range out.Messages {
+		out.Messages[i].ContentRaw = append(json.RawMessage(nil), req.Messages[i].ContentRaw...)
 		out.Messages[i].ToolCalls = append([]provider.ToolCall(nil), req.Messages[i].ToolCalls...)
+		for j := range out.Messages[i].ToolCalls {
+			out.Messages[i].ToolCalls[j].Extra = cloneRawMessages(req.Messages[i].ToolCalls[j].Extra)
+			out.Messages[i].ToolCalls[j].Function.Extra = cloneRawMessages(req.Messages[i].ToolCalls[j].Function.Extra)
+		}
+		out.Messages[i].Extra = cloneRawMessages(req.Messages[i].Extra)
 	}
 	out.Tools = append([]provider.Tool(nil), req.Tools...)
+	for i := range out.Tools {
+		out.Tools[i].Extra = cloneRawMessages(req.Tools[i].Extra)
+		out.Tools[i].Function.Extra = cloneRawMessages(req.Tools[i].Function.Extra)
+	}
 	out.Stop = append([]string(nil), req.Stop...)
 	out.Extra = cloneRawMessages(req.Extra)
+	out.OptionsExtra = cloneRawMessages(req.OptionsExtra)
 	return &out
 }
 

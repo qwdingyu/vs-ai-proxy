@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -45,6 +46,7 @@ func KnownProviders() []string {
 	for name := range providerCapabilities {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
@@ -65,6 +67,16 @@ func MustGetCapabilities(name string) ProviderCapabilities {
 }
 
 var providerCapabilities = map[string]ProviderCapabilities{
+	"useai": {
+		Category:                ProviderCategoryMultiModel,
+		ApiFormat:               ApiFormatOpenAi,
+		SupportsReasoningEffort: false,
+		SupportsTopK:            false,
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://api.eforge.xyz/v1",
+		EnvPrefix:               "USEAI",
+	},
 	"deepseek": {
 		Category:                ProviderCategoryDirect,
 		ApiFormat:               ApiFormatOpenAi,
@@ -177,8 +189,13 @@ var providerCapabilities = map[string]ProviderCapabilities{
 	},
 }
 
-// ResolveApiFormat 根据 provider 实例类型判断上游接口格式：OllamaProvider 返回 Ollama 格式，其余回退为 OpenAI 兼容格式。
+// ResolveApiFormat 根据 provider 能力判断上游接口格式，类型判断只作兜底。
 func ResolveApiFormat(prov Provider) ApiFormat {
+	if prov != nil {
+		if IsKnownProvider(prov.Name()) {
+			return GetCapabilities(prov.Name()).ApiFormat
+		}
+	}
 	switch prov.(type) {
 	case *OllamaProvider:
 		return ApiFormatOllama

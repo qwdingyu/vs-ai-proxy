@@ -1,0 +1,85 @@
+{
+  "provider": "openai",
+  "models": [
+    {
+      "match": "gpt-5",
+      "priority": 1,
+      "enabled": true,
+      "execution": {
+        "context_length": 400000,
+        "max_output_tokens": 128000,
+        "supports_tools": true,
+        "supports_vision": true,
+        "family": "openai",
+        "temperature": 0.2,
+        "max_tokens": 8192,
+        "reasoning_effort": "high",
+        "timeout_seconds": 120
+      }
+    },
+    {
+      "match": "gpt-5-mini",
+      "priority": 2,
+      "enabled": true,
+      "execution": {
+        "context_length": 400000,
+        "max_output_tokens": 128000,
+        "supports_tools": true,
+        "supports_vision": true,
+        "family": "openai",
+        "temperature": 0.25,
+        "max_tokens": 4096,
+        "reasoning_effort": "medium",
+        "timeout_seconds": 60
+      }
+    },
+    {
+      "match": "gpt-4.1",
+      "priority": 3,
+      "enabled": true,
+      "execution": {
+        "context_length": 1048576,
+        "max_output_tokens": 32768,
+        "supports_tools": true,
+        "supports_vision": true,
+        "family": "openai",
+        "temperature": 0.25,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        "timeout_seconds": 60
+      }
+    },
+    {
+      "match": "gpt-4o",
+      "priority": 4,
+      "enabled": true,
+      "execution": {
+        "context_length": 128000,
+        "max_output_tokens": 8192,
+        "supports_tools": true,
+        "supports_vision": true,
+        "family": "openai",
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        "timeout_seconds": 60
+      }
+    },
+    {
+      "match": "gpt-oss-120b",
+      "priority": 5,
+      "enabled": true,
+      "execution": {
+        "context_length": 131072,
+        "max_output_tokens": 65536,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "openai",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 8192,
+        "timeout_seconds": 90
+      }
+    }
+  ]
+}

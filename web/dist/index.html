@@ -39,11 +39,18 @@
     .danger { background: #da3633; border-color: #da3633; color: white; }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; }
     .modal { background: #161b22; border: 1px solid #30363d; padding: 16px; border-radius: 8px; width: 360px; display: flex; flex-direction: column; gap: 10px; }
+    .modal.wide { width: min(980px, calc(100vw - 32px)); }
     label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #8b949e; }
-    input, select { background: #0f1115; color: #e6edf3; border: 1px solid #30363d; padding: 8px; border-radius: 6px; }
+    input, select, textarea { background: #0f1115; color: #e6edf3; border: 1px solid #30363d; padding: 8px; border-radius: 6px; }
+    textarea { min-height: 120px; resize: vertical; font: inherit; }
     .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
     .hint { color: var(--muted); }
     .hidden { display: none; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .stack { display: flex; flex-direction: column; gap: 12px; }
+    .pre { white-space: pre-wrap; word-break: break-word; background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 280px; overflow: auto; }
+    .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #0f1115; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -51,8 +58,11 @@
     <header class="header">
       <h1>VS AI Proxy</h1>
       <nav class="nav">
+        <a class="nav-item" href="#/config">配置</a>
         <a class="nav-item" href="#/providers">提供商</a>
         <a class="nav-item" href="#/models">模型</a>
+        <a class="nav-item" href="#/test">测试</a>
+        <a class="nav-item" href="#/monitor">监控</a>
         <a class="nav-item" href="#/logs">日志</a>
       </nav>
     </header>
@@ -94,6 +104,33 @@
             <tr><td colspan="5" class="empty">暂无日志</td></tr>
           </tbody>
         </table>
+      </section>
+
+      <section id="page-config" class="panel hidden">
+        <h2>系统配置</h2>
+        <div class="grid-2">
+          <div class="stack">
+            <label>代理端口 <input type="number" id="cfgPort" /></label>
+            <label>默认模型 <input id="cfgDefaultModel" /></label>
+            <div class="hint">端口变更保存后仍需重启进程生效；其它配置会立即热更新代理路由。</div>
+            <div class="hint">请求日志持久化路径由 `CONFIG_PATH` / `STORE_PATH` 环境变量控制，不在此页保存。</div>
+            <div class="actions">
+              <button class="btn" id="btnReloadConfig">重新加载</button>
+              <button class="btn primary" id="btnSaveConfig">保存配置</button>
+            </div>
+          </div>
+          <div class="stack">
+            <div class="panel" style="margin:0;">
+              <div class="label">当前运行状态</div>
+              <div class="value" id="cfgHealth">-</div>
+              <div class="hint" id="cfgSummary">-</div>
+            </div>
+            <div class="panel" style="margin:0;">
+              <div class="label">说明</div>
+              <div class="hint">这里主要编辑基础运行参数。provider 和 model 的精细配置分别在“提供商”和“模型”页完成。</div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section id="page-providers" class="panel hidden">
@@ -173,6 +210,64 @@
         </div>
       </section>
 
+      <section id="page-test" class="panel hidden">
+        <h2>测试台</h2>
+        <div class="grid-2">
+          <div class="stack">
+            <label>提供商 <select id="testProvider"></select></label>
+            <label>模型 <input id="testModel" placeholder="留空则使用默认模型" /></label>
+            <label>测试消息 <textarea id="testMessage" placeholder="输入一段测试对话"></textarea></label>
+            <div class="actions">
+              <button class="btn" id="btnTestConnection">测试连接</button>
+              <button class="btn primary" id="btnTestChat">测试对话</button>
+            </div>
+          </div>
+          <div class="stack">
+            <div class="panel" style="margin:0;">
+              <div class="label">测试结果</div>
+              <div class="status-pill" id="testStatus">等待测试</div>
+              <div class="pre" id="testOutput">这里会显示连接测试或 chat 返回内容。</div>
+            </div>
+            <div class="panel" style="margin:0;">
+              <div class="label">提示</div>
+              <div class="hint">连接测试走 `/api/test/connection`，聊天测试走 `/api/test/chat`。这里是 UI 级闭环验证，不替代代理真实路由测试。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-monitor" class="panel hidden">
+        <h2>监控</h2>
+        <div class="grid-3">
+          <div class="stat">
+            <div class="label">健康状态</div>
+            <div class="value" id="healthStatus">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">provider 数</div>
+            <div class="value" id="healthProviders">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">可见模型数</div>
+            <div class="value" id="healthModels">-</div>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top: 12px;">
+          <div class="stack">
+            <div class="panel" style="margin:0;">
+              <div class="label">Health</div>
+              <div class="pre" id="healthOutput">-</div>
+            </div>
+          </div>
+          <div class="stack">
+            <div class="panel" style="margin:0;">
+              <div class="label">Metrics</div>
+              <div class="pre" id="metricsOutput">-</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="page-logs" class="panel hidden">
         <h2>日志</h2>
         <div class="toolbar">
@@ -223,17 +318,31 @@
       return data;
     };
 
+    const fetchText = async (path, opts = {}) => {
+      const res = await fetch(API_BASE + path, opts);
+      const text = await res.text();
+      if (!res.ok) throw new Error(text || '请求失败');
+      return text;
+    };
+
+    let currentConfig = null;
+    let currentProviders = [];
+    let currentModels = [];
+
     // 页面切换：根据前端 hash 路由显示对应面板
     const showPage = (page) => {
-      ['dashboard', 'providers', 'models', 'logs'].forEach((name) => {
+      ['dashboard', 'config', 'providers', 'models', 'test', 'monitor', 'logs'].forEach((name) => {
         const el = $('page-' + name);
         if (!el) return;
         if (name === page) el.classList.remove('hidden');
         else el.classList.add('hidden');
       });
       if (page === 'dashboard') loadDashboard();
+      if (page === 'config') loadConfig();
       if (page === 'providers') loadProviders();
       if (page === 'models') loadModels();
+      if (page === 'test') loadTestLab();
+      if (page === 'monitor') loadMonitor();
       if (page === 'logs') loadLogs();
     };
 
@@ -268,11 +377,25 @@
       }
     };
 
+    const loadConfig = async () => {
+      try {
+        const cfg = await fetchJSON('/config');
+        currentConfig = cfg;
+        $('cfgPort').value = cfg.port ?? 11434;
+        $('cfgDefaultModel').value = cfg.default_model || '';
+        $('cfgHealth').textContent = cfg.port ? '已加载' : '-';
+        $('cfgSummary').textContent = `providers: ${(cfg.providers || []).length}, models: ${(cfg.models || []).length}`;
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
     // 加载提供商列表
     const loadProviders = async () => {
       try {
         const res = await fetchJSON('/providers');
         const items = res.providers || [];
+        currentProviders = items;
         const tbody = $('providerTable');
         if (!items.length) {
           tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无提供商</td></tr>';
@@ -301,6 +424,7 @@
       try {
         const res = await fetchJSON('/models');
         const items = res.models || [];
+        currentModels = items;
         const tbody = $('modelTable');
         if (!items.length) {
           tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无模型</td></tr>';
@@ -319,6 +443,61 @@
             </td>
           </tr>
         `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    const loadTestLab = async () => {
+      try {
+        const [providersRes, configRes, modelsRes] = await Promise.all([
+          fetchJSON('/providers'),
+          fetchJSON('/config'),
+          fetchJSON('/models')
+        ]);
+        currentProviders = providersRes.providers || [];
+        currentModels = modelsRes.models || [];
+        currentConfig = configRes;
+
+        const select = $('testProvider');
+        if (!currentProviders.length) {
+          select.innerHTML = '<option value="">暂无提供商</option>';
+        } else {
+          select.innerHTML = currentProviders.map((p) => `<option value="${p.name}">${p.name} (${p.type})</option>`).join('');
+        }
+        $('testModel').value = configRes.default_model || (currentModels[0] ? currentModels[0].name : '');
+        if (!$('testMessage').value) {
+          $('testMessage').value = 'Hello, world.';
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    const setTestResult = (status, output) => {
+      $('testStatus').textContent = status;
+      $('testOutput').textContent = output;
+    };
+
+    const loadMonitor = async () => {
+      try {
+        const [health, metrics] = await Promise.all([
+          fetch('/health').then(async (res) => {
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || '请求失败');
+            return data;
+          }),
+          fetch('/metrics').then(async (res) => {
+            const text = await res.text();
+            if (!res.ok) throw new Error(text || '请求失败');
+            return text;
+          })
+        ]);
+        $('healthStatus').textContent = health.status || '-';
+        $('healthProviders').textContent = (health.providers || []).length;
+        $('healthModels').textContent = (health.available_models || []).length;
+        $('healthOutput').textContent = JSON.stringify(health, null, 2);
+        $('metricsOutput').textContent = metrics;
       } catch (e) {
         console.error(e);
       }
@@ -372,6 +551,20 @@
       loadLogs();
     });
 
+    $('btnReloadConfig').addEventListener('click', loadConfig);
+    $('btnSaveConfig').addEventListener('click', async () => {
+      const cfg = currentConfig || await fetchJSON('/config');
+      const payload = {
+        ...cfg,
+        port: Number($('cfgPort').value || 11434),
+        default_model: $('cfgDefaultModel').value.trim(),
+      };
+      await fetchJSON('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      currentConfig = payload;
+      setTestResult('配置已保存', '配置已保存并已热更新代理路由。端口变更仍需重启进程。');
+      loadConfig();
+    });
+
     // 提供商弹窗状态
     let editingProviderName = null;
 
@@ -409,6 +602,47 @@
       $('providerModal').classList.add('hidden');
       editingProviderName = null;
       loadProviders();
+    });
+
+    $('btnTestConnection').addEventListener('click', async () => {
+      const provider = currentProviders.find((p) => p.name === $('testProvider').value);
+      if (!provider) {
+        setTestResult('无可用提供商', '请先在提供商页新增并启用至少一个 provider。');
+        return;
+      }
+      try {
+        const res = await fetchJSON('/test/connection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider }) });
+        setTestResult(res.success ? '连接成功' : '连接失败', JSON.stringify(res, null, 2));
+      } catch (e) {
+        setTestResult('连接测试失败', String(e.message || e));
+      }
+    });
+
+    $('btnTestChat').addEventListener('click', async () => {
+      const provider = currentProviders.find((p) => p.name === $('testProvider').value);
+      if (!provider) {
+        setTestResult('无可用提供商', '请先在提供商页新增并启用至少一个 provider。');
+        return;
+      }
+      const message = $('testMessage').value.trim();
+      if (!message) {
+        setTestResult('消息为空', '请输入测试消息。');
+        return;
+      }
+      try {
+        const res = await fetchJSON('/test/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider,
+            message,
+            model: $('testModel').value.trim()
+          })
+        });
+        setTestResult(res.success ? '对话成功' : '对话失败', JSON.stringify(res, null, 2));
+      } catch (e) {
+        setTestResult('对话测试失败', String(e.message || e));
+      }
     });
 
     // 打开新增模型弹窗

@@ -5,6 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+const (
+	UseAIProviderName     = "UseAI"
+	UseAIProviderBaseURL  = "https://api.eforge.xyz/v1"
+	UseAIProviderType     = "openai"
+	UseAIProviderPriority = 0
 )
 
 // ProviderConfig 表示一个 AI 提供商的配置。
@@ -32,7 +41,7 @@ type ModelConfig struct {
 	MaxTokens            *int     `json:"max_tokens"`             // 默认 max_tokens，请求未显式设置时作为 fallback
 	ReasoningEffort      string   `json:"reasoning_effort"`       // 推理强度，只有 provider 支持时才会透传给上游
 	OverrideClientParams bool     `json:"override_client_params"` // 为 true 时，模型默认参数会覆盖客户端同名参数
-	TimeoutSeconds       *int     `json:"timeout_seconds"`        // 超时秒数，仅 UI 展示，当前未单独使用
+	TimeoutSeconds       *int     `json:"timeout_seconds"`        // 单模型上游请求超时秒数
 	Enabled              bool     `json:"enabled"`                // 是否启用，禁用后仍会展示，但不会主动参与路由
 }
 
@@ -46,10 +55,11 @@ type AppConfig struct {
 
 // DefaultConfig 返回默认配置
 func DefaultConfig() *AppConfig {
-	return &AppConfig{
+	cfg := &AppConfig{
 		Port:         11434,
 		DefaultModel: "deepseek-v4-pro",
 		Providers: []ProviderConfig{
+			DefaultUseAIProvider(),
 			{
 				Name:     "deepseek",
 				BaseURL:  "https://api.deepseek.com",
@@ -84,6 +94,63 @@ func DefaultConfig() *AppConfig {
 			},
 		},
 	}
+	EnsureBuiltInProviders(cfg)
+	return cfg
+}
+
+// DefaultUseAIProvider returns the built-in first-party OpenAI-compatible provider.
+func DefaultUseAIProvider() ProviderConfig {
+	return ProviderConfig{
+		Name:     UseAIProviderName,
+		BaseURL:  UseAIProviderBaseURL,
+		Type:     UseAIProviderType,
+		Enabled:  true,
+		Priority: UseAIProviderPriority,
+	}
+}
+
+// EnsureBuiltInProviders keeps first-party providers available even for older config files.
+func EnsureBuiltInProviders(cfg *AppConfig) {
+	if cfg == nil {
+		return
+	}
+
+	useAI := DefaultUseAIProvider()
+	if apiKey := strings.TrimSpace(os.Getenv("PROVIDER_USEAI_API_KEY")); apiKey != "" {
+		useAI.APIKey = apiKey
+	}
+	if baseURL := strings.TrimSpace(os.Getenv("PROVIDER_USEAI_BASE_URL")); baseURL != "" {
+		useAI.BaseURL = baseURL
+	}
+
+	out := make([]ProviderConfig, 0, len(cfg.Providers)+1)
+	for _, p := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(p.Name), UseAIProviderName) {
+			if strings.TrimSpace(p.APIKey) != "" {
+				useAI.APIKey = p.APIKey
+			}
+			continue
+		}
+		out = append(out, p)
+	}
+	cfg.Providers = append([]ProviderConfig{useAI}, dedupeNonUseAIProviders(out)...)
+}
+
+func dedupeNonUseAIProviders(providers []ProviderConfig) []ProviderConfig {
+	out := make([]ProviderConfig, 0, len(providers))
+	seen := map[string]struct{}{}
+	for _, p := range providers {
+		key := strings.ToLower(strings.TrimSpace(p.Name))
+		if key == "" || key == strings.ToLower(UseAIProviderName) {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, p)
+	}
+	return out
 }
 
 func intPtr(i int) *int {
@@ -92,6 +159,19 @@ func intPtr(i int) *int {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+func applyEnvOverrides(cfg *AppConfig) {
+	if cfg == nil {
+		return
+	}
+	port := strings.TrimSpace(os.Getenv("PROXY_PORT"))
+	if port == "" {
+		return
+	}
+	if v, err := strconv.Atoi(port); err == nil && v > 0 {
+		cfg.Port = v
+	}
 }
 
 // Manager 管理应用配置的加载和保存
@@ -134,6 +214,8 @@ func NewManager(configPath string) (*Manager, error) {
 	}
 
 	m.config = cfg
+	EnsureBuiltInProviders(m.config)
+	applyEnvOverrides(m.config)
 	return m, nil
 }
 
@@ -142,8 +224,14 @@ func (m *Manager) Get() *AppConfig {
 	return m.config
 }
 
+// ConfigPath 返回当前配置文件路径。
+func (m *Manager) ConfigPath() string {
+	return m.configPath
+}
+
 // Save 保存配置
 func (m *Manager) Save(cfg *AppConfig) error {
+	EnsureBuiltInProviders(cfg)
 	m.config = cfg
 	return m.save(cfg)
 }

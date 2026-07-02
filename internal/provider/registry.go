@@ -31,6 +31,9 @@ type Registry struct {
 	modelToProvider       map[string]*ProviderEntry
 	modelToUpstream       map[string]string
 	upstreamToProviders   map[string][]*ProviderEntry
+	catalogModelProvider  map[string]*ProviderEntry
+	catalogModelUpstream  map[string]string
+	catalogUpstream       map[string][]*ProviderEntry
 	defaultModel          string
 	modelsRefreshInterval time.Duration
 	modelsLastRefresh     time.Time
@@ -47,6 +50,9 @@ func NewRegistry(defaultModel string, refreshInterval time.Duration) *Registry {
 		modelToProvider:       make(map[string]*ProviderEntry),
 		modelToUpstream:       make(map[string]string),
 		upstreamToProviders:   make(map[string][]*ProviderEntry),
+		catalogModelProvider:  make(map[string]*ProviderEntry),
+		catalogModelUpstream:  make(map[string]string),
+		catalogUpstream:       make(map[string][]*ProviderEntry),
 		defaultModel:          defaultModel,
 		modelsRefreshInterval: refreshInterval,
 	}
@@ -79,8 +85,19 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	if candidates := r.resolveProviderHintCandidatesLocked(model); len(candidates) > 0 {
+		return candidates
+	}
+
 	resolved := r.resolveModelLocked(model)
 	return r.resolveCandidatesLocked(resolved)
+}
+
+// ResolveModel 返回请求模型经 tag/provider hint/catalog 映射后的代理内部模型名。
+func (r *Registry) ResolveModel(model string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.resolveModelLocked(model)
 }
 
 func (r *Registry) resolveModelLocked(model string) string {
@@ -94,7 +111,69 @@ func (r *Registry) resolveModelLocked(model string) string {
 	if _, ok := r.upstreamToProviders[clean]; ok {
 		return clean
 	}
+	if resolved := r.resolveProviderHintModelLocked(clean); resolved != "" {
+		return resolved
+	}
 	return clean
+}
+
+func (r *Registry) resolveProviderHintCandidatesLocked(model string) []Candidate {
+	clean := stripTagSuffix(strings.TrimSpace(model))
+	entry, resolved, ok := r.resolveProviderHintLocked(clean)
+	if !ok || entry == nil || !entry.Provider.IsEnabled() {
+		return nil
+	}
+
+	upstream := r.modelToUpstream[resolved]
+	if upstream == "" {
+		upstream = resolved
+	}
+	return []Candidate{{
+		Provider:   entry,
+		UpstreamID: upstream,
+		ModelID:    upstream,
+		Priority:   entry.Priority,
+	}}
+}
+
+func (r *Registry) resolveProviderHintModelLocked(clean string) string {
+	_, resolved, ok := r.resolveProviderHintLocked(clean)
+	if !ok {
+		return ""
+	}
+	return resolved
+}
+
+func (r *Registry) resolveProviderHintLocked(clean string) (*ProviderEntry, string, bool) {
+	slash := strings.Index(clean, "/")
+	if slash <= 0 || slash >= len(clean)-1 {
+		return nil, "", false
+	}
+
+	providerHint := clean[:slash]
+	entry := r.entryByNameLocked(providerHint)
+	if entry == nil {
+		return nil, "", false
+	}
+
+	if owner := r.modelToProvider[clean]; owner != nil && sameProvider(owner, entry) {
+		return entry, clean, true
+	}
+
+	bare := clean[slash+1:]
+	if owner := r.modelToProvider[bare]; owner != nil && sameProvider(owner, entry) {
+		return entry, bare, true
+	}
+
+	for model, owner := range r.modelToProvider {
+		if owner == nil || !sameProvider(owner, entry) {
+			continue
+		}
+		if strings.EqualFold(modelSuffix(model), bare) {
+			return entry, model, true
+		}
+	}
+	return nil, "", false
 }
 
 func (r *Registry) resolveCandidatesLocked(model string) []Candidate {
@@ -159,9 +238,10 @@ func (r *Registry) UpdateModelMappings(modelToProvider map[string]*ProviderEntry
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.modelToProvider = modelToProvider
-	r.modelToUpstream = modelToUpstream
-	r.rebuildUpstreamProvidersLocked()
+	r.catalogModelProvider = cloneProviderMap(modelToProvider)
+	r.catalogModelUpstream = cloneStringMap(modelToUpstream)
+	r.catalogUpstream = nil
+	r.rebuildModelMappingsLocked()
 	r.modelsLastRefresh = time.Now()
 }
 
@@ -170,9 +250,10 @@ func (r *Registry) UpdateModelMappingsWithUpstream(modelToProvider map[string]*P
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.modelToProvider = modelToProvider
-	r.modelToUpstream = modelToUpstream
-	r.upstreamToProviders = upstreamToProviders
+	r.catalogModelProvider = cloneProviderMap(modelToProvider)
+	r.catalogModelUpstream = cloneStringMap(modelToUpstream)
+	r.catalogUpstream = cloneUpstreamMap(upstreamToProviders)
+	r.rebuildModelMappingsLocked()
 	r.modelsLastRefresh = time.Now()
 }
 
@@ -217,6 +298,27 @@ func (r *Registry) AllModels() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ProviderNames 返回当前已注册且启用的 provider 名称。
+func (r *Registry) ProviderNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]string, 0, len(r.entries))
+	for _, entry := range r.orderedEntriesLocked() {
+		if entry.Provider != nil && entry.Provider.IsEnabled() {
+			out = append(out, entry.Provider.Name())
+		}
+	}
+	return out
+}
+
+// ModelsLastRefresh 返回模型映射最近一次刷新时间。
+func (r *Registry) ModelsLastRefresh() time.Time {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.modelsLastRefresh
 }
 
 // DefaultModel 返回默认模型
@@ -315,6 +417,31 @@ func (r *Registry) rebuildModelMappingsLocked() {
 	r.modelToProvider = modelToProvider
 	r.modelToUpstream = modelToUpstream
 	r.upstreamToProviders = upstreamToProviders
+	r.mergeCatalogMappingsLocked()
+}
+
+func (r *Registry) mergeCatalogMappingsLocked() {
+	for model, entry := range r.catalogModelProvider {
+		if strings.TrimSpace(model) == "" || entry == nil {
+			continue
+		}
+		if _, exists := r.modelToProvider[model]; !exists {
+			r.modelToProvider[model] = entry
+			r.modelToUpstream[model] = r.catalogModelUpstream[model]
+		}
+	}
+
+	for upstream, providers := range r.catalogUpstream {
+		if strings.TrimSpace(upstream) == "" {
+			continue
+		}
+		for _, entry := range providers {
+			if entry == nil {
+				continue
+			}
+			r.upstreamToProviders[upstream] = appendUniqueProvider(r.upstreamToProviders[upstream], entry)
+		}
+	}
 }
 
 func (r *Registry) rebuildUpstreamProvidersLocked() {
@@ -368,6 +495,34 @@ func (r *Registry) providerOrderLocked(entry *ProviderEntry) int {
 	return len(r.order)
 }
 
+func (r *Registry) entryByNameLocked(name string) *ProviderEntry {
+	for key, entry := range r.entries {
+		if strings.EqualFold(key, name) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func sameProvider(a, b *ProviderEntry) bool {
+	if a == nil || b == nil || a.Provider == nil || b.Provider == nil {
+		return false
+	}
+	return strings.EqualFold(a.Provider.Name(), b.Provider.Name())
+}
+
+func modelSuffix(model string) string {
+	at := strings.Index(model, "@")
+	if at > 0 {
+		model = model[:at]
+	}
+	slash := strings.LastIndex(model, "/")
+	if slash > 0 && slash < len(model)-1 {
+		return model[slash+1:]
+	}
+	return model
+}
+
 func appendUniqueProvider(entries []*ProviderEntry, entry *ProviderEntry) []*ProviderEntry {
 	for _, existing := range entries {
 		if existing.Provider.Name() == entry.Provider.Name() {
@@ -375,6 +530,30 @@ func appendUniqueProvider(entries []*ProviderEntry, entry *ProviderEntry) []*Pro
 		}
 	}
 	return append(entries, entry)
+}
+
+func cloneProviderMap(src map[string]*ProviderEntry) map[string]*ProviderEntry {
+	out := make(map[string]*ProviderEntry, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneUpstreamMap(src map[string][]*ProviderEntry) map[string][]*ProviderEntry {
+	out := make(map[string][]*ProviderEntry, len(src))
+	for key, value := range src {
+		out[key] = append([]*ProviderEntry(nil), value...)
+	}
+	return out
 }
 
 func normalizeModels(models []string) []string {

@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -25,41 +27,48 @@ type ChatRequest struct {
 	Tools           []Tool                     `json:"tools,omitempty"`
 	Stop            []string                   `json:"stop,omitempty"`
 	Extra           map[string]json.RawMessage `json:"-"`
+	OptionsExtra    map[string]json.RawMessage `json:"-"`
 }
 
 // Message 消息
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Reasoning  string     `json:"reasoning_content,omitempty"`
+	Role       string                     `json:"role"`
+	Content    string                     `json:"content"`
+	ContentRaw json.RawMessage            `json:"-"`
+	ToolCalls  []ToolCall                 `json:"tool_calls,omitempty"`
+	ToolCallID string                     `json:"tool_call_id,omitempty"`
+	Reasoning  string                     `json:"reasoning_content,omitempty"`
+	Extra      map[string]json.RawMessage `json:"-"`
 }
 
 // ToolCall 工具调用
 type ToolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
-	Function FunctionCall `json:"function"`
+	ID       string                     `json:"id"`
+	Type     string                     `json:"type"`
+	Function FunctionCall               `json:"function"`
+	Extra    map[string]json.RawMessage `json:"-"`
 }
 
 // FunctionCall 函数调用
 type FunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Name      string                     `json:"name"`
+	Arguments string                     `json:"arguments"`
+	Extra     map[string]json.RawMessage `json:"-"`
 }
 
 // Tool 工具定义
 type Tool struct {
-	Type     string   `json:"type"`
-	Function ToolFunc `json:"function"`
+	Type     string                     `json:"type"`
+	Function ToolFunc                   `json:"function"`
+	Extra    map[string]json.RawMessage `json:"-"`
 }
 
 // ToolFunc 工具函数
 type ToolFunc struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Parameters  any    `json:"parameters"`
+	Name        string                     `json:"name"`
+	Description string                     `json:"description"`
+	Parameters  any                        `json:"parameters"`
+	Extra       map[string]json.RawMessage `json:"-"`
 }
 
 // ChatResponse 聊天响应
@@ -142,7 +151,7 @@ func NewOpenAIProvider(name, apiKey, baseURL string, enabled bool, timeout time.
 		APIKey:  apiKey,
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Enabled: enabled,
-		Client:  &http.Client{Timeout: timeout},
+		Client:  newProviderHTTPClient(timeout),
 		Timeout: timeout,
 	}
 }
@@ -156,6 +165,19 @@ func (p *OpenAIProvider) IsEnabled() bool {
 }
 
 func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+	respBody, err := p.ChatRaw(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	var chatResp ChatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	return &chatResp, nil
+}
+
+func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte, error) {
 	req.Stream = false
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -167,8 +189,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+	p.applyOpenAIRequestHeaders(httpReq, "application/json")
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {
@@ -185,12 +206,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		return nil, fmt.Errorf("API 错误 %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var chatResp ChatResponse
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
-	}
-
-	return &chatResp, nil
+	return respBody, nil
 }
 
 func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.ReadCloser, error) {
@@ -205,9 +221,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
-	httpReq.Header.Set("Accept", "text/event-stream")
+	p.applyOpenAIRequestHeaders(httpReq, "text/event-stream")
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {
@@ -227,7 +241,7 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+	p.applyOpenAIRequestHeaders(httpReq, "application/json")
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {
@@ -260,6 +274,57 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 		}
 	}
 	return models, nil
+}
+
+func newProviderHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			MaxIdleConns:          256,
+			MaxIdleConnsPerHost:   256,
+			IdleConnTimeout:       120 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     false,
+			DisableCompression:    true,
+		},
+	}
+}
+
+func (p *OpenAIProvider) applyOpenAIRequestHeaders(req *http.Request, accept string) {
+	if strings.TrimSpace(p.APIKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	if req.Body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if strings.EqualFold(p.NameStr, "openrouter") {
+		applyOpenRouterHeaders(req)
+	}
+}
+
+func applyOpenRouterHeaders(req *http.Request) {
+	if referer := firstEnv("PROVIDER_OPENROUTER_REFERER", "OPENROUTER_HTTP_REFERER"); referer != "" {
+		req.Header.Set("HTTP-Referer", referer)
+	}
+	if title := firstEnv("PROVIDER_OPENROUTER_TITLE", "OPENROUTER_X_TITLE"); title != "" {
+		req.Header.Set("X-Title", title)
+	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (p *OpenAIProvider) chatURL() string {
@@ -312,7 +377,7 @@ func NewOllamaProvider(name, baseURL string, enabled bool, timeout time.Duration
 		NameStr: name,
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Enabled: enabled,
-		Client:  &http.Client{Timeout: timeout},
+		Client:  newProviderHTTPClient(timeout),
 	}
 }
 
@@ -325,31 +390,9 @@ func (p *OllamaProvider) IsEnabled() bool {
 }
 
 func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	ollamaReq := p.buildChatRequest(req, false)
-	body, err := json.Marshal(ollamaReq)
+	respBody, err := p.ChatRaw(ctx, req)
 	if err != nil {
 		return nil, err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.Client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Ollama 错误 %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	// 转换为 OpenAI 格式
@@ -397,6 +440,36 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	return chatResp, nil
 }
 
+func (p *OllamaProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte, error) {
+	ollamaReq := p.buildChatRequest(req, false)
+	body, err := json.Marshal(ollamaReq)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.Client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Ollama 错误 %d: %s", resp.StatusCode, string(respBody))
+	}
+	return respBody, nil
+}
+
 func (p *OllamaProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.ReadCloser, error) {
 	req.Stream = true
 	body, err := json.Marshal(p.buildChatRequest(req, true))
@@ -426,20 +499,19 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 func (p *OllamaProvider) buildChatRequest(req *ChatRequest, stream bool) map[string]any {
 	messages := make([]map[string]any, 0, len(req.Messages))
 	for _, msg := range req.Messages {
-		m := map[string]any{
-			"role":    msg.Role,
-			"content": msg.Content,
-		}
-		if len(msg.ToolCalls) > 0 {
-			m["tool_calls"] = msg.ToolCalls
-		}
-		if strings.TrimSpace(msg.Reasoning) != "" {
-			m["reasoning_content"] = msg.Reasoning
-		}
-		messages = append(messages, m)
+		messages = append(messages, messageToMap(msg))
 	}
 
 	options := map[string]any{}
+	for key, raw := range req.OptionsExtra {
+		if _, exists := ollamaOptionKnownFields[key]; exists || len(raw) == 0 {
+			continue
+		}
+		var value any
+		if err := json.Unmarshal(raw, &value); err == nil {
+			options[key] = value
+		}
+	}
 	if req.Temperature != nil {
 		options["temperature"] = *req.Temperature
 	}
@@ -468,6 +540,58 @@ func (p *OllamaProvider) buildChatRequest(req *ChatRequest, stream bool) map[str
 		ollamaReq["tools"] = req.Tools
 	}
 	return ollamaReq
+}
+
+func messageToMap(msg Message) map[string]any {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return map[string]any{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil || out == nil {
+		return map[string]any{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+	}
+	applyOllamaImageContent(out)
+	return out
+}
+
+func applyOllamaImageContent(msg map[string]any) {
+	parts, ok := msg["content"].([]any)
+	if !ok || len(parts) == 0 {
+		return
+	}
+
+	textParts := []string{}
+	images := []string{}
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch part["type"] {
+		case "text":
+			if text, ok := part["text"].(string); ok && strings.TrimSpace(text) != "" {
+				textParts = append(textParts, text)
+			}
+		case "image_url":
+			image, _ := part["image_url"].(map[string]any)
+			if url, ok := image["url"].(string); ok && strings.TrimSpace(url) != "" {
+				images = append(images, url)
+			}
+		}
+	}
+
+	msg["content"] = strings.Join(textParts, "\n")
+	if len(images) > 0 {
+		msg["images"] = images
+	}
 }
 
 func (p *OllamaProvider) ListModels(ctx context.Context) ([]string, error) {

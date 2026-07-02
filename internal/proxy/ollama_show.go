@@ -16,6 +16,7 @@ const (
 func (s *Server) buildOllamaShowBody(
 	cfg *config.AppConfig,
 	registry *provider.Registry,
+	catalog *provider.ModelCatalog,
 	model string,
 ) ([]byte, error) {
 	providerName := s.resolveProviderName(registry, model)
@@ -23,10 +24,42 @@ func (s *Server) buildOllamaShowBody(
 
 	ctxLength := intValue(modelCfg.ContextLength, defaultContextLength)
 	maxOutput := intValue(modelCfg.MaxOutputTokens, defaultMaxOutputTokens)
-
 	supportsTools := boolValue(modelCfg.SupportsTools, true)
 	supportsVision := boolValue(modelCfg.SupportsVision, false)
+	family := coalesceString(providerName, modelCfg.Provider, "api")
+	exec := executionMapFromModelConfig(modelCfg)
 
+	if catalog != nil {
+		if profile, ok := catalog.Profile(model, providerName); ok {
+			if profile.ContextLength != nil && *profile.ContextLength > 0 {
+				ctxLength = *profile.ContextLength
+			}
+			if profile.MaxOutputTokens != nil && *profile.MaxOutputTokens > 0 {
+				maxOutput = *profile.MaxOutputTokens
+			}
+			if profile.SupportsTools != nil {
+				supportsTools = *profile.SupportsTools
+			}
+			if profile.SupportsVision != nil {
+				supportsVision = *profile.SupportsVision
+			}
+			family = coalesceString(profile.Family, family)
+			mergeProfileExecution(exec, profile)
+		}
+	}
+
+	return converter.BuildOllamaShowResponse(
+		model,
+		ctxLength,
+		maxOutput,
+		family,
+		supportsTools,
+		supportsVision,
+		exec,
+	)
+}
+
+func executionMapFromModelConfig(modelCfg config.ModelConfig) map[string]any {
 	exec := map[string]any{}
 	if modelCfg.Temperature != nil {
 		exec["temperature"] = *modelCfg.Temperature
@@ -43,17 +76,25 @@ func (s *Server) buildOllamaShowBody(
 	if modelCfg.TimeoutSeconds != nil {
 		exec["timeout_seconds"] = *modelCfg.TimeoutSeconds
 	}
+	return exec
+}
 
-	family := coalesceString(providerName, modelCfg.Provider, "api")
-	return converter.BuildOllamaShowResponse(
-		model,
-		ctxLength,
-		maxOutput,
-		family,
-		supportsTools,
-		supportsVision,
-		exec,
-	)
+func mergeProfileExecution(exec map[string]any, profile provider.ModelProfile) {
+	if profile.Temperature != nil {
+		exec["temperature"] = *profile.Temperature
+	}
+	if profile.TopP != nil {
+		exec["top_p"] = *profile.TopP
+	}
+	if profile.MaxTokens != nil {
+		exec["max_tokens"] = *profile.MaxTokens
+	}
+	if strings.TrimSpace(profile.ReasoningEffort) != "" {
+		exec["reasoning_effort"] = profile.ReasoningEffort
+	}
+	if profile.TimeoutSeconds != nil {
+		exec["timeout_seconds"] = *profile.TimeoutSeconds
+	}
 }
 
 func intValue(value *int, fallback int) int {

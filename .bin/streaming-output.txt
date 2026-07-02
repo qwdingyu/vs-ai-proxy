@@ -1,0 +1,8 @@
+data: {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": "proxy-model", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hello"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": "proxy-model", "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": "proxy-model", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}}
+
+data: [DONE]
+

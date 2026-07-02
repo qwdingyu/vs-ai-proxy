@@ -1,0 +1,37 @@
+{
+  "provider": "cerebras",
+  "models": [
+    {
+      "match": "zai-glm-4.7",
+      "priority": 1,
+      "enabled": true,
+      "execution": {
+        "context_length": 128000,
+        "max_output_tokens": 32768,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "glm",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 8192,
+        "timeout_seconds": 120
+      }
+    },
+    {
+      "match": "gpt-oss-120b",
+      "priority": 2,
+      "enabled": true,
+      "execution": {
+        "context_length": 131072,
+        "max_output_tokens": 65536,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "openai",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 8192,
+        "timeout_seconds": 120
+      }
+    }
+  ]
+}

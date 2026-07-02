@@ -1,0 +1,101 @@
+{
+  "provider": "groq",
+  "models": [
+    {
+      "match": "llama-3.3-70b-versatile",
+      "priority": 1,
+      "enabled": true,
+      "execution": {
+        "context_length": 131072,
+        "max_output_tokens": 32768,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "meta",
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "max_tokens": 8192,
+        "timeout_seconds": 60
+      }
+    },
+    {
+      "match": "qwen/qwen3-32b",
+      "priority": 2,
+      "enabled": true,
+      "execution": {
+        "context_length": 131072,
+        "max_output_tokens": 40960,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "qwen",
+        "temperature": 0.2,
+        "top_p": 0.95,
+        "max_tokens": 4096,
+        "timeout_seconds": 60
+      }
+    },
+    {
+      "match": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "priority": 3,
+      "enabled": true,
+      "execution": {
+        "context_length": 10000000,
+        "max_output_tokens": 16384,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "meta",
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        "timeout_seconds": 45
+      }
+    },
+    {
+      "match": "openai/gpt-oss-120b",
+      "priority": 4,
+      "enabled": true,
+      "execution": {
+        "context_length": 131072,
+        "max_output_tokens": 65536,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "openai",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 8192,
+        "timeout_seconds": 90
+      }
+    },
+    {
+      "match": "openai/gpt-oss-20b",
+      "priority": 5,
+      "enabled": true,
+      "execution": {
+        "context_length": 131072,
+        "max_output_tokens": 65536,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "openai",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 8192,
+        "timeout_seconds": 60
+      }
+    },
+    {
+      "match": "groq/compound",
+      "priority": 6,
+      "enabled": false,
+      "execution": {
+        "context_length": 131072,
+        "max_output_tokens": 8192,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "groq",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        "timeout_seconds": 60
+      }
+    }
+  ]
+}

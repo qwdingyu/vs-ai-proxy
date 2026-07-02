@@ -1,0 +1,27 @@
+{
+  "provider": "ollama",
+  "models": [
+    {
+      "match": "gpt-oss",
+      "priority": 1,
+      "enabled": false,
+      "execution": {
+        "context_length": 128000,
+        "max_output_tokens": 16384,
+        "supports_tools": true,
+        "supports_vision": false,
+        "family": "ollama",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 2048,
+        "timeout_seconds": 120
+      }
+    },
+    { "match": "deepseek", "priority": 2, "enabled": false, "execution": { "timeout_seconds": 120 } },
+    { "match": "qwen", "priority": 3, "enabled": false, "execution": { "timeout_seconds": 120 } },
+    { "match": "mistral", "priority": 4, "enabled": true, "execution": { "timeout_seconds": 120 } },
+    { "match": "llama", "priority": 5, "enabled": false, "execution": { "timeout_seconds": 120 } },
+    { "match": "nemotron", "priority": 6, "enabled": false, "execution": { "timeout_seconds": 120 } },
+    { "match": "kimi", "priority": 7, "enabled": false, "execution": { "timeout_seconds": 120 } }
+  ]
+}

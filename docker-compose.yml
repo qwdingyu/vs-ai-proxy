@@ -1,0 +1,20 @@
+services:
+  vs-ai-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vs-ai-proxy:latest
+    container_name: vs-ai-proxy
+    env_file:
+      - .env
+    environment:
+      CONFIG_PATH: /data/config.json
+    ports:
+      - "${PROXY_PORT:-11434}:11434"
+      - "${MANAGEMENT_PORT:-12434}:12434"
+    volumes:
+      - vs-ai-proxy-data:/data
+    restart: unless-stopped
+
+volumes:
+  vs-ai-proxy-data:
