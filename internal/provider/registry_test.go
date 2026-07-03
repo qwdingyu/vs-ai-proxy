@@ -158,6 +158,34 @@ func TestRegistryResolvesVisualStudioDisplayModelName(t *testing.T) {
 	}
 }
 
+func TestRegistryResolvesVisualStudioDisplayBasenameToNamespacedUpstream(t *testing.T) {
+	registry := NewRegistry("z-ai/glm-5.2", time.Minute)
+	usecpa := &fakeProvider{
+		name:    "usecpa",
+		enabled: true,
+		models:  []string{"z-ai/glm-5.2"},
+	}
+
+	registry.Add(&ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 1})
+	registry.SetModels("usecpa", usecpa.models)
+
+	for _, requested := range []string{"glm-5.2", "USECPA - glm-5.2:latest"} {
+		candidates := registry.ResolveCandidates(requested)
+		if len(candidates) != 1 {
+			t.Fatalf("%s candidates len = %d, want 1: %#v", requested, len(candidates), candidates)
+		}
+		if candidates[0].Provider.Provider.Name() != "usecpa" {
+			t.Fatalf("%s provider = %q, want usecpa", requested, candidates[0].Provider.Provider.Name())
+		}
+		if candidates[0].ModelID != "z-ai/glm-5.2" {
+			t.Fatalf("%s model id = %q, want z-ai/glm-5.2", requested, candidates[0].ModelID)
+		}
+		if got := registry.ResolveModel(requested); got != "z-ai/glm-5.2" {
+			t.Fatalf("%s ResolveModel() = %q, want z-ai/glm-5.2", requested, got)
+		}
+	}
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {

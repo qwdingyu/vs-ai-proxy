@@ -1083,6 +1083,65 @@ func TestChatCompletionsAcceptsVisualStudioDisplayModelName(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsMapsVisualStudioBasenameToNamespacedUpstream(t *testing.T) {
+	prov := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "pong"}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Resolved-Model"); got != "z-ai/glm-5.2" {
+		t.Fatalf("resolved model = %q, want z-ai/glm-5.2", got)
+	}
+	if got := rec.Header().Get("X-Proxy-Upstream-Model"); got != "z-ai/glm-5.2" {
+		t.Fatalf("upstream model = %q, want z-ai/glm-5.2", got)
+	}
+	if prov.lastReq == nil || prov.lastReq.Model != "z-ai/glm-5.2" {
+		t.Fatalf("provider request model = %#v, want z-ai/glm-5.2", prov.lastReq)
+	}
+}
+
+func TestBuildRegistrySeedsConfiguredProviderModelsBeforeDiscovery(t *testing.T) {
+	cfg := &config.AppConfig{
+		DefaultModel: "z-ai/glm-5.2",
+		Providers: []config.ProviderConfig{{
+			ID:       "usecpa",
+			Name:     "UseCpa",
+			Type:     "openai",
+			Enabled:  true,
+			Priority: 1,
+		}},
+		Models: []config.ModelConfig{{
+			Name:       "z-ai/glm-5.2",
+			ProviderID: "usecpa",
+			Enabled:    true,
+		}},
+	}
+
+	registry := (&Server{logger: log.New(nil, log.LevelError, false)}).buildRegistry(cfg)
+	candidates := registry.ResolveCandidates("glm-5.2")
+
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].Provider.Provider.Name() != "usecpa" {
+		t.Fatalf("provider = %q, want usecpa", candidates[0].Provider.Provider.Name())
+	}
+	if candidates[0].UpstreamID != "z-ai/glm-5.2" {
+		t.Fatalf("upstream = %q, want z-ai/glm-5.2", candidates[0].UpstreamID)
+	}
+}
+
 func TestChatCompletionsProviderFailureReturnsDiagnosticAttempts(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"deepseek-v4-flash"}, nil, "")
 	prov.chatErr = errors.New("请求失败: dial tcp: connect: connection refused")

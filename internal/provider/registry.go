@@ -130,6 +130,9 @@ func (r *Registry) resolveModelLocked(model string) string {
 	if _, ok := r.upstreamToProviders[clean]; ok {
 		return clean
 	}
+	if resolved := r.resolveNamespacedModelSuffixLocked(clean); resolved != "" {
+		return resolved
+	}
 	if resolved := r.resolveProviderHintModelLocked(clean); resolved != "" {
 		return resolved
 	}
@@ -168,6 +171,52 @@ func (r *Registry) resolveProviderHintCandidatesLocked(model string) []Candidate
 		ModelID:    upstream,
 		Priority:   entry.Priority,
 	}}
+}
+
+func (r *Registry) resolveNamespacedModelSuffixLocked(clean string) string {
+	clean = strings.TrimSpace(clean)
+	if clean == "" || strings.Contains(clean, "/") || strings.Contains(clean, "@") {
+		return ""
+	}
+
+	for _, entry := range r.orderedEntriesLocked() {
+		if entry == nil || entry.Provider == nil || !entry.Provider.IsEnabled() {
+			continue
+		}
+		for _, model := range entry.Models {
+			upstream := strings.TrimSpace(model)
+			if upstream == "" || !strings.Contains(upstream, "/") {
+				continue
+			}
+			if strings.EqualFold(modelSuffix(upstream), clean) {
+				return upstream
+			}
+		}
+	}
+
+	var resolved string
+	bestPriority := int(^uint(0) >> 1)
+	for model, providerEntry := range r.modelToProvider {
+		if providerEntry == nil || providerEntry.Provider == nil || !providerEntry.Provider.IsEnabled() {
+			continue
+		}
+		upstream := strings.TrimSpace(r.modelToUpstream[model])
+		if upstream == "" {
+			upstream = strings.TrimSpace(model)
+		}
+		if upstream == "" || !strings.Contains(upstream, "/") {
+			continue
+		}
+		if !strings.EqualFold(modelSuffix(upstream), clean) {
+			continue
+		}
+		if resolved == "" || providerEntry.Priority < bestPriority ||
+			(providerEntry.Priority == bestPriority && strings.Compare(upstream, resolved) < 0) {
+			resolved = upstream
+			bestPriority = providerEntry.Priority
+		}
+	}
+	return resolved
 }
 
 func (r *Registry) resolveProviderHintModelLocked(clean string) string {

@@ -108,13 +108,43 @@ func (s *Server) buildRegistry(cfg *config.AppConfig) *provider.Registry {
 
 		registry.Add(&provider.ProviderEntry{
 			Provider: prov,
-			Models:   []string{},
+			// Web 配置闭环：
+			// config.json 中显式绑定到该 provider 的模型先作为路由种子，
+			// 避免上游 /models 发现失败或尚未刷新时，Visual Studio 已保存的模型无法路由。
+			Models:   configuredModelsForProvider(cfg, p),
 			Priority: p.Priority,
 		})
 
 		s.logger.Info("已注册提供商: %s (%s)", config.ProviderKey(p), p.Type)
 	}
 	return registry
+}
+
+func configuredModelsForProvider(cfg *config.AppConfig, p config.ProviderConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+
+	p = config.NormalizeProvider(p)
+	providerID := config.ProviderKey(p)
+	models := []string{}
+	for _, model := range cfg.Models {
+		model = config.NormalizeModel(model)
+		if !model.Enabled || strings.TrimSpace(model.Name) == "" {
+			continue
+		}
+		modelProvider := strings.TrimSpace(model.ProviderID)
+		if modelProvider == "" {
+			modelProvider = strings.TrimSpace(model.Provider)
+		}
+		if modelProvider == "" {
+			continue
+		}
+		if strings.EqualFold(modelProvider, providerID) || strings.EqualFold(modelProvider, strings.TrimSpace(p.Name)) {
+			models = append(models, model.Name)
+		}
+	}
+	return models
 }
 
 func (s *Server) providerFromConfig(p config.ProviderConfig) provider.Provider {
