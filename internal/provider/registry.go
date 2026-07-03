@@ -91,7 +91,7 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 
 	resolved := r.resolveModelLocked(model)
 	candidates := r.resolveCandidatesLocked(resolved)
-	if len(candidates) > 0 || strings.Contains(stripTagSuffix(strings.TrimSpace(model)), "@") {
+	if len(candidates) > 0 || strings.Contains(StripModelTag(strings.TrimSpace(model)), "@") {
 		return candidates
 	}
 
@@ -100,7 +100,7 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 	// 原样回传到 /v1/chat/completions，例如
 	// "DEEPSEEK - deepseek-v4-flash:latest"。这不是上游真实模型名，
 	// 必须先剥离 provider 展示前缀，再按真实模型名解析候选 provider。
-	if displayModel := displayNameModelSuffix(model); displayModel != "" && !strings.EqualFold(displayModel, resolved) {
+	if displayModel := DisplayNameModelSuffix(model); displayModel != "" && !strings.EqualFold(displayModel, resolved) {
 		displayResolved := r.resolveModelLocked(displayModel)
 		displayCandidates := r.resolveCandidatesLocked(displayResolved)
 		if len(displayCandidates) > 0 {
@@ -120,7 +120,7 @@ func (r *Registry) ResolveModel(model string) string {
 }
 
 func (r *Registry) resolveModelLocked(model string) string {
-	clean := stripTagSuffix(strings.TrimSpace(model))
+	clean := StripModelTag(strings.TrimSpace(model))
 	if clean == "" {
 		clean = r.defaultModel
 	}
@@ -139,7 +139,7 @@ func (r *Registry) resolveModelLocked(model string) string {
 	// Visual Studio Copilot 适配：
 	// ResolveModel 用于诊断头和日志。这里也要把 VS 回传的展示名还原，
 	// 否则日志会显示 upstream 仍是 "PROVIDER - model"，排障会被误导。
-	if displayModel := displayNameModelSuffix(clean); displayModel != "" && !strings.EqualFold(displayModel, clean) {
+	if displayModel := DisplayNameModelSuffix(clean); displayModel != "" && !strings.EqualFold(displayModel, clean) {
 		if resolved := r.resolveModelLocked(displayModel); resolved != displayModel {
 			return resolved
 		}
@@ -155,7 +155,7 @@ func (r *Registry) resolveModelLocked(model string) string {
 }
 
 func (r *Registry) resolveProviderHintCandidatesLocked(model string) []Candidate {
-	clean := stripTagSuffix(strings.TrimSpace(model))
+	clean := StripModelTag(strings.TrimSpace(model))
 	entry, resolved, ok := r.resolveProviderHintLocked(clean)
 	if !ok || entry == nil || !entry.Provider.IsEnabled() {
 		return nil
@@ -188,7 +188,7 @@ func (r *Registry) resolveNamespacedModelSuffixLocked(clean string) string {
 			if upstream == "" || !strings.Contains(upstream, "/") {
 				continue
 			}
-			if strings.EqualFold(modelSuffix(upstream), clean) {
+			if strings.EqualFold(ModelBasename(upstream), clean) {
 				return upstream
 			}
 		}
@@ -207,7 +207,7 @@ func (r *Registry) resolveNamespacedModelSuffixLocked(clean string) string {
 		if upstream == "" || !strings.Contains(upstream, "/") {
 			continue
 		}
-		if !strings.EqualFold(modelSuffix(upstream), clean) {
+		if !strings.EqualFold(ModelBasename(upstream), clean) {
 			continue
 		}
 		if resolved == "" || providerEntry.Priority < bestPriority ||
@@ -252,7 +252,7 @@ func (r *Registry) resolveProviderHintLocked(clean string) (*ProviderEntry, stri
 		if owner == nil || !sameProvider(owner, entry) {
 			continue
 		}
-		if strings.EqualFold(modelSuffix(model), bare) {
+		if strings.EqualFold(ModelBasename(model), bare) {
 			return entry, model, true
 		}
 	}
@@ -303,7 +303,7 @@ func (r *Registry) resolveCandidatesLocked(model string) []Candidate {
 		}
 		for _, m := range entry.Models {
 			upstream := strings.TrimSpace(m)
-			if strings.EqualFold(stripTagSuffix(upstream), model) {
+			if strings.EqualFold(StripModelTag(upstream), model) {
 				candidates = append(candidates, Candidate{
 					Provider:   entry,
 					UpstreamID: upstream,
@@ -615,36 +615,6 @@ func sameProvider(a, b *ProviderEntry) bool {
 	return strings.EqualFold(a.Provider.Name(), b.Provider.Name())
 }
 
-func modelSuffix(model string) string {
-	at := strings.Index(model, "@")
-	if at > 0 {
-		model = model[:at]
-	}
-	slash := strings.LastIndex(model, "/")
-	if slash > 0 && slash < len(model)-1 {
-		return model[slash+1:]
-	}
-	return model
-}
-
-func displayNameModelSuffix(model string) string {
-	// Visual Studio Copilot 适配：
-	// /api/tags 的 name 为 "PROVIDER - display-model:latest"，VS 可能把它
-	// 当作 chat model 回传。这里只识别这种展示格式，不影响普通
-	// model@provider:latest 或 provider/model 的标准路由形式。
-	clean := stripTagSuffix(strings.TrimSpace(model))
-	sep := " - "
-	idx := strings.LastIndex(clean, sep)
-	if idx < 0 || idx+len(sep) >= len(clean) {
-		return ""
-	}
-	suffix := strings.TrimSpace(clean[idx+len(sep):])
-	if suffix == "" {
-		return ""
-	}
-	return suffix
-}
-
 func appendUniqueProvider(entries []*ProviderEntry, entry *ProviderEntry) []*ProviderEntry {
 	for _, existing := range entries {
 		if existing.Provider.Name() == entry.Provider.Name() {
@@ -694,15 +664,4 @@ func normalizeModels(models []string) []string {
 		out = append(out, id)
 	}
 	return out
-}
-
-func stripTagSuffix(model string) string {
-	colon := strings.LastIndex(model, ":")
-	if colon <= 0 {
-		return model
-	}
-	if strings.Contains(model[colon+1:], "/") {
-		return model
-	}
-	return model[:colon]
 }

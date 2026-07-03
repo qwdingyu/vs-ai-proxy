@@ -187,6 +187,15 @@ func withMux(server *Server, register func(mux *http.ServeMux)) http.Handler {
 	return mux
 }
 
+func containsAnyString(values []any, want string) bool {
+	for _, value := range values {
+		if s, ok := value.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
+}
+
 // -----------------------------------------------------------------------------
 // 1. 模型 catalog：/v1/models 与 /api/tags
 // -----------------------------------------------------------------------------
@@ -214,7 +223,7 @@ func TestCatalogEndpointsReturnModels(t *testing.T) {
 		{
 			name: "ollama tags",
 			path: "/api/tags",
-			want: []string{"model-a@provider-a:latest", "model-b@provider-b:latest", "shared@provider-a:latest", "shared@provider-b:latest"},
+			want: []string{"model-a@provider-a", "model-b@provider-b", "shared@provider-a", "shared@provider-b"},
 		},
 	}
 
@@ -338,12 +347,19 @@ func TestOllamaTagsExposeQualifiedAliasesAndCapabilities(t *testing.T) {
 	for _, raw := range models {
 		item, _ := raw.(map[string]any)
 		model, _ := item["model"].(string)
-		if model != "shared@provider-a:latest" && model != "shared@provider-b:latest" {
+		if model != "shared@provider-a" && model != "shared@provider-b" {
 			t.Fatalf("unexpected model alias %q", model)
+		}
+		name, _ := item["name"].(string)
+		if strings.HasSuffix(name, ":latest") {
+			t.Fatalf("display name should not include :latest: %q", name)
 		}
 		aliases, _ := item["aliases"].([]any)
 		if len(aliases) == 0 {
 			t.Fatalf("aliases missing for %q", model)
+		}
+		if !containsAnyString(aliases, "shared:latest") || !containsAnyString(aliases, model+":latest") {
+			t.Fatalf("latest aliases missing for %q: %#v", model, aliases)
 		}
 		if item["context_length"] == nil || item["max_output_tokens"] == nil {
 			t.Fatalf("token limits missing in %#v", item)

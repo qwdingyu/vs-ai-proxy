@@ -101,10 +101,7 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 		model = strings.TrimSpace(entry.Model)
 	}
 	providerName := strings.TrimSpace(entry.Provider)
-	qualified := model
-	if providerName != "" {
-		qualified = model + "@" + providerName
-	}
+	identity := provider.NewModelIdentity(model, providerName)
 
 	ctxLength := defaultContextLength
 	maxOutput := defaultMaxOutputTokens
@@ -154,13 +151,13 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 	}
 
 	// Visual Studio Copilot / BYOM 适配：
-	// name 使用 "PROVIDER - model:latest" 让 VS 模型下拉框可读；
-	// model 使用 "model@provider:latest" 让按 model 字段回传的客户端可精确路由；
-	// aliases 同时保留裸模型和 provider-qualified 模型，兼容不同 VS/Ollama 客户端读取字段的差异。
+	// name 是用户可见名称，不带 Ollama 本地模型习惯的 :latest，降低 VS 用户认知负担；
+	// model 是代理 canonical ID，仍用 model@provider 精确路由；
+	// aliases 保留 :latest 变体，兼容会回传 tag 的 Ollama-compatible 客户端。
 	return map[string]any{
-		"name":        providerDisplayName(providerName, model) + ":latest",
-		"model":       qualified + ":latest",
-		"aliases":     tagAliases(model, qualified),
+		"name":        identity.Display,
+		"model":       identity.Qualified,
+		"aliases":     identity.Aliases,
 		"modified_at": time.Now().Format(time.RFC3339),
 		"size":        3826793677,
 		"digest":      "sha256:" + strings.Repeat("0", 64),
@@ -186,7 +183,7 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 		"supports_images":     supportsVision,
 		"model_info": map[string]any{
 			"general.architecture":   family,
-			"general.basename":       model,
+			"general.basename":       identity.Basename,
 			"general.context_length": ctxLength,
 			"context_length":         ctxLength,
 			"max_output_tokens":      maxOutput,
@@ -198,41 +195,4 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 			"supports_images":        supportsVision,
 		},
 	}
-}
-
-func providerDisplayName(providerName, model string) string {
-	display := displayModelName(model)
-	if strings.TrimSpace(providerName) == "" {
-		return display
-	}
-	return strings.ToUpper(providerName) + " - " + display
-}
-
-func displayModelName(model string) string {
-	model = strings.TrimSpace(model)
-	slash := strings.Index(model, "/")
-	if slash > 0 && slash < len(model)-1 {
-		return model[slash+1:]
-	}
-	return model
-}
-
-func tagAliases(model, qualified string) []string {
-	aliases := []string{}
-	for _, alias := range []string{model, model + ":latest", qualified, qualified + ":latest"} {
-		if strings.TrimSpace(alias) == "" {
-			continue
-		}
-		seen := false
-		for _, existing := range aliases {
-			if existing == alias {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			aliases = append(aliases, alias)
-		}
-	}
-	return aliases
 }
