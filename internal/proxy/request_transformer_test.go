@@ -81,6 +81,34 @@ func TestApplyExecutionDefaultsOverrideClientParams(t *testing.T) {
 	}
 }
 
+func TestApplyExecutionDefaultsMatchesVisualStudioDisplayAndLatestAlias(t *testing.T) {
+	server := &Server{
+		config: &config.AppConfig{
+			Models: []config.ModelConfig{{
+				Name:            "z-ai/glm-5.2",
+				ProviderID:      "usecpa",
+				MaxTokens:       intPtr(131072),
+				ContextLength:   intPtr(1000000),
+				MaxOutputTokens: intPtr(131072),
+				Enabled:         true,
+			}},
+		},
+		reasoningCache: newReasoningCache(),
+	}
+	req := &provider.ChatRequest{Model: "glm-5.2"}
+
+	server.applyExecutionDefaults(
+		server.config,
+		req,
+		"USECPA - glm-5.2:latest",
+		&stubProvider{name: "usecpa"},
+	)
+
+	if req.MaxTokens == nil || *req.MaxTokens != 131072 {
+		t.Fatalf("max_tokens = %v, want 131072", req.MaxTokens)
+	}
+}
+
 func TestApplyProfileDefaultsOverrideClientParams(t *testing.T) {
 	server := &Server{}
 	clientTemp := 0.2

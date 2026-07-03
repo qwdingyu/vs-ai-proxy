@@ -252,6 +252,51 @@ func TestModelCatalogProfileUsesMostSpecificSubstringMatch(t *testing.T) {
 	}
 }
 
+func TestModelCatalogProfileMatchesVisualStudioDisplayAndLatestAlias(t *testing.T) {
+	dir := t.TempDir()
+	selectionDir := filepath.Join(dir, "model-selection")
+	if err := os.MkdirAll(selectionDir, 0755); err != nil {
+		t.Fatalf("mkdir model-selection: %v", err)
+	}
+
+	data := []byte(`{
+		"provider":"usecpa",
+		"models":[{
+			"match":"z-ai/glm-5.2",
+			"priority":1,
+			"enabled":true,
+			"execution":{
+				"context_length":1000000,
+				"max_output_tokens":131072,
+				"timeout_seconds":180
+			}
+		}]
+	}`)
+	if err := os.WriteFile(filepath.Join(selectionDir, "usecpa.json"), data, 0644); err != nil {
+		t.Fatalf("write model selection: %v", err)
+	}
+
+	registry := NewRegistry("z-ai/glm-5.2", time.Minute)
+	prov := &fakeProvider{name: "usecpa", enabled: true, models: []string{"z-ai/glm-5.2"}}
+	registry.Add(&ProviderEntry{Provider: prov, Models: prov.models, Priority: 1})
+	registry.SetModels("usecpa", prov.models)
+
+	catalog := NewModelCatalog(registry, dir, time.Minute)
+	profile, ok := catalog.Profile("USECPA - glm-5.2:latest", "UseCPA")
+	if !ok {
+		t.Fatalf("expected profile")
+	}
+	if profile.TimeoutSeconds == nil || *profile.TimeoutSeconds != 180 {
+		t.Fatalf("timeout_seconds = %v, want 180", profile.TimeoutSeconds)
+	}
+	if profile.ContextLength == nil || *profile.ContextLength != 1000000 {
+		t.Fatalf("context_length = %v, want 1000000", profile.ContextLength)
+	}
+	if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 131072 {
+		t.Fatalf("max_output_tokens = %v, want 131072", profile.MaxOutputTokens)
+	}
+}
+
 func TestModelCatalogDiscoveryDoesNotCreateDoubleQualifiedAliases(t *testing.T) {
 	registry := NewRegistry("shared", time.Minute)
 	provA := &fakeProvider{

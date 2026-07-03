@@ -298,5 +298,19 @@ func modelProviderKey(m config.ModelConfig) string {
 
 func modelConfigNameMatches(m config.ModelConfig, requestedModel, upstreamModel string) bool {
 	name := strings.TrimSpace(m.Name)
-	return name != "" && (name == requestedModel || name == upstreamModel)
+	if name == "" {
+		return false
+	}
+
+	for _, candidate := range []string{
+		requestedModel,
+		upstreamModel,
+		provider.DisplayNameModelSuffix(requestedModel),
+		provider.DisplayNameModelSuffix(upstreamModel),
+	} {
+		if provider.ProfileNameMatchScore(candidate, name) >= 0 {
+			return true
+		}
+	}
+	return false
 }

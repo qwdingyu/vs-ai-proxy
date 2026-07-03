@@ -153,15 +153,18 @@ func (c *ModelCatalog) Profile(model, provider string) (ModelProfile, bool) {
 	provider = strings.TrimSpace(provider)
 	var best CatalogEntry
 	hasBest := false
+	bestScore := -1
 	for _, entry := range c.entries {
-		if !entry.Enabled || !entry.Configured || entry.Provider != provider {
+		if !entry.Enabled || !entry.Configured || !strings.EqualFold(entry.Provider, provider) {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(model), strings.ToLower(entry.Model)) {
+		score := ProfileNameMatchScore(model, entry.Model)
+		if score < 0 {
 			continue
 		}
-		if !hasBest || len(entry.Model) > len(best.Model) {
+		if !hasBest || score > bestScore || (score == bestScore && len(entry.Model) > len(best.Model)) {
 			best = entry
+			bestScore = score
 			hasBest = true
 		}
 	}
@@ -194,7 +197,7 @@ func (c *ModelCatalog) ProfileAny(model string) (ModelProfile, bool) {
 		if !entry.Enabled || !entry.Configured {
 			continue
 		}
-		if score := profileNameMatchScore(model, entry.Model); betterProfileMatch(score, entry.Priority, bestScore, best) {
+		if score := ProfileNameMatchScore(model, entry.Model); betterProfileMatch(score, entry.Priority, bestScore, best) {
 			bestScore = score
 			best = entry.Profile
 		}
@@ -203,7 +206,7 @@ func (c *ModelCatalog) ProfileAny(model string) (ModelProfile, bool) {
 		if !profile.Enabled {
 			continue
 		}
-		if score := profileNameMatchScore(model, profile.Model); betterProfileMatch(
+		if score := ProfileNameMatchScore(model, profile.Model); betterProfileMatch(
 			score,
 			profile.MatchPriority,
 			bestScore,
@@ -457,9 +460,40 @@ func catalogKey(model, provider string) string {
 	return strings.TrimSpace(model) + "@" + strings.TrimSpace(provider)
 }
 
-func profileNameMatchScore(requested, candidate string) int {
-	requested = strings.ToLower(StripModelTag(strings.TrimSpace(requested)))
-	candidate = strings.ToLower(StripModelTag(strings.TrimSpace(candidate)))
+// ProfileNameMatchScore 返回 requested 与 candidate 的模型名匹配分数。
+// 它是 Visual Studio display name、Ollama :latest tag、provider/model basename
+// 到内部模型配置的统一模糊边界；调用方只用分数是否 >= 0 判断是否匹配。
+func ProfileNameMatchScore(requested, candidate string) int {
+	best := -1
+	for _, requestedVariant := range modelNameMatchVariants(requested) {
+		for _, candidateVariant := range modelNameMatchVariants(candidate) {
+			if score := basicProfileNameMatchScore(requestedVariant, candidateVariant); score > best {
+				best = score
+			}
+		}
+	}
+	return best
+}
+
+func modelNameMatchVariants(model string) []string {
+	clean := strings.ToLower(StripModelTag(strings.TrimSpace(model)))
+	variants := []string{}
+	seen := map[string]struct{}{}
+	for _, value := range []string{clean, strings.ToLower(DisplayNameModelSuffix(clean))} {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		variants = append(variants, value)
+	}
+	return variants
+}
+
+func basicProfileNameMatchScore(requested, candidate string) int {
 	if requested == "" || candidate == "" {
 		return -1
 	}
