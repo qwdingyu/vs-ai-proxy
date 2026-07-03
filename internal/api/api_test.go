@@ -29,9 +29,10 @@ func TestConfigSaveHotUpdatesProxyRegistry(t *testing.T) {
 			Enabled: true,
 		}},
 		Models: []config.ModelConfig{{
-			Name:     "model-x",
-			Provider: "openai",
-			Enabled:  true,
+			Name:       "model-x",
+			ProviderID: "openai-main",
+			Provider:   "openai-main",
+			Enabled:    true,
 		}},
 	}
 
@@ -164,6 +165,99 @@ func TestConfigSaveRejectsDuplicateProviderIDs(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("duplicate provider config status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestConfigValidateReportsInvalidModelProvider(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	payload := config.AppConfig{
+		Port: 12345,
+		Providers: []config.ProviderConfig{{
+			ID:      "usecpa",
+			Name:    "UseCPA",
+			Type:    "openai",
+			BaseURL: "https://example.invalid/v1",
+			Enabled: true,
+		}},
+		Models: []config.ModelConfig{{
+			Name:       "z-ai/glm-5.2",
+			ProviderID: "z-ai/glm-5.2",
+			Provider:   "z-ai/glm-5.2",
+			Enabled:    true,
+		}},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config/validate", mustJSONBody(t, payload))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config/validate status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"valid":false`)) {
+		t.Fatalf("validation should be invalid: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"model_provider_not_found"`)) {
+		t.Fatalf("validation should explain missing provider: %s", rec.Body.String())
+	}
+}
+
+func TestConfigSaveRejectsInvalidModelProvider(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	payload := config.AppConfig{
+		Port: 12345,
+		Providers: []config.ProviderConfig{{
+			ID:      "usecpa",
+			Name:    "UseCPA",
+			Type:    "openai",
+			BaseURL: "https://example.invalid/v1",
+			Enabled: true,
+		}},
+		Models: []config.ModelConfig{{
+			Name:       "z-ai/glm-5.2",
+			ProviderID: "z-ai/glm-5.2",
+			Provider:   "z-ai/glm-5.2",
+			Enabled:    true,
+		}},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/config", mustJSONBody(t, payload))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid model provider status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"model_provider_not_found"`)) {
+		t.Fatalf("response should include structured validation issue: %s", rec.Body.String())
+	}
+}
+
+func TestConfigValidateUsesBuiltInProviderNormalization(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	payload := config.AppConfig{
+		Port:      12345,
+		Providers: []config.ProviderConfig{},
+		Models: []config.ModelConfig{{
+			Name:       "deepseek-v4-flash",
+			ProviderID: config.UseAIProviderID,
+			Provider:   config.UseAIProviderID,
+			Enabled:    true,
+		}},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config/validate", mustJSONBody(t, payload))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config/validate status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"valid":true`)) {
+		t.Fatalf("built-in UseAI normalization should make provider reference valid: %s", rec.Body.String())
 	}
 }
 
@@ -307,6 +401,48 @@ func TestProviderUpdateRejectsIDCollision(t *testing.T) {
 	}
 }
 
+func TestProviderUpdateRejectsBreakingModelBinding(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	providerBody := config.ProviderConfig{
+		ID:      "provider-a",
+		Name:    "Provider A",
+		Type:    "openai",
+		BaseURL: "https://a.invalid",
+		Enabled: true,
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, providerBody))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	models := []config.ModelConfig{{Name: "model-a", ProviderID: "provider-a", Provider: "provider-a", Enabled: true}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/models", mustJSONBody(t, models))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/models status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/providers/provider-a", mustJSONBody(t, config.ProviderConfig{
+		ID:      "provider-renamed",
+		Name:    "Provider Renamed",
+		Type:    "openai",
+		BaseURL: "https://a.invalid",
+		Enabled: true,
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("renaming bound provider status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"model_provider_not_found"`)) {
+		t.Fatalf("response should explain broken model binding: %s", rec.Body.String())
+	}
+}
+
 func TestProviderUpdateRejectsBuiltInUseAIIDChange(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 
@@ -322,6 +458,42 @@ func TestProviderUpdateRejectsBuiltInUseAIIDChange(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("UseAI id change status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestDeleteProviderRejectsBreakingModelBinding(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	providerBody := config.ProviderConfig{
+		ID:      "provider-a",
+		Name:    "Provider A",
+		Type:    "openai",
+		BaseURL: "https://a.invalid",
+		Enabled: true,
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, providerBody))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	models := []config.ModelConfig{{Name: "model-a", ProviderID: "provider-a", Provider: "provider-a", Enabled: true}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/models", mustJSONBody(t, models))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/models status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/api/providers/provider-a", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE bound provider status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"model_provider_not_found"`)) {
+		t.Fatalf("response should explain broken model binding: %s", rec.Body.String())
 	}
 }
 
@@ -342,6 +514,19 @@ func TestDeleteProviderRejectsBuiltInUseAI(t *testing.T) {
 
 func TestModelEndpointsRoundTrip(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
+
+	providerRec := httptest.NewRecorder()
+	providerReq := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, config.ProviderConfig{
+		ID:      "openai-paid",
+		Name:    "OpenAI Paid",
+		Type:    "openai",
+		BaseURL: "https://example.invalid",
+		Enabled: true,
+	}))
+	apiSrv.engine.ServeHTTP(providerRec, providerReq)
+	if providerRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers status = %d, want %d; body=%s", providerRec.Code, http.StatusOK, providerRec.Body.String())
+	}
 
 	models := []config.ModelConfig{{
 		Name:            "model-a",
@@ -369,6 +554,28 @@ func TestModelEndpointsRoundTrip(t *testing.T) {
 	}
 	if !bytes.Contains(listRec.Body.Bytes(), []byte(`"provider_id":"openai-paid"`)) {
 		t.Fatalf("model list missing normalized provider_id: %s", listRec.Body.String())
+	}
+}
+
+func TestModelSaveRejectsInvalidProviderID(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	models := []config.ModelConfig{{
+		Name:       "z-ai/glm-5.2",
+		ProviderID: "z-ai/glm-5.2",
+		Provider:   "z-ai/glm-5.2",
+		Enabled:    true,
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/models", mustJSONBody(t, models))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT /api/models status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"model_provider_not_found"`)) {
+		t.Fatalf("response should include model_provider_not_found: %s", rec.Body.String())
 	}
 }
 

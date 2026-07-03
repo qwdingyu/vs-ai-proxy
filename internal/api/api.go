@@ -172,6 +172,7 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 
 	// 配置相关
 	group.GET("/config", s.getConfig)
+	group.POST("/config/validate", s.validateConfig)
 	group.PUT("/config", s.saveConfig)
 
 	// 提供商相关
@@ -208,14 +209,27 @@ func (s *Server) saveConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := validateProviderCollection(cfg.Providers); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	result := validateAppConfig(&cfg)
+	if !result.Valid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "配置校验失败", "validation": result})
 		return
 	}
 	if !s.saveAndApplyConfig(c, &cfg) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// validateConfig 供 Web 管理端保存前预检，避免错误模型/provider 关系写入 config.json 后
+// 才在 Visual Studio Copilot 请求链路里表现为 502/503。
+func (s *Server) validateConfig(c *gin.Context) {
+	var cfg config.AppConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	result := validateAppConfig(&cfg)
+	c.JSON(http.StatusOK, result)
 }
 
 // listProviders 列出所有提供商
@@ -275,6 +289,11 @@ func (s *Server) updateProvider(c *gin.Context) {
 				return
 			}
 			cfg.Providers[i] = p
+			result := validateAppConfig(cfg)
+			if !result.Valid {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "配置校验失败", "validation": result})
+				return
+			}
 			if !s.saveAndApplyConfig(c, cfg) {
 				return
 			}
@@ -296,6 +315,11 @@ func (s *Server) deleteProvider(c *gin.Context) {
 				return
 			}
 			cfg.Providers = append(cfg.Providers[:i], cfg.Providers[i+1:]...)
+			result := validateAppConfig(cfg)
+			if !result.Valid {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "配置校验失败", "validation": result})
+				return
+			}
 			if !s.saveAndApplyConfig(c, cfg) {
 				return
 			}
@@ -323,10 +347,119 @@ func (s *Server) saveModels(c *gin.Context) {
 	for i := range cfg.Models {
 		cfg.Models[i] = config.NormalizeModel(cfg.Models[i])
 	}
+	result := validateAppConfig(cfg)
+	if !result.Valid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "配置校验失败", "validation": result})
+		return
+	}
 	if !s.saveAndApplyConfig(c, cfg) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+type configValidationIssue struct {
+	Code    string `json:"code"`
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+type configValidationResult struct {
+	Valid    bool                    `json:"valid"`
+	Errors   []configValidationIssue `json:"errors"`
+	Warnings []configValidationIssue `json:"warnings"`
+}
+
+func (r *configValidationResult) addError(code, field, message string) {
+	r.Errors = append(r.Errors, configValidationIssue{Code: code, Field: field, Message: message})
+	r.Valid = false
+}
+
+func (r *configValidationResult) addWarning(code, field, message string) {
+	r.Warnings = append(r.Warnings, configValidationIssue{Code: code, Field: field, Message: message})
+}
+
+func validateAppConfig(cfg *config.AppConfig) configValidationResult {
+	result := configValidationResult{Valid: true}
+	if cfg == nil {
+		result.addError("config_nil", "config", "配置不能为空")
+		return result
+	}
+	if err := validateProviderCollection(cfg.Providers); err != nil {
+		result.addError("provider_invalid", "providers", err.Error())
+		return result
+	}
+	normalized := config.CloneAppConfig(cfg)
+	config.EnsureBuiltInProviders(normalized)
+	validateModelCollection(normalized.Models, normalized.Providers, &result)
+	return result
+}
+
+func validateModelCollection(models []config.ModelConfig, providers []config.ProviderConfig, result *configValidationResult) {
+	providerRefs := providerReferenceSet(providers)
+	seen := map[string]struct{}{}
+	basenameToUpstreams := map[string]map[string]struct{}{}
+
+	for i, model := range models {
+		model = config.NormalizeModel(model)
+		field := fmt.Sprintf("models[%d]", i)
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			result.addError("model_name_empty", field+".name", "模型名称不能为空")
+			continue
+		}
+
+		providerID := strings.TrimSpace(model.ProviderID)
+		if providerID != "" {
+			if _, ok := providerRefs[strings.ToLower(providerID)]; !ok {
+				result.addError(
+					"model_provider_not_found",
+					field+".provider_id",
+					fmt.Sprintf("模型 %q 绑定的 provider_id %q 不存在；请填写 providers[].id，留空表示按优先级自动路由", name, providerID),
+				)
+			}
+		}
+
+		dupKey := strings.ToLower(name) + "@" + strings.ToLower(providerID)
+		if _, ok := seen[dupKey]; ok {
+			result.addError("model_duplicate", field, fmt.Sprintf("模型 %q 在同一 provider 绑定下重复", name))
+		}
+		seen[dupKey] = struct{}{}
+
+		if model.Enabled {
+			basename := strings.ToLower(provider.ModelBasename(name))
+			if basename != "" && !strings.EqualFold(basename, name) {
+				if basenameToUpstreams[basename] == nil {
+					basenameToUpstreams[basename] = map[string]struct{}{}
+				}
+				basenameToUpstreams[basename][strings.ToLower(name)] = struct{}{}
+			}
+		}
+	}
+
+	for basename, upstreams := range basenameToUpstreams {
+		if len(upstreams) > 1 {
+			result.addWarning(
+				"model_alias_ambiguous",
+				"models",
+				fmt.Sprintf("短模型名 %q 对应多个上游模型；Visual Studio 回传短名时可能需要使用 model@provider_id 明确路由", basename),
+			)
+		}
+	}
+}
+
+func providerReferenceSet(providers []config.ProviderConfig) map[string]struct{} {
+	refs := map[string]struct{}{}
+	for _, p := range providers {
+		p = config.NormalizeProvider(p)
+		for _, value := range []string{config.ProviderKey(p), p.Name, p.DisplayName} {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				refs[strings.ToLower(value)] = struct{}{}
+			}
+		}
+	}
+	return refs
 }
 
 func (s *Server) cloneConfig() *config.AppConfig {

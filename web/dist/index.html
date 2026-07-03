@@ -348,7 +348,12 @@
         return requestAdminTokenAndRetry(() => fetchJSON(path, opts, true));
       }
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || '请求失败');
+      if (!res.ok) {
+        const err = new Error(data.error || '请求失败');
+        err.details = data;
+        err.validation = data.validation;
+        throw err;
+      }
       return data;
     };
 
@@ -395,6 +400,25 @@
       if (priorityA !== priorityB) return priorityA - priorityB;
       return providerKey(a).localeCompare(providerKey(b));
     });
+    const formatValidationIssues = (validation) => {
+      if (!validation) return '';
+      const lines = [];
+      (validation.errors || []).forEach((item) => lines.push(`错误: [${item.code}] ${item.field} - ${item.message}`));
+      (validation.warnings || []).forEach((item) => lines.push(`警告: [${item.code}] ${item.field} - ${item.message}`));
+      return lines.join('\n');
+    };
+    const validateConfigPayload = async (payload) => {
+      const result = await fetchJSON('/config/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!result.valid) throw Object.assign(new Error('配置校验失败'), { validation: result });
+      if ((result.warnings || []).length) {
+        return window.confirm('配置存在警告，是否继续保存？\n\n' + formatValidationIssues(result));
+      }
+      return true;
+    };
 
     // 页面切换：根据前端 hash 路由显示对应面板
     const showPage = (page) => {
@@ -652,16 +676,23 @@
 
     $('btnReloadConfig').addEventListener('click', loadConfig);
     $('btnSaveConfig').addEventListener('click', async () => {
-      const cfg = currentConfig || await fetchJSON('/config');
-      const payload = {
-        ...cfg,
-        port: Number($('cfgPort').value || 12345),
-        default_model: $('cfgDefaultModel').value.trim(),
-      };
-      await fetchJSON('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      currentConfig = payload;
-      setTestResult('配置已保存', '配置已保存并已热更新代理路由。端口变更仍需重启进程。');
-      loadConfig();
+      try {
+        const cfg = currentConfig || await fetchJSON('/config');
+        const payload = {
+          ...cfg,
+          port: Number($('cfgPort').value || 12345),
+          default_model: $('cfgDefaultModel').value.trim(),
+        };
+        if (!await validateConfigPayload(payload)) return;
+        await fetchJSON('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        currentConfig = payload;
+        setTestResult('配置已保存', '配置已保存并已热更新代理路由。端口变更仍需重启进程。');
+        loadConfig();
+      } catch (e) {
+        const msg = formatValidationIssues(e.validation) || String(e.message || e);
+        setTestResult('配置保存失败', msg);
+        alert(msg);
+      }
     });
 
     // 提供商弹窗状态
@@ -789,10 +820,17 @@
       const next = editingModelName
         ? models.map((item) => item.name === editingModelName ? payload : item)
         : [...models, payload];
-      await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
-      $('modelModal').classList.add('hidden');
-      editingModelName = null;
-      loadModels();
+      try {
+        const cfg = currentConfig || await fetchJSON('/config');
+        if (!await validateConfigPayload({ ...cfg, models: next })) return;
+        await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
+        $('modelModal').classList.add('hidden');
+        editingModelName = null;
+        loadModels();
+      } catch (e) {
+        const msg = formatValidationIssues(e.validation) || String(e.message || e);
+        alert(msg);
+      }
     });
 
     // 表格内操作按钮统一处理：编辑、删除、测试
