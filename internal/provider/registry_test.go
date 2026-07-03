@@ -141,6 +141,26 @@ func TestRegistrySkipsCoolingCandidateWhenAlternativeExists(t *testing.T) {
 	}
 }
 
+func TestRegistryCoolsDownAnyUpstreamServerError(t *testing.T) {
+	registry := NewRegistry("shared", time.Minute)
+	flaky := &fakeProvider{name: "flaky", enabled: true, models: []string{"shared"}}
+	healthy := &fakeProvider{name: "healthy", enabled: true, models: []string{"shared"}}
+
+	registry.Add(&ProviderEntry{Provider: flaky, Models: flaky.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: healthy, Models: healthy.models, Priority: 1})
+	registry.SetModels("flaky", flaky.models)
+	registry.SetModels("healthy", healthy.models)
+	registry.RecordCandidateFailure("flaky", fmt.Errorf("API 错误 502"))
+
+	candidates := registry.ResolveCandidates("shared")
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].Provider.Provider.Name() != "healthy" {
+		t.Fatalf("expected 5xx provider skipped, got %#v", candidates)
+	}
+}
+
 func TestRegistryReturnsCoolingCandidatesWhenAllAreCooling(t *testing.T) {
 	registry := NewRegistry("shared", time.Minute)
 	left := &fakeProvider{name: "left", enabled: true, models: []string{"shared"}}

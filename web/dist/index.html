@@ -278,10 +278,11 @@
                     <th>延迟</th>
                     <th>连续失败</th>
                     <th>冷却</th>
+                    <th>最近错误</th>
                   </tr>
                 </thead>
                 <tbody id="providerHealthTable">
-                  <tr><td colspan="5" class="empty">暂无运行数据</td></tr>
+                  <tr><td colspan="6" class="empty">暂无运行数据</td></tr>
                 </tbody>
               </table>
             </div>
@@ -368,6 +369,12 @@
       if (!ms || Number(ms) <= 0) return '<span class="badge ok">可用</span>';
       const seconds = Math.ceil(Number(ms) / 1000);
       return `<span class="badge warn">冷却 ${seconds}s</span>`;
+    };
+    const formatLastError = (message) => {
+      if (!message) return '-';
+      const text = escapeHTML(message);
+      const shortText = text.length > 80 ? text.slice(0, 80) + '...' : text;
+      return `<span class="badge warn" title="${text}">${shortText}</span>`;
     };
     const withAdminAuth = (opts = {}) => ({ ...opts, credentials: opts.credentials || 'same-origin' });
 
@@ -648,7 +655,7 @@
     const renderProviderHealth = (items) => {
       const tbody = $('providerHealthTable');
       if (!items || !items.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无 provider 健康数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无 provider 健康数据</td></tr>';
         return;
       }
       tbody.innerHTML = items.map((item) => {
@@ -660,6 +667,7 @@
             <td>${formatLatency(item.latency_ms)}</td>
             <td class="${item.consecutive_failures ? 'warn' : 'ok'}">${item.consecutive_failures || 0}</td>
             <td>${formatCooldown(item.cooldown_remaining_ms)}</td>
+            <td>${formatLastError(item.last_error)}</td>
           </tr>
         `;
       }).join('');

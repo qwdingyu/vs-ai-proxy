@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -529,16 +530,35 @@ func providerCooldownDuration(consecutiveFailures int, lastError string) time.Du
 	}
 
 	lower := strings.ToLower(lastError)
+	status := providerErrorStatus(lastError)
 	switch {
 	case strings.Contains(lower, "401") || strings.Contains(lower, "403") || strings.Contains(lower, "unauthorized"):
 		return 5 * time.Minute
-	case strings.Contains(lower, "429") || strings.Contains(lower, "503") || strings.Contains(lower, "timeout"):
+	case status == 429 || status >= 500 || strings.Contains(lower, "timeout"):
 		return time.Duration(min(consecutiveFailures, 5)) * 30 * time.Second
 	case consecutiveFailures >= 2:
 		return time.Duration(min(consecutiveFailures-1, 5)) * 15 * time.Second
 	default:
 		return 0
 	}
+}
+
+func providerErrorStatus(message string) int {
+	for _, field := range strings.FieldsFunc(message, func(r rune) bool {
+		return r < '0' || r > '9'
+	}) {
+		if len(field) != 3 {
+			continue
+		}
+		status, err := strconv.Atoi(field)
+		if err != nil {
+			continue
+		}
+		if status >= 400 && status <= 599 {
+			return status
+		}
+	}
+	return 0
 }
 
 // UpdateModelMappings 更新模型映射
