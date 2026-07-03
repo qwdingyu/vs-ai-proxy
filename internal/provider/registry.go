@@ -94,6 +94,16 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 	if len(candidates) > 0 || strings.Contains(stripTagSuffix(strings.TrimSpace(model)), "@") {
 		return candidates
 	}
+
+	if displayModel := displayNameModelSuffix(model); displayModel != "" && !strings.EqualFold(displayModel, resolved) {
+		displayResolved := r.resolveModelLocked(displayModel)
+		displayCandidates := r.resolveCandidatesLocked(displayResolved)
+		if len(displayCandidates) > 0 {
+			return displayCandidates
+		}
+		return r.fallbackCandidatesLocked(displayResolved)
+	}
+
 	return r.fallbackCandidatesLocked(resolved)
 }
 
@@ -117,6 +127,18 @@ func (r *Registry) resolveModelLocked(model string) string {
 	}
 	if resolved := r.resolveProviderHintModelLocked(clean); resolved != "" {
 		return resolved
+	}
+	if displayModel := displayNameModelSuffix(clean); displayModel != "" && !strings.EqualFold(displayModel, clean) {
+		if resolved := r.resolveModelLocked(displayModel); resolved != displayModel {
+			return resolved
+		}
+		if _, ok := r.modelToProvider[displayModel]; ok {
+			return displayModel
+		}
+		if _, ok := r.upstreamToProviders[displayModel]; ok {
+			return displayModel
+		}
+		return displayModel
 	}
 	return clean
 }
@@ -546,6 +568,20 @@ func modelSuffix(model string) string {
 		return model[slash+1:]
 	}
 	return model
+}
+
+func displayNameModelSuffix(model string) string {
+	clean := stripTagSuffix(strings.TrimSpace(model))
+	sep := " - "
+	idx := strings.LastIndex(clean, sep)
+	if idx < 0 || idx+len(sep) >= len(clean) {
+		return ""
+	}
+	suffix := strings.TrimSpace(clean[idx+len(sep):])
+	if suffix == "" {
+		return ""
+	}
+	return suffix
 }
 
 func appendUniqueProvider(entries []*ProviderEntry, entry *ProviderEntry) []*ProviderEntry {

@@ -1044,6 +1044,34 @@ func TestChatCompletionsRebuildsCatalogBeforeResolvingCandidates(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsAcceptsVisualStudioDisplayModelName(t *testing.T) {
+	prov := newFakeProvider("usecpa", true, []string{"deepseek-v4-flash"}, &fakeChatResponse{Model: "deepseek-v4-flash", Content: "pong"}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"DEEPSEEK - deepseek-v4-flash:latest","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Resolved-Model"); got != "deepseek-v4-flash" {
+		t.Fatalf("resolved model = %q, want deepseek-v4-flash", got)
+	}
+	if got := rec.Header().Get("X-Proxy-Upstream-Model"); got != "deepseek-v4-flash" {
+		t.Fatalf("upstream model = %q, want deepseek-v4-flash", got)
+	}
+	if prov.lastReq == nil || prov.lastReq.Model != "deepseek-v4-flash" {
+		t.Fatalf("provider request model = %#v, want deepseek-v4-flash", prov.lastReq)
+	}
+}
+
 func TestChatCompletionsProviderFailureReturnsDiagnosticAttempts(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"deepseek-v4-flash"}, nil, "")
 	prov.chatErr = errors.New("请求失败: dial tcp: connect: connection refused")

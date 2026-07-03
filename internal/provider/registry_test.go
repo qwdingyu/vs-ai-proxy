@@ -132,6 +132,32 @@ func TestRegistryResolvesProviderModelHintByUpstreamSuffix(t *testing.T) {
 	}
 }
 
+func TestRegistryResolvesVisualStudioDisplayModelName(t *testing.T) {
+	registry := NewRegistry("deepseek-v4-flash", time.Minute)
+	usecpa := &fakeProvider{
+		name:    "usecpa",
+		enabled: true,
+		models:  []string{"deepseek-v4-flash"},
+	}
+
+	registry.Add(&ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 1})
+	registry.SetModels("usecpa", usecpa.models)
+
+	candidates := registry.ResolveCandidates("DEEPSEEK - deepseek-v4-flash:latest")
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].Provider.Provider.Name() != "usecpa" {
+		t.Fatalf("provider = %q, want usecpa", candidates[0].Provider.Provider.Name())
+	}
+	if candidates[0].ModelID != "deepseek-v4-flash" {
+		t.Fatalf("model id = %q, want deepseek-v4-flash", candidates[0].ModelID)
+	}
+	if got := registry.ResolveModel("DEEPSEEK - deepseek-v4-flash:latest"); got != "deepseek-v4-flash" {
+		t.Fatalf("ResolveModel() = %q, want deepseek-v4-flash", got)
+	}
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {
