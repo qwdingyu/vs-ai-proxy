@@ -990,6 +990,109 @@ func TestChatCompletionsNonStreamingWithAuth(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsUnknownModelReturnsBadRequest(t *testing.T) {
+	server := newOpenServer()
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseed-v4-flash","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Candidate-Count"); got != "0" {
+		t.Fatalf("candidate count = %q, want 0", got)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal diagnostic error: %v", err)
+	}
+	errObj, _ := body["error"].(map[string]any)
+	if errObj["code"] != "model_not_routable" {
+		t.Fatalf("error.code = %v, want model_not_routable; body=%s", errObj["code"], rec.Body.String())
+	}
+}
+
+func TestChatCompletionsRebuildsCatalogBeforeResolvingCandidates(t *testing.T) {
+	prov := newFakeProvider("useai", true, nil, &fakeChatResponse{Model: "deepseek-v4-flash", Content: "pong"}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Candidate-Count"); got != "1" {
+		t.Fatalf("candidate count = %q, want 1", got)
+	}
+	if prov.lastReq == nil || prov.lastReq.Model != "deepseek-v4-flash" {
+		t.Fatalf("provider request model = %#v, want deepseek-v4-flash", prov.lastReq)
+	}
+}
+
+func TestChatCompletionsProviderFailureReturnsDiagnosticAttempts(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"deepseek-v4-flash"}, nil, "")
+	prov.chatErr = errors.New("请求失败: dial tcp: connect: connection refused")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				CandidateCount int `json:"candidate_count"`
+				Attempts       []struct {
+					Provider string `json:"provider"`
+					Upstream string `json:"upstream_model"`
+					Category string `json:"category"`
+				} `json:"attempts"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal diagnostic error: %v", err)
+	}
+	if body.Error.Code != "network_error" {
+		t.Fatalf("error.code = %q, want network_error; body=%s", body.Error.Code, rec.Body.String())
+	}
+	if body.Error.Details.CandidateCount != 1 {
+		t.Fatalf("candidate_count = %d, want 1", body.Error.Details.CandidateCount)
+	}
+	if len(body.Error.Details.Attempts) != 1 {
+		t.Fatalf("attempts len = %d, want 1; body=%s", len(body.Error.Details.Attempts), rec.Body.String())
+	}
+	attempt := body.Error.Details.Attempts[0]
+	if attempt.Provider != "useai" || attempt.Upstream != "deepseek-v4-flash" || attempt.Category != "network_error" {
+		t.Fatalf("attempt = %#v, want useai/deepseek-v4-flash/network_error", attempt)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // 额外覆盖：Ollama 流式直通格式校验
 // -----------------------------------------------------------------------------

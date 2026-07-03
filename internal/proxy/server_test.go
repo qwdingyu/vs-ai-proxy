@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -124,6 +125,19 @@ func TestBuildRegistryDoesNotRegisterProviderFromEnvironment(t *testing.T) {
 
 	if got := registry.ProviderNames(); len(got) != 0 {
 		t.Fatalf("providers = %#v, want none because provider env discovery is intentionally disabled", got)
+	}
+}
+
+func TestServerConfigDirFollowsConfigManagerPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.json")
+	mgr, err := config.NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	server := NewServer(mgr.Get(), mgr, store.New(10), log.New(nil, log.LevelError, false))
+
+	if got, want := server.configDir(), filepath.Dir(path); got != want {
+		t.Fatalf("configDir() = %q, want %q", got, want)
 	}
 }
 

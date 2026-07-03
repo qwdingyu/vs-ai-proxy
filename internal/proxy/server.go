@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -49,7 +50,7 @@ func NewServer(cfg *config.AppConfig, configMgr *config.Manager, st *store.Store
 	}
 
 	s.registry = s.buildRegistry(cfg)
-	s.catalog = provider.NewModelCatalog(s.registry, configDir(cfg), 5*time.Minute)
+	s.catalog = provider.NewModelCatalog(s.registry, s.configDir(), 5*time.Minute)
 
 	return s
 }
@@ -62,7 +63,7 @@ func (s *Server) Reconfigure(cfg *config.AppConfig) {
 	}
 
 	registry := s.buildRegistry(cfg)
-	catalog := provider.NewModelCatalog(registry, configDir(cfg), 5*time.Minute)
+	catalog := provider.NewModelCatalog(registry, s.configDir(), 5*time.Minute)
 
 	s.mu.Lock()
 	s.config = cfg
@@ -77,7 +78,7 @@ func (s *Server) snapshot() (*config.AppConfig, *provider.Registry, *provider.Mo
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.catalog == nil {
-		return s.config, s.registry, provider.NewModelCatalog(s.registry, configDir(s.config), 5*time.Minute)
+		return s.config, s.registry, provider.NewModelCatalog(s.registry, s.configDir(), 5*time.Minute)
 	}
 	return s.config, s.registry, s.catalog
 }
@@ -87,9 +88,11 @@ func (s *Server) SnapshotComponents() (*config.AppConfig, *provider.Registry, *p
 	return s.snapshot()
 }
 
-func configDir(cfg *config.AppConfig) string {
-	if cfg == nil {
-		return ""
+func (s *Server) configDir() string {
+	if s != nil && s.configMgr != nil {
+		if path := strings.TrimSpace(s.configMgr.ConfigPath()); path != "" {
+			return filepath.Dir(path)
+		}
 	}
 	return config.DefaultConfigDir()
 }
@@ -396,6 +399,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg, registry, catalog := s.snapshot()
+	if catalog != nil {
+		catalog.Rebuild()
+	}
 
 	// 解析模型
 	modelName := req.Model
@@ -405,8 +411,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	baseReq := cloneChatRequest(&req)
 
 	var lastErr error
+	attempts := []attemptDiagnostic{}
 	candidates := registry.ResolveCandidates(modelName)
-	setCandidateDiagnosticHeaders(w, modelName, registry.ResolveModel(modelName), candidates)
+	resolvedModel := registry.ResolveModel(modelName)
+	setCandidateDiagnosticHeaders(w, modelName, resolvedModel, candidates)
+	if len(candidates) == 0 {
+		writeProxyDiagnosticError(w, http.StatusBadRequest, noCandidateDiagnostic(modelName, resolvedModel, len(candidates)))
+		return
+	}
 	for _, cand := range candidates {
 		provEntry := cand.Provider
 		prov := provEntry.Provider
@@ -447,6 +459,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			if err != nil {
 				lastErr = err
+				attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if streamWriter.HasWritten() {
 					return
@@ -462,6 +475,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				cancel()
 				if err != nil {
 					lastErr = err
+					attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					continue
 				}
@@ -477,6 +491,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err != nil {
 			lastErr = err
+			attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 			continue
 		}
@@ -489,9 +504,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if lastErr != nil {
-		http.Error(w, lastErr.Error(), http.StatusBadGateway)
+		writeProxyDiagnosticError(w, http.StatusBadGateway, allCandidatesFailedDiagnostic(modelName, resolvedModel, len(candidates), attempts))
 	} else {
-		http.Error(w, "所有候选提供商均不可用", http.StatusServiceUnavailable)
+		writeProxyDiagnosticError(w, http.StatusServiceUnavailable, allCandidatesFailedDiagnostic(modelName, resolvedModel, len(candidates), attempts))
 	}
 }
 
@@ -518,14 +533,18 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg, registry, catalog := s.snapshot()
+	if catalog != nil {
+		catalog.Rebuild()
+	}
 
 	modelName, _ := ollamaReq["model"].(string)
 	if modelName == "" {
 		modelName = cfg.DefaultModel
 	}
 	candidates := registry.ResolveCandidates(modelName)
+	resolvedModel := registry.ResolveModel(modelName)
 	if len(candidates) == 0 {
-		http.Error(w, fmt.Sprintf("模型 %s 无可用提供商", modelName), http.StatusBadRequest)
+		writeProxyDiagnosticError(w, http.StatusBadRequest, noCandidateDiagnostic(modelName, resolvedModel, len(candidates)))
 		return
 	}
 
@@ -547,7 +566,8 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var lastErr error
-	setCandidateDiagnosticHeaders(w, modelName, registry.ResolveModel(modelName), candidates)
+	attempts := []attemptDiagnostic{}
+	setCandidateDiagnosticHeaders(w, modelName, resolvedModel, candidates)
 	for _, cand := range candidates {
 		provEntry := cand.Provider
 		prov := provEntry.Provider
@@ -620,6 +640,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			if err != nil {
 				lastErr = err
+				attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if streamWriter.HasWritten() {
 					return
@@ -636,6 +657,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				cancel()
 				if err != nil {
 					lastErr = err
+					attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					continue
 				}
@@ -657,6 +679,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err != nil {
 			lastErr = err
+			attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 			continue
 		}
@@ -669,9 +692,9 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if lastErr != nil {
-		http.Error(w, lastErr.Error(), http.StatusBadGateway)
+		writeProxyDiagnosticError(w, http.StatusBadGateway, allCandidatesFailedDiagnostic(modelName, resolvedModel, len(candidates), attempts))
 	} else {
-		http.Error(w, "所有候选提供商均不可用", http.StatusServiceUnavailable)
+		writeProxyDiagnosticError(w, http.StatusServiceUnavailable, allCandidatesFailedDiagnostic(modelName, resolvedModel, len(candidates), attempts))
 	}
 }
 

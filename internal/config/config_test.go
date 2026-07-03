@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestDefaultConfigIncludesUseAIAsFirstProvider(t *testing.T) {
 	cfg := DefaultConfig()
@@ -148,5 +153,71 @@ func TestApplyEnvOverridesIgnoresInvalidPort(t *testing.T) {
 
 	if cfg.Port != 12345 {
 		t.Fatalf("port = %d, want 12345", cfg.Port)
+	}
+}
+
+func TestManagerReloadUpdatesConfigFromDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	next := DefaultConfig()
+	next.Port = 18888
+	next.DefaultModel = "reload-model"
+	next.Providers = []ProviderConfig{DefaultUseAIProvider()}
+	data, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reloaded, err := mgr.Reload()
+	if err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if reloaded.Port != 18888 {
+		t.Fatalf("reloaded port = %d, want 18888", reloaded.Port)
+	}
+	if mgr.Get().DefaultModel != "reload-model" {
+		t.Fatalf("manager default model = %q, want reload-model", mgr.Get().DefaultModel)
+	}
+}
+
+func TestManagerSaveWritesValidConfigAndCleansTempFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	cfg := mgr.Get()
+	cfg.DefaultModel = "saved-model"
+	if err := mgr.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var saved AppConfig
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+	if saved.DefaultModel != "saved-model" {
+		t.Fatalf("saved default_model = %q, want saved-model", saved.DefaultModel)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, ".config-*.tmp"))
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary config files left behind: %#v", matches)
 	}
 }

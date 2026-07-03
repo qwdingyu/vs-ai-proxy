@@ -90,7 +90,11 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 	}
 
 	resolved := r.resolveModelLocked(model)
-	return r.resolveCandidatesLocked(resolved)
+	candidates := r.resolveCandidatesLocked(resolved)
+	if len(candidates) > 0 || strings.Contains(stripTagSuffix(strings.TrimSpace(model)), "@") {
+		return candidates
+	}
+	return r.fallbackCandidatesLocked(resolved)
 }
 
 // ResolveModel 返回请求模型经 tag/provider hint/catalog 映射后的代理内部模型名。
@@ -229,6 +233,27 @@ func (r *Registry) resolveCandidatesLocked(model string) []Candidate {
 				})
 			}
 		}
+	}
+	return candidates
+}
+
+func (r *Registry) fallbackCandidatesLocked(model string) []Candidate {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+
+	candidates := []Candidate{}
+	for _, entry := range r.orderedEntriesLocked() {
+		if entry == nil || entry.Provider == nil || !entry.Provider.IsEnabled() {
+			continue
+		}
+		candidates = append(candidates, Candidate{
+			Provider:   entry,
+			UpstreamID: model,
+			ModelID:    model,
+			Priority:   entry.Priority,
+		})
 	}
 	return candidates
 }

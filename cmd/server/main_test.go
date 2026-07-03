@@ -1,11 +1,19 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/dingyuwang/vs-ai-proxy/internal/config"
+	"github.com/dingyuwang/vs-ai-proxy/internal/log"
+	"github.com/dingyuwang/vs-ai-proxy/internal/proxy"
+	"github.com/dingyuwang/vs-ai-proxy/internal/store"
 )
 
 func TestLoadEnvFile(t *testing.T) {
@@ -86,5 +94,58 @@ func TestResolveAppAddrUsesHostOverride(t *testing.T) {
 func TestDisplayAddrKeepsWildcardBindVisible(t *testing.T) {
 	if got, want := displayAddr("0.0.0.0:12345"), "0.0.0.0:12345"; got != want {
 		t.Fatalf("displayAddr() = %q, want %q", got, want)
+	}
+}
+
+func TestWatchConfigLoopReloadsProxyConfigFromDisk(t *testing.T) {
+	t.Setenv("PORT", "")
+	t.Setenv("PROXY_PORT", "")
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	initial := config.DefaultConfig()
+	initial.Port = 12345
+	initial.DefaultModel = "before-hot-reload"
+	initial.Providers = []config.ProviderConfig{config.DefaultUseAIProvider()}
+	writeConfigFile(t, path, initial)
+
+	configMgr, err := config.NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	proxySrv := proxy.NewServer(configMgr.Get(), configMgr, store.New(10), log.New(nil, log.LevelError, false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchConfigLoop(ctx, configMgr, proxySrv, log.New(nil, log.LevelError, false))
+
+	// 确保新写入的配置文件 mtime 晚于 watchConfigLoop 启动时记录的 mtime。
+	time.Sleep(25 * time.Millisecond)
+	next := config.DefaultConfig()
+	next.Port = 12345
+	next.DefaultModel = "after-hot-reload"
+	next.Providers = []config.ProviderConfig{config.DefaultUseAIProvider()}
+	writeConfigFile(t, path, next)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		cfg, _, _ := proxySrv.SnapshotComponents()
+		if cfg.DefaultModel == "after-hot-reload" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cfg, _, _ := proxySrv.SnapshotComponents()
+	t.Fatalf("proxy default model = %q, want after-hot-reload", cfg.DefaultModel)
+}
+
+func writeConfigFile(t *testing.T, path string, cfg *config.AppConfig) {
+	t.Helper()
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
 	}
 }

@@ -25,7 +25,6 @@ import (
 // 并在 staticFS 非空时兼做静态资源与 SPA 路由的宿主。
 type Server struct {
 	engine    *gin.Engine
-	config    *config.AppConfig
 	configMgr *config.Manager
 	proxy     *proxy.Server
 	store     *store.Store
@@ -52,7 +51,6 @@ func NewServer(
 
 	s := &Server{
 		engine:    engine,
-		config:    configMgr.Get(),
 		configMgr: configMgr,
 		proxy:     proxySrv,
 		store:     st,
@@ -222,7 +220,7 @@ func (s *Server) saveConfig(c *gin.Context) {
 
 // listProviders 列出所有提供商
 func (s *Server) listProviders(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"providers": s.config.Providers})
+	c.JSON(http.StatusOK, gin.H{"providers": s.configMgr.Get().Providers})
 }
 
 // addProvider 新增提供商并热更新代理路由。
@@ -310,7 +308,7 @@ func (s *Server) deleteProvider(c *gin.Context) {
 
 // listModels 列出所有模型配置
 func (s *Server) listModels(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"models": s.config.Models})
+	c.JSON(http.StatusOK, gin.H{"models": s.configMgr.Get().Models})
 }
 
 // saveModels 保存模型配置
@@ -415,9 +413,8 @@ func (s *Server) saveAndApplyConfig(c *gin.Context, cfg *config.AppConfig) bool 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return false
 	}
-	s.config = s.configMgr.Get()
 	if s.proxy != nil {
-		s.proxy.Reconfigure(s.config)
+		s.proxy.Reconfigure(s.configMgr.Get())
 	}
 	return true
 }

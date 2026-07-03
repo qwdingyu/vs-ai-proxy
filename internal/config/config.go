@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -264,6 +265,7 @@ func applyEnvOverrides(cfg *AppConfig) {
 
 // Manager 管理应用配置的加载和保存
 type Manager struct {
+	mu         sync.RWMutex
 	configPath string
 	config     *AppConfig
 }
@@ -297,15 +299,17 @@ func NewManager(configPath string) (*Manager, error) {
 		}
 	}
 
-	m.config = cfg
-	EnsureBuiltInProviders(m.config)
-	applyEnvOverrides(m.config)
+	EnsureBuiltInProviders(cfg)
+	applyEnvOverrides(cfg)
+	m.config = CloneAppConfig(cfg)
 	return m, nil
 }
 
 // Get 返回当前配置
 func (m *Manager) Get() *AppConfig {
-	return m.config
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return CloneAppConfig(m.config)
 }
 
 // ConfigPath 返回当前配置文件路径。
@@ -316,8 +320,29 @@ func (m *Manager) ConfigPath() string {
 // Save 保存配置
 func (m *Manager) Save(cfg *AppConfig) error {
 	EnsureBuiltInProviders(cfg)
-	m.config = cfg
-	return m.save(cfg)
+	next := CloneAppConfig(cfg)
+	if err := m.save(next); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.config = next
+	m.mu.Unlock()
+	return nil
+}
+
+// Reload 从磁盘重新加载配置并更新内存快照。
+func (m *Manager) Reload() (*AppConfig, error) {
+	cfg, err := m.load()
+	if err != nil {
+		return nil, err
+	}
+	EnsureBuiltInProviders(cfg)
+	applyEnvOverrides(cfg)
+	next := CloneAppConfig(cfg)
+	m.mu.Lock()
+	m.config = next
+	m.mu.Unlock()
+	return CloneAppConfig(next), nil
 }
 
 // load 从文件加载配置
@@ -342,9 +367,90 @@ func (m *Manager) save(cfg *AppConfig) error {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
 
-	if err := os.WriteFile(m.configPath, data, 0644); err != nil {
-		return fmt.Errorf("写入配置文件失败: %w", err)
+	configDir := filepath.Dir(m.configPath)
+	tmp, err := os.CreateTemp(configDir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建临时配置文件失败: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("写入临时配置文件失败: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("设置临时配置文件权限失败: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("同步临时配置文件失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭临时配置文件失败: %w", err)
 	}
 
+	if err := os.Rename(tmpPath, m.configPath); err != nil {
+		return fmt.Errorf("写入配置文件失败: %w", err)
+	}
+	cleanup = false
+
 	return nil
+}
+
+// CloneAppConfig 深拷贝配置，避免热加载、Web 保存和代理读取之间共享可变切片/指针。
+func CloneAppConfig(cfg *AppConfig) *AppConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	out.Providers = append([]ProviderConfig(nil), cfg.Providers...)
+	out.Models = make([]ModelConfig, len(cfg.Models))
+	for i, model := range cfg.Models {
+		out.Models[i] = cloneModelConfig(model)
+	}
+	return &out
+}
+
+func cloneModelConfig(model ModelConfig) ModelConfig {
+	out := model
+	if model.ContextLength != nil {
+		v := *model.ContextLength
+		out.ContextLength = &v
+	}
+	if model.MaxOutputTokens != nil {
+		v := *model.MaxOutputTokens
+		out.MaxOutputTokens = &v
+	}
+	if model.SupportsTools != nil {
+		v := *model.SupportsTools
+		out.SupportsTools = &v
+	}
+	if model.SupportsVision != nil {
+		v := *model.SupportsVision
+		out.SupportsVision = &v
+	}
+	if model.Temperature != nil {
+		v := *model.Temperature
+		out.Temperature = &v
+	}
+	if model.TopP != nil {
+		v := *model.TopP
+		out.TopP = &v
+	}
+	if model.MaxTokens != nil {
+		v := *model.MaxTokens
+		out.MaxTokens = &v
+	}
+	if model.TimeoutSeconds != nil {
+		v := *model.TimeoutSeconds
+		out.TimeoutSeconds = &v
+	}
+	return out
 }

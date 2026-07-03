@@ -79,6 +79,7 @@ func main() {
 	defer cancel()
 	go benchSvc.Run(ctx)
 	go persistStoreLoop(ctx, st, storePath, logger)
+	go watchConfigLoop(ctx, configMgr, proxySrv, logger)
 
 	publicAddr := displayAddr(appAddr)
 	logger.Info("VS AI Proxy 已启动，监听地址=http://%s，管理面板=http://%s/admin", publicAddr, publicAddr)
@@ -225,6 +226,54 @@ func persistStoreLoop(ctx context.Context, st *store.Store, path string, logger 
 			if err := st.PersistToFile(path); err != nil {
 				logger.Warn("定期保存请求日志失败: %v", err)
 			}
+		}
+	}
+}
+
+func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *proxy.Server, logger *log.Logger) {
+	if configMgr == nil || proxySrv == nil {
+		return
+	}
+	path := configMgr.ConfigPath()
+	if path == "" {
+		return
+	}
+
+	var lastMod time.Time
+	if info, err := os.Stat(path); err == nil {
+		lastMod = info.ModTime()
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			info, err := os.Stat(path)
+			if err != nil {
+				logger.Warn("检查配置文件变更失败: %v", err)
+				continue
+			}
+			mod := info.ModTime()
+			if !mod.After(lastMod) {
+				continue
+			}
+			lastMod = mod
+
+			oldPort := configMgr.Get().Port
+			cfg, err := configMgr.Reload()
+			if err != nil {
+				logger.Warn("热加载配置失败: %v", err)
+				continue
+			}
+			proxySrv.Reconfigure(cfg)
+			if cfg.Port != oldPort {
+				logger.Warn("配置文件端口已变更为 %d；当前监听端口仍为 %d，端口变更需要重启进程", cfg.Port, oldPort)
+			}
+			logger.Info("已热加载配置文件: %s (providers=%d models=%d)", path, len(cfg.Providers), len(cfg.Models))
 		}
 	}
 }
