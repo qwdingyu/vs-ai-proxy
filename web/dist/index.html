@@ -52,6 +52,7 @@
     .stack { display: flex; flex-direction: column; gap: 12px; }
     .pre { white-space: pre-wrap; word-break: break-word; background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 280px; overflow: auto; }
     .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #0f1115; font-size: 12px; }
+    .badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; background: #0f1115; border: 1px solid var(--border); color: var(--muted); font-size: 12px; }
   </style>
 </head>
 <body>
@@ -211,6 +212,7 @@
             <label>Provider ID <input id="mProvider" placeholder="留空表示按优先级自动选择" /></label>
             <label>上下文长度 <input type="number" id="mCtx" /></label>
             <label>最大输出 <input type="number" id="mMax" /></label>
+            <div class="hint" id="mMetaHint">输入模型名后会自动查询内置元数据并补齐默认值。</div>
             <label>启用 <input type="checkbox" id="mEnabled" checked /></label>
             <div class="actions">
               <button class="btn" id="btnCancelModel">取消</button>
@@ -264,6 +266,23 @@
         </div>
         <div class="grid-2" style="margin-top: 12px;">
           <div class="stack">
+            <div class="panel" style="margin:0;">
+              <div class="label">Provider 健康与冷却</div>
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Provider</th>
+                    <th>成功率</th>
+                    <th>延迟</th>
+                    <th>连续失败</th>
+                    <th>冷却</th>
+                  </tr>
+                </thead>
+                <tbody id="providerHealthTable">
+                  <tr><td colspan="5" class="empty">暂无运行数据</td></tr>
+                </tbody>
+              </table>
+            </div>
             <div class="panel" style="margin:0;">
               <div class="label">Health</div>
               <div class="pre" id="healthOutput">-</div>
@@ -326,6 +345,19 @@
       const d = new Date(ts);
       if (Number.isNaN(d.getTime())) return ts;
       return d.toLocaleString();
+    };
+    const formatPercent = (value) => {
+      if (value == null || Number.isNaN(Number(value))) return '-';
+      return Math.round(Number(value) * 100) + '%';
+    };
+    const formatLatency = (value) => {
+      if (!value || Number(value) <= 0) return '-';
+      return Math.round(Number(value)) + ' ms';
+    };
+    const formatCooldown = (ms) => {
+      if (!ms || Number(ms) <= 0) return '<span class="badge ok">可用</span>';
+      const seconds = Math.ceil(Number(ms) / 1000);
+      return `<span class="badge warn">冷却 ${seconds}s</span>`;
     };
     const withAdminAuth = (opts = {}) => {
       const headers = new Headers(opts.headers || {});
@@ -581,16 +613,50 @@
       const providerId = $('mProvider').value.trim();
       try {
         const meta = await fetchJSON('/models/metadata?name=' + encodeURIComponent(name) + '&provider_id=' + encodeURIComponent(providerId));
-        if (!meta.found) return;
+        if (!meta.found) {
+          $('mMetaHint').textContent = '未命中内置模型元数据；保存时会使用安全兜底默认值，建议手动确认上下文和最大输出。';
+          return;
+        }
+        const changed = [];
         if ((!$('mCtx').value || Number($('mCtx').value) <= 0) && meta.context_length) {
           $('mCtx').value = meta.context_length;
+          changed.push('上下文长度');
         }
         if ((!$('mMax').value || Number($('mMax').value) <= 0) && meta.max_output_tokens) {
           $('mMax').value = meta.max_output_tokens;
+          changed.push('最大输出');
         }
+        const source = meta.source === 'provider_profile' ? 'provider 专属配置' : '内置模型目录';
+        const capabilities = [
+          meta.supports_tools === true ? 'tools' : '',
+          meta.supports_vision === true ? 'vision' : '',
+          meta.reasoning_effort ? `reasoning=${meta.reasoning_effort}` : ''
+        ].filter(Boolean).join(', ');
+        $('mMetaHint').textContent = `已命中${source}: ${meta.model || name}。${changed.length ? '已补齐 ' + changed.join('、') + '。' : '当前数值保持用户填写。'}${capabilities ? ' 能力: ' + capabilities + '。' : ''}`;
       } catch (e) {
+        $('mMetaHint').textContent = '模型元数据查询失败，可继续手动填写；保存时后端仍会做一次默认值补齐。';
         console.debug('模型元数据查询失败', e);
       }
+    };
+
+    const renderProviderHealth = (items) => {
+      const tbody = $('providerHealthTable');
+      if (!items || !items.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无 provider 健康数据</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map((item) => {
+        const hasTraffic = (item.successes || 0) + (item.failures || 0) > 0;
+        return `
+          <tr>
+            <td>${item.provider}</td>
+            <td>${hasTraffic ? formatPercent(item.success_rate) : '<span class="badge">暂无请求</span>'}</td>
+            <td>${formatLatency(item.latency_ms)}</td>
+            <td class="${item.consecutive_failures ? 'warn' : 'ok'}">${item.consecutive_failures || 0}</td>
+            <td>${formatCooldown(item.cooldown_remaining_ms)}</td>
+          </tr>
+        `;
+      }).join('');
     };
 
     const loadMonitor = async () => {
@@ -611,6 +677,7 @@
         $('healthStatus').textContent = health.status || '-';
         $('healthProviders').textContent = (health.providers || []).length;
         $('healthModels').textContent = (health.available_models || []).length;
+        renderProviderHealth(providerHealth);
         $('healthOutput').textContent = JSON.stringify({
           ...health,
           provider_health: providerHealth
@@ -850,8 +917,9 @@
       $('modelModalTitle').textContent = '新增模型';
       $('mName').value = '';
       $('mProvider').value = '';
-      $('mCtx').value = 8192;
-      $('mMax').value = 4096;
+      $('mCtx').value = '';
+      $('mMax').value = '';
+      $('mMetaHint').textContent = '输入模型名后会自动查询内置元数据并补齐默认值；留空保存时后端也会做安全兜底。';
       $('mEnabled').checked = true;
       $('modelModal').classList.remove('hidden');
     });
@@ -939,6 +1007,7 @@
         $('mProvider').value = item.provider_id || item.provider || '';
         $('mCtx').value = item.context_length || 0;
         $('mMax').value = item.max_output_tokens || 0;
+        $('mMetaHint').textContent = '当前显示的是已保存配置；清空上下文或最大输出后，失焦模型名可重新按元数据补齐。';
         $('mEnabled').checked = item.enabled;
         $('modelModal').classList.remove('hidden');
       }

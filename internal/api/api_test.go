@@ -131,6 +131,48 @@ func TestProviderHealthEndpointReturnsRuntimeSnapshot(t *testing.T) {
 	}
 }
 
+func TestProviderHealthEndpointIncludesRegisteredProvidersWithoutTraffic(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	payload := config.AppConfig{
+		Port:         11434,
+		DefaultModel: "model-x",
+		Providers: []config.ProviderConfig{{
+			ID:       "idle-provider",
+			Name:     "Idle Provider",
+			Type:     "openai",
+			BaseURL:  "https://example.invalid/v1",
+			Enabled:  true,
+			Priority: 1,
+		}},
+		Models: []config.ModelConfig{{
+			Name:       "model-x",
+			ProviderID: "idle-provider",
+			Enabled:    true,
+		}},
+	}
+	saveRec := httptest.NewRecorder()
+	saveReq := httptest.NewRequest(http.MethodPut, "/api/config", mustJSONBody(t, payload))
+	apiSrv.engine.ServeHTTP(saveRec, saveReq)
+	if saveRec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/config status = %d, want %d; body=%s", saveRec.Code, http.StatusOK, saveRec.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/providers/health", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/providers/health status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"provider":"idle-provider"`)) {
+		t.Fatalf("provider health should include idle registered provider: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"successes":0`)) {
+		t.Fatalf("idle provider should have zero successes: %s", rec.Body.String())
+	}
+}
+
 func TestAdminManagementAPIRoutesWorkAndAreNotCached(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 

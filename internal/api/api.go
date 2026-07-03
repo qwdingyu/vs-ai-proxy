@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -208,17 +209,17 @@ func (s *Server) getConfig(c *gin.Context) {
 }
 
 type providerHealthResponse struct {
-	Provider            string    `json:"provider"`
-	Successes           int       `json:"successes"`
-	Failures            int       `json:"failures"`
-	ConsecutiveFailures int       `json:"consecutive_failures"`
-	SuccessRate         float64   `json:"success_rate"`
-	LatencyMs           float64   `json:"latency_ms"`
-	LastSuccess         time.Time `json:"last_success,omitempty"`
-	LastFailure         time.Time `json:"last_failure,omitempty"`
-	CooldownUntil       time.Time `json:"cooldown_until,omitempty"`
-	CooldownRemainingMs int64     `json:"cooldown_remaining_ms"`
-	LastError           string    `json:"last_error,omitempty"`
+	Provider            string     `json:"provider"`
+	Successes           int        `json:"successes"`
+	Failures            int        `json:"failures"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	SuccessRate         float64    `json:"success_rate"`
+	LatencyMs           float64    `json:"latency_ms"`
+	LastSuccess         *time.Time `json:"last_success,omitempty"`
+	LastFailure         *time.Time `json:"last_failure,omitempty"`
+	CooldownUntil       *time.Time `json:"cooldown_until,omitempty"`
+	CooldownRemainingMs int64      `json:"cooldown_remaining_ms"`
+	LastError           string     `json:"last_error,omitempty"`
 }
 
 func (s *Server) getProviderHealth(c *gin.Context) {
@@ -228,9 +229,27 @@ func (s *Server) getProviderHealth(c *gin.Context) {
 	}
 
 	health := s.proxy.ProviderHealthSnapshot()
-	out := make([]providerHealthResponse, 0, len(health))
+	_, registry, _ := s.proxy.SnapshotComponents()
+	providerNames := map[string]struct{}{}
+	for providerName := range health {
+		providerNames[providerName] = struct{}{}
+	}
+	if registry != nil {
+		for _, providerName := range registry.ProviderNames() {
+			providerNames[providerName] = struct{}{}
+		}
+	}
+
+	names := make([]string, 0, len(providerNames))
+	for providerName := range providerNames {
+		names = append(names, providerName)
+	}
+	sort.Strings(names)
+
+	out := make([]providerHealthResponse, 0, len(names))
 	now := time.Now()
-	for providerName, item := range health {
+	for _, providerName := range names {
+		item := health[providerName]
 		total := item.Successes + item.Failures
 		successRate := 0.0
 		if total > 0 {
@@ -248,14 +267,28 @@ func (s *Server) getProviderHealth(c *gin.Context) {
 			ConsecutiveFailures: item.ConsecutiveFailures,
 			SuccessRate:         successRate,
 			LatencyMs:           float64(item.LatencyEWMA.Microseconds()) / 1000,
-			LastSuccess:         item.LastSuccess,
-			LastFailure:         item.LastFailure,
-			CooldownUntil:       item.CooldownUntil,
+			LastSuccess:         nonZeroTimePtr(item.LastSuccess),
+			LastFailure:         nonZeroTimePtr(item.LastFailure),
+			CooldownUntil:       futureTimePtr(item.CooldownUntil, now),
 			CooldownRemainingMs: remaining,
 			LastError:           item.LastError,
 		})
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+func nonZeroTimePtr(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
+}
+
+func futureTimePtr(value time.Time, now time.Time) *time.Time {
+	if !value.After(now) {
+		return nil
+	}
+	return &value
 }
 
 // saveConfig 保存配置，并热更新代理路由。
