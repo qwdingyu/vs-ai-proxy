@@ -15,13 +15,21 @@ VERSION_TAG  := $(patsubst v%,%,$(VERSION))
 # 构建参数
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-# 所有目标平台
+# 所有目标平台（GOOS/GOARCH）
 PLATFORMS := \
 	darwin/amd64 \
 	darwin/arm64 \
 	linux/amd64 \
 	linux/arm64 \
 	windows/amd64
+
+# 用户-facing 名称映射：${GOOS}/${GOARCH} -> 文件名片段
+PLATFORM_ALIAS := \
+	darwin/amd64:macos-x64 \
+	darwin/arm64:macos-arm64 \
+	linux/amd64:linux-x64 \
+	linux/arm64:linux-arm64 \
+	windows/amd64:windows-x64
 
 # ─── 默认目标 ──────────────────────────────────────────
 .PHONY: all build build-all install release clean
@@ -42,7 +50,8 @@ build-all:
 		GOOS=$$(echo $$plat | cut -d/ -f1); \
 		GOARCH=$$(echo $$plat | cut -d/ -f2); \
 		EXT=$$( [ "$$GOOS" = "windows" ] && echo ".exe" || echo "" ); \
-		NAME="$(APP_NAME)-v$(VERSION_TAG)-$${GOOS}-$${GOARCH}$${EXT}"; \
+		ALIAS=$$(echo $$plat | sed -e 's|darwin/amd64|macos-x64|' -e 's|darwin/arm64|macos-arm64|' -e 's|linux/amd64|linux-x64|' -e 's|linux/arm64|linux-arm64|' -e 's|windows/amd64|windows-x64|'); \
+		NAME="$(APP_NAME)-v$(VERSION_TAG)-$${ALIAS}$${EXT}"; \
 		echo "  → $$GOOS/$$GOARCH ..."; \
 		GOOS=$$GOOS GOARCH=$$GOARCH go build -ldflags="$(LDFLAGS)" -o "$(OUTPUT_DIR)/$$NAME" $(MAIN_PATH); \
 	done
@@ -56,8 +65,9 @@ install: build-all
 		GOOS=$$(echo $$plat | cut -d/ -f1); \
 		GOARCH=$$(echo $$plat | cut -d/ -f2); \
 		EXT=$$( [ "$$GOOS" = "windows" ] && echo ".exe" || echo "" ); \
-		SRC="$(OUTPUT_DIR)/$(APP_NAME)-v$(VERSION_TAG)-$${GOOS}-$${GOARCH}$${EXT}"; \
-		DST="$(OUTPUT_DIR)/$(APP_NAME)-$${GOOS}-$${GOARCH}$${EXT}"; \
+		ALIAS=$$(echo $$plat | sed -e 's|darwin/amd64|macos-x64|' -e 's|darwin/arm64|macos-arm64|' -e 's|linux/amd64|linux-x64|' -e 's|linux/arm64|linux-arm64|' -e 's|windows/amd64|windows-x64|'); \
+		SRC="$(OUTPUT_DIR)/$(APP_NAME)-v$(VERSION_TAG)-$${ALIAS}$${EXT}"; \
+		DST="$(OUTPUT_DIR)/$(APP_NAME)-$${ALIAS}$${EXT}"; \
 		mv "$$SRC" "$$DST"; \
 	done
 	@echo "✅ 便携包已生成: $(OUTPUT_DIR)/"
@@ -66,27 +76,7 @@ install: build-all
 # ─── 构建并打包 ────────────────────────────────────────
 release: build-all
 	@echo "📦 打包压缩包..."
-	@for plat in $(PLATFORMS); do \
-		GOOS=$$(echo $$plat | cut -d/ -f1); \
-		GOARCH=$$(echo $$plat | cut -d/ -f2); \
-		EXT=$$( [ "$$GOOS" = "windows" ] && echo ".exe" || echo "" ); \
-		DIR="$(APP_NAME)-v$(VERSION_TAG)-$${GOOS}-$${GOARCH}"; \
-		BIN="$(APP_NAME)-v$(VERSION_TAG)-$${GOOS}-$${GOARCH}$${EXT}"; \
-		mkdir -p "$(OUTPUT_DIR)/$$DIR"; \
-		cp "$(OUTPUT_DIR)/$$BIN" "$(OUTPUT_DIR)/$$DIR/$(APP_NAME)$${EXT}"; \
-		cp README.md LICENSE "$(OUTPUT_DIR)/$$DIR/" 2>/dev/null || true; \
-		cd $(OUTPUT_DIR); \
-		if [ "$$GOOS" = "windows" ]; then \
-			zip -r "$$DIR.zip" "$$DIR" > /dev/null 2>&1; \
-			echo "  📦 $$DIR.zip"; \
-		else \
-			tar czf "$$DIR.tar.gz" "$$DIR" 2>/dev/null; \
-			echo "  📦 $$DIR.tar.gz"; \
-		fi; \
-		rm -rf "$$DIR"; \
-		rm -f "$$BIN"; \
-		cd ..; \
-	done
+	@bash .bin/release-all.sh
 	@echo "✅ 发布包已生成: $(OUTPUT_DIR)/"
 	@ls -lh $(OUTPUT_DIR)
 
