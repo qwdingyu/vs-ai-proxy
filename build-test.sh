@@ -12,8 +12,8 @@
 #   PORT=12345              single HTTP port
 #   HOST=127.0.0.1          local bind address; use 0.0.0.0 on cloud hosts
 #   CONFIG_PATH=...         optional config.json path; defaults to app user config
-#   ADMIN_API_KEY=...       optional /admin/api bearer token
-#   PROXY_API_KEY=...       optional proxy token; also protects /admin/api if ADMIN_API_KEY is empty
+#   ADMIN_API_KEY=...       optional /admin login token and /admin/api bearer token
+#   PROXY_API_KEY=...       optional proxy token; also protects /admin if ADMIN_API_KEY is empty
 
 set -euo pipefail
 
