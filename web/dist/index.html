@@ -409,6 +409,7 @@
     let currentConfig = null;
     let currentProviders = [];
     let currentModels = [];
+    let lastProviderProbe = null;
 
     const normalizePage = () => {
       const raw = location.hash || '#/';
@@ -757,7 +758,7 @@
 
     // 导航点击处理：读取当前元素的 hash 用于前端路由切换
     // 注意：这里使用 el.hash，避免对仅包含 hash 的链接调用 new URL() 触发异常
-    document.querySelectorAll('.nav-item').forEach((el) => {
+    document.querySelectorAll('.nav-item[href^="#"]').forEach((el) => {
       el.addEventListener('click', (e) => {
         e.preventDefault();
         // 读取链接的 hash 值作为页面标识，例如 "#/providers" -> "providers"
@@ -817,6 +818,7 @@
       $('pKey').value = '';
       $('pPriority').value = 10;
       $('pEnabled').checked = true;
+      lastProviderProbe = null;
       $('providerModal').classList.remove('hidden');
     });
     // 关闭新增/编辑提供商弹窗
@@ -851,6 +853,13 @@
         if (!result.reachable) {
           return alert('探测失败：' + result.message + '\n\n' + JSON.stringify(result.attempts || [], null, 2));
         }
+        lastProviderProbe = {
+          provider_id: provider.id,
+          base_url: provider.base_url,
+          models: result.models || result.models_preview || [],
+          detected_type: result.detected_type,
+          corrected_base_url: result.corrected_base_url
+        };
         const summary = `探测成功\n类型：${result.detected_type}\n建议 Base URL：${result.corrected_base_url}\n模型数：${result.models_count}\n示例：${(result.models_preview || []).join(', ')}`;
         if (result.corrected_base_url && result.corrected_base_url !== provider.base_url) {
           if (window.confirm(summary + '\n\n是否将建议 Base URL 填入表单？')) {
@@ -864,6 +873,39 @@
         alert('探测失败：' + String(e.message || e));
       }
     });
+
+    const maybeImportProbedModels = async (provider) => {
+      const probe = lastProviderProbe;
+      const providerId = providerKey(provider);
+      if (!probe || probe.provider_id !== providerId || !Array.isArray(probe.models) || !probe.models.length) return;
+      const probedBaseURL = String(probe.corrected_base_url || probe.base_url || '').replace(/\/+$/, '');
+      const savedBaseURL = String(provider.base_url || '').replace(/\/+$/, '');
+      if (probedBaseURL && savedBaseURL && probedBaseURL !== savedBaseURL) return;
+
+      const res = await fetchJSON('/models');
+      const existing = res.models || [];
+      const seen = new Set(existing.map((item) => `${item.name || ''}@${item.provider_id || item.provider || ''}`.toLowerCase()));
+      const additions = probe.models
+        .map((name) => String(name || '').trim())
+        .filter(Boolean)
+        .filter((name) => !seen.has(`${name}@${providerId}`.toLowerCase()))
+        .map((name) => ({
+          name,
+          provider_id: providerId,
+          provider: providerId,
+          enabled: true
+        }));
+      if (!additions.length) return;
+
+      if (!window.confirm(`探测到 ${additions.length} 个新模型，是否自动加入模型配置？\n\n保存后后端会自动补齐上下文、最大输出和能力元数据。`)) return;
+      await fetchJSON('/models', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([...existing, ...additions])
+      });
+      setTestResult('模型已导入', `已为 ${providerId} 导入 ${additions.length} 个模型，并已热更新代理路由。`);
+      loadModels();
+    };
 
     // 保存提供商
     $('btnSaveProvider').addEventListener('click', async () => {
@@ -880,8 +922,10 @@
       } else {
         await fetchJSON('/providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       }
+      await maybeImportProbedModels(payload);
       $('providerModal').classList.add('hidden');
       editingProviderName = null;
+      lastProviderProbe = null;
       loadProviders();
     });
 
@@ -997,6 +1041,7 @@
         $('pKey').value = item.api_key || '';
         $('pPriority').value = item.priority ?? 0;
         $('pEnabled').checked = item.enabled;
+        lastProviderProbe = null;
         $('providerModal').classList.remove('hidden');
       }
       if (action === 'test-provider') {

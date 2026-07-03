@@ -569,6 +569,9 @@ func TestProviderProbeOpenAICorrectsBaseURL(t *testing.T) {
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"models_count":2`)) {
 		t.Fatalf("probe should count models: %s", rec.Body.String())
 	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"models":["model-a","model-b"]`)) {
+		t.Fatalf("probe should include full models for Web import: %s", rec.Body.String())
+	}
 }
 
 func TestProviderProbeOllamaCorrectsBaseURL(t *testing.T) {

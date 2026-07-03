@@ -540,6 +540,7 @@ type providerProbeResult struct {
 	DetectedType     string                 `json:"detected_type,omitempty"`
 	CorrectedBaseURL string                 `json:"corrected_base_url,omitempty"`
 	ModelsCount      int                    `json:"models_count"`
+	Models           []string               `json:"models,omitempty"`
 	ModelsPreview    []string               `json:"models_preview,omitempty"`
 	Message          string                 `json:"message"`
 	Attempts         []providerProbeAttempt `json:"attempts,omitempty"`
@@ -630,6 +631,7 @@ func successfulProbeResult(providerType, baseURL string, models []string, attemp
 		DetectedType:     providerType,
 		CorrectedBaseURL: baseURL,
 		ModelsCount:      len(models),
+		Models:           append([]string(nil), models...),
 		ModelsPreview:    append([]string(nil), preview...),
 		Message:          fmt.Sprintf("探测成功，发现 %d 个模型", len(models)),
 		Attempts:         attempts,
