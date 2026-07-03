@@ -220,6 +220,31 @@ func TestStreamOpenAIHandlesLargeSSELine(t *testing.T) {
 	}
 }
 
+func TestStreamOpenAINormalizesBlankFinishReasonForVisualStudio(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":""}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+
+	err := server.streamOpenAI(rec, req, prov, &provider.ChatRequest{Model: "gpt-test"}, rec)
+	if err != nil {
+		t.Fatalf("streamOpenAI returned error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, `"finish_reason":""`) {
+		t.Fatalf("blank finish_reason leaked to Visual Studio stream: %s", body)
+	}
+	if !strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Fatalf("finish_reason was not normalized to stop: %s", body)
+	}
+}
+
 func TestStreamOllamaPassthroughHandlesLargeNDJSONLine(t *testing.T) {
 	largeContent := strings.Repeat("x", 80*1024)
 	stream := `{"model":"llama","message":{"role":"assistant","content":"` + largeContent + `"},"done":false}` + "\n"

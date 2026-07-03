@@ -153,6 +153,10 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 		capabilities = append(capabilities, "vision")
 	}
 
+	// Visual Studio Copilot / BYOM 适配：
+	// name 使用 "PROVIDER - model:latest" 让 VS 模型下拉框可读；
+	// model 使用 "model@provider:latest" 让按 model 字段回传的客户端可精确路由；
+	// aliases 同时保留裸模型和 provider-qualified 模型，兼容不同 VS/Ollama 客户端读取字段的差异。
 	return map[string]any{
 		"name":        providerDisplayName(providerName, model) + ":latest",
 		"model":       qualified + ":latest",
@@ -168,7 +172,10 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 			"parameter_size":     "api",
 			"quantization_level": "none",
 		},
-		"capabilities":        capabilities,
+		"capabilities": capabilities,
+		// Visual Studio Copilot 适配：
+		// VS 模型发现会读取 token limit、tools、vision 等能力元数据来决定 UI 展示与请求能力。
+		// 这些字段不是上游 Ollama 原生必需项，但对 Copilot BYOM 体验很关键。
 		"context_length":      ctxLength,
 		"max_output_tokens":   maxOutput,
 		"input_token_limit":   ctxLength,

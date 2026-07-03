@@ -12,7 +12,10 @@ import (
 var buildVersion = "dev"
 
 type healthResponse struct {
-	Status               string   `json:"status"`
+	Status string `json:"status"`
+	// Visual Studio Copilot 远端排障适配：
+	// 用户常在另一台 Windows 机器运行代理和 VS，/health.version 用来确认
+	// 当前二进制是否包含最新 VS 兼容修复，避免把旧版本行为误判为新代码问题。
 	Version              string   `json:"version"`
 	Model                string   `json:"model"`
 	AvailableModels      []string `json:"available_models"`

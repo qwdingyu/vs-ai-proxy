@@ -61,8 +61,10 @@ type toolAlias Tool
 type toolFuncAlias ToolFunc
 
 // UnmarshalJSON keeps provider-specific top-level request fields intact.
-// Visual Studio and aggregator providers may send extension fields this proxy
-// does not model yet; dropping them would make the proxy less transparent.
+// Visual Studio Copilot 适配：
+// VS 会发送较复杂的 Copilot 上下文、tools/tool_calls 和 provider 扩展字段；
+// 聚合 provider 也可能依赖私有参数。代理只治理已知字段，未知字段必须保留，
+// 否则会出现 Web 测试正常但 VS 真实请求丢语义的问题。
 func (r *ChatRequest) UnmarshalJSON(data []byte) error {
 	type alias chatRequestAlias
 	var req alias

@@ -479,6 +479,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					continue
 				}
+				// Visual Studio Copilot 适配：
+				// raw OpenAI 响应直接透传能最大化保留上游扩展字段，但 VS 对
+				// finish_reason 比 Web/ curl 更严格，写回前需要做最小兼容归一化。
 				body = normalizeOpenAIChatResponseForVisualStudio(body)
 				s.cacheRawOpenAIChatResponse(body)
 				w.Header().Set("Content-Type", "application/json")
@@ -749,6 +752,11 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 	for scanner.Scan() {
 		line := scanner.Text()
 		acc.consumeOpenAISSELine(line)
+		// Visual Studio Copilot 适配：
+		// VS 的 OpenAI .NET SDK 在流式模式下会逐个解析 SSE chunk；
+		// 如果上游在任意 chunk 中返回 finish_reason:""，VS 会在客户端直接抛
+		// Unknown ChatFinishReason value。非流式响应归一化不能覆盖这里。
+		line = normalizeOpenAIStreamLineForVisualStudio(line)
 		if _, writeErr := w.Write([]byte(line + "\n")); writeErr != nil {
 			return writeErr
 		}
@@ -1029,6 +1037,10 @@ func setCandidateDiagnosticHeaders(
 	candidates []provider.Candidate,
 ) {
 	header := w.Header()
+	// Visual Studio Copilot 排障适配：
+	// VS 客户端错误日志通常不会打印代理内部路由细节；这些响应头让 Web 日志、
+	// curl 和抓包都能看到 requested/resolved/upstream 三段模型名，快速区分
+	// 客户端展示名问题、模型拼写问题、provider 路由问题和上游问题。
 	header.Set("X-Proxy-Requested-Model", requestedModel)
 	header.Set("X-Proxy-Resolved-Model", resolvedModel)
 	header.Set("X-Proxy-Candidate-Count", fmt.Sprintf("%d", len(candidates)))

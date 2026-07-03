@@ -95,6 +95,11 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 		return candidates
 	}
 
+	// Visual Studio Copilot 适配：
+	// VS 的 BYOM/Copilot UI 可能把 /api/tags 中用于展示的 name 字段
+	// 原样回传到 /v1/chat/completions，例如
+	// "DEEPSEEK - deepseek-v4-flash:latest"。这不是上游真实模型名，
+	// 必须先剥离 provider 展示前缀，再按真实模型名解析候选 provider。
 	if displayModel := displayNameModelSuffix(model); displayModel != "" && !strings.EqualFold(displayModel, resolved) {
 		displayResolved := r.resolveModelLocked(displayModel)
 		displayCandidates := r.resolveCandidatesLocked(displayResolved)
@@ -128,6 +133,9 @@ func (r *Registry) resolveModelLocked(model string) string {
 	if resolved := r.resolveProviderHintModelLocked(clean); resolved != "" {
 		return resolved
 	}
+	// Visual Studio Copilot 适配：
+	// ResolveModel 用于诊断头和日志。这里也要把 VS 回传的展示名还原，
+	// 否则日志会显示 upstream 仍是 "PROVIDER - model"，排障会被误导。
 	if displayModel := displayNameModelSuffix(clean); displayModel != "" && !strings.EqualFold(displayModel, clean) {
 		if resolved := r.resolveModelLocked(displayModel); resolved != displayModel {
 			return resolved
@@ -571,6 +579,10 @@ func modelSuffix(model string) string {
 }
 
 func displayNameModelSuffix(model string) string {
+	// Visual Studio Copilot 适配：
+	// /api/tags 的 name 为 "PROVIDER - display-model:latest"，VS 可能把它
+	// 当作 chat model 回传。这里只识别这种展示格式，不影响普通
+	// model@provider:latest 或 provider/model 的标准路由形式。
 	clean := stripTagSuffix(strings.TrimSpace(model))
 	sep := " - "
 	idx := strings.LastIndex(clean, sep)
