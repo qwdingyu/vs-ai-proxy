@@ -57,6 +57,30 @@ type AppConfig struct {
 	Models       []ModelConfig    `json:"models"`        // 模型配置，用于前端展示和默认参数兜底
 }
 
+// DefaultConfigDir 返回本项目默认配置目录。
+//
+// Go 在 macOS 上的 os.UserConfigDir() 会返回 ~/Library/Application Support，
+// 但项目文档和用户排障都以 ~/.config/vs-ai-proxy 为准。这里显式采用
+// XDG 风格目录，保证 macOS / Linux / 脚本环境的默认持久化位置一致。
+func DefaultConfigDir() string {
+	if raw := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); raw != "" {
+		return filepath.Join(raw, "vs-ai-proxy")
+	}
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return filepath.Join(home, ".config", "vs-ai-proxy")
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "vs-ai-proxy"
+	}
+	return filepath.Join(dir, "vs-ai-proxy")
+}
+
+// DefaultConfigPath 返回默认 config.json 路径。
+func DefaultConfigPath() string {
+	return filepath.Join(DefaultConfigDir(), "config.json")
+}
+
 // DefaultConfig 返回默认配置
 func DefaultConfig() *AppConfig {
 	cfg := &AppConfig{
@@ -247,11 +271,7 @@ type Manager struct {
 // NewManager 创建配置管理器
 func NewManager(configPath string) (*Manager, error) {
 	if configPath == "" {
-		configDir, err := os.UserConfigDir()
-		if err != nil {
-			return nil, fmt.Errorf("获取配置目录失败: %w", err)
-		}
-		configPath = filepath.Join(configDir, "vs-ai-proxy", "config.json")
+		configPath = DefaultConfigPath()
 	}
 
 	m := &Manager{

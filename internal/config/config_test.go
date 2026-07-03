@@ -32,6 +32,24 @@ func TestDefaultConfigIncludesUseAIAsFirstProvider(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigPathUsesXDGStyleHomeConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "/tmp/test-home")
+
+	if got, want := DefaultConfigPath(), "/tmp/test-home/.config/vs-ai-proxy/config.json"; got != want {
+		t.Fatalf("DefaultConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultConfigPathUsesXDGConfigHomeWhenSet(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/xdg-config")
+	t.Setenv("HOME", "/tmp/test-home")
+
+	if got, want := DefaultConfigPath(), "/tmp/xdg-config/vs-ai-proxy/config.json"; got != want {
+		t.Fatalf("DefaultConfigPath() = %q, want %q", got, want)
+	}
+}
+
 func TestEnsureBuiltInProvidersMovesUseAIToFirstAndPreservesConfigValues(t *testing.T) {
 	cfg := &AppConfig{
 		Providers: []ProviderConfig{

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -92,11 +91,7 @@ func configDir(cfg *config.AppConfig) string {
 	if cfg == nil {
 		return ""
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(dir, "vs-ai-proxy")
+	return config.DefaultConfigDir()
 }
 
 func (s *Server) buildRegistry(cfg *config.AppConfig) *provider.Registry {

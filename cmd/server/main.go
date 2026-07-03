@@ -42,6 +42,8 @@ func main() {
 
 	cfg := configMgr.Get()
 	storePath := resolveStorePath(configMgr.ConfigPath(), os.Getenv("STORE_PATH"))
+	logger.Info("运行配置文件: %s", configMgr.ConfigPath())
+	logger.Info("请求日志文件: %s", storePath)
 	st := store.New(1000)
 	if err := st.LoadFromFile(storePath); err != nil {
 		logger.Warn("加载请求日志失败: %v", err)
@@ -165,11 +167,7 @@ func resolveStorePath(configPath, override string) string {
 		return filepath.Join(dir, "logs.json")
 	}
 
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "logs.json"
-	}
-	return filepath.Join(configDir, "vs-ai-proxy", "logs.json")
+	return filepath.Join(config.DefaultConfigDir(), "logs.json")
 }
 
 func newUnifiedHandler(adminHandler, proxyHandler http.Handler) http.Handler {
