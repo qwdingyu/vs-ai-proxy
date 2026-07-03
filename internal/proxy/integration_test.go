@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
 	"github.com/dingyuwang/vs-ai-proxy/internal/log"
@@ -274,6 +275,41 @@ func TestCatalogEndpointsReturnModels(t *testing.T) {
 	}
 }
 
+func TestCatalogEndpointsRebuildAfterRegistryModelDiscovery(t *testing.T) {
+	prov := newFakeProvider("sensenova", true, []string{"deepseek-v4-flash"}, &fakeChatResponse{Model: "deepseek-v4-flash", Content: "ok"}, "")
+	cfg := &config.AppConfig{DefaultModel: "deepseek-v4-flash"}
+	registry := provider.NewRegistry(cfg.DefaultModel, time.Minute)
+	catalog := provider.NewModelCatalog(registry, "", time.Minute)
+
+	registry.Add(&provider.ProviderEntry{
+		Provider: prov,
+		Models:   []string{"deepseek-v4-flash"},
+		Priority: 0,
+	})
+
+	server := &Server{
+		config:   cfg,
+		registry: registry,
+		catalog:  catalog,
+		logger:   log.New(nil, log.LevelError, false),
+		store:    store.New(10),
+	}
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/models", server.handleListModels)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "deepseek-v4-flash") {
+		t.Fatalf("/v1/models should include model discovered after catalog creation: %s", rec.Body.String())
+	}
+}
+
 func TestOllamaTagsExposeQualifiedAliasesAndCapabilities(t *testing.T) {
 	provA := newFakeProvider("provider-a", true, []string{"shared"}, &fakeChatResponse{Model: "shared", Content: "hi"}, "")
 	provB := newFakeProvider("provider-b", true, []string{"shared"}, nil, "")
@@ -315,6 +351,47 @@ func TestOllamaTagsExposeQualifiedAliasesAndCapabilities(t *testing.T) {
 		if item["model_info"] == nil || item["capabilities"] == nil {
 			t.Fatalf("capability metadata missing in %#v", item)
 		}
+	}
+}
+
+func TestOllamaTagsUseModelConfigLimits(t *testing.T) {
+	prov := newFakeProvider("sensenova", true, []string{"deepseek-v4-flash"}, &fakeChatResponse{Model: "deepseek-v4-flash", Content: "hi"}, "")
+	server := newOpenServer(prov)
+	supportsTools := true
+	server.config.Models = []config.ModelConfig{{
+		Name:            "deepseek-v4-flash",
+		ProviderID:      "sensenova",
+		Provider:        "sensenova",
+		ContextLength:   intPtr(1048576),
+		MaxOutputTokens: intPtr(65536),
+		SupportsTools:   &supportsTools,
+		Enabled:         true,
+	}}
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/tags", server.handleOllamaTags)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tags", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	models, _ := body["models"].([]any)
+	if len(models) != 1 {
+		t.Fatalf("models len = %d, want 1: %s", len(models), rec.Body.String())
+	}
+	item, _ := models[0].(map[string]any)
+	if got := int(item["context_length"].(float64)); got != 1048576 {
+		t.Fatalf("context_length = %d, want 1048576; body=%s", got, rec.Body.String())
+	}
+	if got := int(item["max_output_tokens"].(float64)); got != 65536 {
+		t.Fatalf("max_output_tokens = %d, want 65536; body=%s", got, rec.Body.String())
 	}
 }
 

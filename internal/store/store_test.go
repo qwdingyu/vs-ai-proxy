@@ -27,10 +27,11 @@ func TestPersistAndLoadRoundTrip(t *testing.T) {
 		t.Fatalf("GetLogs() len = %d, want %d", got, want)
 	}
 
-	if got, want := logs[0].Path, "/health"; got != want {
-		t.Fatalf("first log path = %q, want %q", got, want)
+	// GetLogs 现在返回最新在前（倒序）
+	if got, want := logs[0].Path, "/v1/chat/completions"; got != want {
+		t.Fatalf("first log (newest) path = %q, want %q", got, want)
 	}
-	if got, want := logs[1].Path, "/v1/chat/completions"; got != want {
+	if got, want := logs[1].Path, "/health"; got != want {
 		t.Fatalf("second log path = %q, want %q", got, want)
 	}
 

@@ -15,6 +15,9 @@ type RequestLog struct {
 	Timestamp   time.Time `json:"timestamp"`
 	Method      string    `json:"method"`
 	Path        string    `json:"path"`
+	Provider    string    `json:"provider,omitempty"`
+	Model       string    `json:"model,omitempty"`
+	Upstream    string    `json:"upstream,omitempty"`
 	StatusCode  int       `json:"status_code"`
 	ElapsedMs   float64   `json:"elapsed_ms"`
 	IsSuccess   bool      `json:"is_success"`
@@ -68,7 +71,7 @@ func (s *Store) AddLog(log RequestLog) {
 	s.updateStatsLocked(log)
 }
 
-// GetLogs 获取最近 N 条日志
+// GetLogs 获取最近 N 条日志（最新在前）
 // 该方法是线程安全的，返回的是最新的 N 条日志切片副本。
 func (s *Store) GetLogs(n int) []RequestLog {
 	s.logMu.RLock()
@@ -78,11 +81,54 @@ func (s *Store) GetLogs(n int) []RequestLog {
 		n = len(s.logs)
 	}
 
-	// 返回最近的 n 条
-	start := len(s.logs) - n
+	// 返回最近的 n 条，按时间倒序（最新在前）
 	result := make([]RequestLog, n)
-	copy(result, s.logs[start:])
+	for i := 0; i < n; i++ {
+		result[i] = s.logs[len(s.logs)-1-i]
+	}
 	return result
+}
+
+// LogPageResult 分页查询结果
+type LogPageResult struct {
+	Logs  []RequestLog `json:"logs"`
+	Total int          `json:"total"`
+	Page  int          `json:"page"`
+	Size  int          `json:"size"`
+}
+
+// GetLogsPage 按分页获取日志（最新在前）
+// page 从 1 开始，size 为每页条数。
+func (s *Store) GetLogsPage(page, size int) LogPageResult {
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
+
+	if page < 1 {
+		page = 1
+	}
+	if size <= 0 {
+		size = 50
+	}
+	total := len(s.logs)
+	start := total - page*size
+	if start < 0 {
+		start = 0
+	}
+	end := total - (page-1)*size
+	if end > total {
+		end = total
+	}
+	if start >= end {
+		return LogPageResult{Logs: []RequestLog{}, Total: total, Page: page, Size: size}
+	}
+
+	// 按倒序填充
+	count := end - start
+	result := make([]RequestLog, count)
+	for i := 0; i < count; i++ {
+		result[i] = s.logs[end-1-i]
+	}
+	return LogPageResult{Logs: result, Total: total, Page: page, Size: size}
 }
 
 // GetStatistics 获取统计信息

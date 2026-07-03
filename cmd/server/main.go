@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -53,17 +55,21 @@ func main() {
 	_, registry, catalog := proxySrv.SnapshotComponents()
 	benchSvc := benchmark.New(registry, catalog, logger)
 
-	// 后台启动代理服务
-	go func() {
-		if err := proxySrv.Start(); err != nil {
-			logger.Error("代理服务异常退出: %v", err)
-		}
-	}()
+	appAddr := resolveAppAddr(cfg.Port)
+	appSrv := &http.Server{
+		Addr:         appAddr,
+		Handler:      newUnifiedHandler(apiSrv.Handler(), proxySrv.Handler()),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 120 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 
-	// 后台启动 API 管理服务
+	warnDeprecatedManagementEnv(logger)
+
+	// 后台启动单端口 HTTP 服务：/admin 是管理面板，其它路径保留代理协议。
 	go func() {
-		if err := apiSrv.Start(); err != nil {
-			logger.Error("API 服务异常退出: %v", err)
+		if err := appSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("HTTP 服务异常退出: %v", err)
 		}
 	}()
 
@@ -72,7 +78,9 @@ func main() {
 	go benchSvc.Run(ctx)
 	go persistStoreLoop(ctx, st, storePath, logger)
 
-	logger.Info("VS AI Proxy 已启动，代理端口=%d，管理端口=%d", cfg.Port, cfg.Port+1000)
+	publicAddr := displayAddr(appAddr)
+	logger.Info("VS AI Proxy 已启动，监听地址=http://%s，管理面板=http://%s/admin", publicAddr, publicAddr)
+	logPublicAccessHint(appAddr, logger)
 
 	// 监听退出信号，优雅关闭
 	quit := make(chan os.Signal, 1)
@@ -81,7 +89,11 @@ func main() {
 
 	logger.Info("正在关闭服务...")
 	cancel()
-	_ = proxySrv.Stop()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := appSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("关闭 HTTP 服务失败: %v", err)
+	}
 	if err := st.PersistToFile(storePath); err != nil {
 		logger.Warn("保存请求日志失败: %v", err)
 	}
@@ -158,6 +170,45 @@ func resolveStorePath(configPath, override string) string {
 		return "logs.json"
 	}
 	return filepath.Join(configDir, "vs-ai-proxy", "logs.json")
+}
+
+func newUnifiedHandler(adminHandler, proxyHandler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/admin/") {
+			adminHandler.ServeHTTP(w, r)
+			return
+		}
+		proxyHandler.ServeHTTP(w, r)
+	})
+}
+
+func resolveAppAddr(port int) string {
+	host := strings.TrimSpace(os.Getenv("HOST"))
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
+func displayAddr(addr string) string {
+	return addr
+}
+
+func logPublicAccessHint(addr string, logger *log.Logger) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	if host == "0.0.0.0" || host == "::" || host == "" {
+		logger.Info("当前监听所有网卡；云主机公网访问请使用 http://<服务器公网IP>:%s/admin，并确保安全组/防火墙放行该端口且已设置 ADMIN_API_KEY 或 PROXY_API_KEY", port)
+	}
+}
+
+func warnDeprecatedManagementEnv(logger *log.Logger) {
+	if strings.TrimSpace(os.Getenv("MANAGEMENT_PORT")) != "" ||
+		strings.TrimSpace(os.Getenv("MANAGEMENT_HOST")) != "" {
+		logger.Warn("MANAGEMENT_PORT/MANAGEMENT_HOST 已废弃；当前版本只启动单端口服务，请使用 PORT 和 HOST，管理面板路径为 /admin")
+	}
 }
 
 func persistStoreLoop(ctx context.Context, st *store.Store, path string, logger *log.Logger) {

@@ -12,6 +12,7 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
 	"github.com/dingyuwang/vs-ai-proxy/internal/log"
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
+	"github.com/dingyuwang/vs-ai-proxy/internal/store"
 )
 
 func TestAuthMiddlewareRequiresBearerToken(t *testing.T) {
@@ -63,69 +64,66 @@ func TestAuthMiddlewareAllowsOpenProxyWithoutKey(t *testing.T) {
 	}
 }
 
-func TestBuildRegistryDiscoversProviderFromEnvironment(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data":[]}`))
+func TestLoggingMiddlewareCapturesProviderAndModelHeaders(t *testing.T) {
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Proxy-Provider", "UseAI")
+		w.Header().Set("X-Proxy-Requested-Model", "useai-model")
+		w.Header().Set("X-Proxy-Upstream-Model", "upstream-model")
+		w.WriteHeader(http.StatusOK)
 	}))
-	defer upstream.Close()
 
-	t.Setenv("PROVIDER_DEEPSEEK_API_KEY", "env-key")
-	t.Setenv("PROVIDER_DEEPSEEK_BASE_URL", upstream.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 
+	logs := st.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if logs[0].Provider != "UseAI" {
+		t.Fatalf("provider = %q, want UseAI", logs[0].Provider)
+	}
+	if logs[0].Model != "useai-model" {
+		t.Fatalf("model = %q, want useai-model", logs[0].Model)
+	}
+	if logs[0].Upstream != "upstream-model" {
+		t.Fatalf("upstream = %q, want upstream-model", logs[0].Upstream)
+	}
+}
+
+func TestBuildRegistryUsesConfiguredProviderIDs(t *testing.T) {
 	server := testRegistryServer()
 	registry := server.buildRegistry(&config.AppConfig{
-		DefaultModel: "deepseek-v4-pro",
+		DefaultModel: "model-a",
 		Providers: []config.ProviderConfig{{
-			Name:    "deepseek",
-			BaseURL: "https://api.deepseek.com",
+			ID:      "useai-paid",
+			Name:    "UseAI Paid",
+			BaseURL: "https://api.eforge.xyz/v1",
 			Type:    "openai",
-			Enabled: false,
+			Enabled: true,
 		}},
 	})
 
-	if !containsString(registry.ProviderNames(), "deepseek") {
-		t.Fatalf("providers = %#v, want env-discovered deepseek", registry.ProviderNames())
+	if !containsString(registry.ProviderNames(), "useai-paid") {
+		t.Fatalf("providers = %#v, want useai-paid", registry.ProviderNames())
+	}
+	if containsString(registry.ProviderNames(), "UseAI Paid") {
+		t.Fatalf("providers = %#v, registry should use stable provider id, not display name", registry.ProviderNames())
 	}
 }
 
-func TestBuildRegistryDiscoversLegacyDeepSeekEnvironment(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data":[]}`))
-	}))
-	defer upstream.Close()
-
-	t.Setenv("DEEPSEEK_API_KEY", "legacy-key")
-	t.Setenv("DEEPSEEK_BASE_URL", upstream.URL)
-
-	server := testRegistryServer()
-	registry := server.buildRegistry(&config.AppConfig{DefaultModel: "deepseek-v4-pro"})
-
-	if !containsString(registry.ProviderNames(), "deepseek") {
-		t.Fatalf("providers = %#v, want legacy deepseek", registry.ProviderNames())
-	}
-}
-
-func TestBuildRegistryDiscoversLocalOllamaFromEnvironment(t *testing.T) {
+func TestBuildRegistryDoesNotRegisterProviderFromEnvironment(t *testing.T) {
+	t.Setenv("PROVIDER_DEEPSEEK_API_KEY", "env-key")
 	t.Setenv("PROVIDER_OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+	t.Setenv("DEEPSEEK_API_KEY", "legacy-key")
 
 	server := testRegistryServer()
-	registry := server.buildRegistry(&config.AppConfig{DefaultModel: "llama"})
+	registry := server.buildRegistry(&config.AppConfig{DefaultModel: "model-a"})
 
-	if !containsString(registry.ProviderNames(), "ollama") {
-		t.Fatalf("providers = %#v, want local ollama", registry.ProviderNames())
-	}
-}
-
-func TestBuildRegistryDoesNotDiscoverRemoteOllamaWithoutKey(t *testing.T) {
-	t.Setenv("PROVIDER_OLLAMA_BASE_URL", "https://ollama.com")
-
-	server := testRegistryServer()
-	registry := server.buildRegistry(&config.AppConfig{DefaultModel: "llama"})
-
-	if containsString(registry.ProviderNames(), "ollama") {
-		t.Fatalf("providers = %#v, remote ollama without key should not be registered", registry.ProviderNames())
+	if got := registry.ProviderNames(); len(got) != 0 {
+		t.Fatalf("providers = %#v, want none because provider env discovery is intentionally disabled", got)
 	}
 }
 

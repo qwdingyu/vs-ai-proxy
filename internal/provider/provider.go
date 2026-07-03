@@ -133,26 +133,32 @@ type Provider interface {
 
 // OpenAIProvider OpenAI 兼容提供商
 type OpenAIProvider struct {
-	NameStr string
-	APIKey  string
-	BaseURL string
-	Enabled bool
-	Client  *http.Client
-	Timeout time.Duration
+	NameStr        string
+	CapabilityName string
+	APIKey         string
+	BaseURL        string
+	Enabled        bool
+	Client         *http.Client
+	Timeout        time.Duration
 }
 
 // NewOpenAIProvider 创建 OpenAI 提供商
 func NewOpenAIProvider(name, apiKey, baseURL string, enabled bool, timeout time.Duration) *OpenAIProvider {
+	return NewOpenAIProviderWithCapability(name, "", apiKey, baseURL, enabled, timeout)
+}
+
+func NewOpenAIProviderWithCapability(name, capabilityName, apiKey, baseURL string, enabled bool, timeout time.Duration) *OpenAIProvider {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	return &OpenAIProvider{
-		NameStr: name,
-		APIKey:  apiKey,
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		Enabled: enabled,
-		Client:  newProviderHTTPClient(timeout),
-		Timeout: timeout,
+		NameStr:        name,
+		CapabilityName: capabilityName,
+		APIKey:         apiKey,
+		BaseURL:        strings.TrimRight(baseURL, "/"),
+		Enabled:        enabled,
+		Client:         newProviderHTTPClient(timeout),
+		Timeout:        timeout,
 	}
 }
 
@@ -303,7 +309,7 @@ func (p *OpenAIProvider) applyOpenAIRequestHeaders(req *http.Request, accept str
 	if req.Body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if strings.EqualFold(p.NameStr, "openrouter") {
+	if strings.EqualFold(p.capabilityName(), "openrouter") || strings.EqualFold(p.NameStr, "openrouter") {
 		applyOpenRouterHeaders(req)
 	}
 }
@@ -336,7 +342,8 @@ func (p *OpenAIProvider) modelsURL() string {
 }
 
 func (p *OpenAIProvider) capabilityURL(kind, fallbackPath string) string {
-	caps := GetCapabilities(p.NameStr)
+	// 已知 provider 使用能力注册表里的路径；未知 OpenAI-compatible provider 使用标准 fallback。
+	caps := GetCapabilities(p.capabilityName())
 	path := fallbackPath
 	switch kind {
 	case "chat":
@@ -351,33 +358,77 @@ func (p *OpenAIProvider) capabilityURL(kind, fallbackPath string) string {
 	return joinURLPath(p.BaseURL, path)
 }
 
+func (p *OpenAIProvider) capabilityName() string {
+	// NameStr 是 provider 实例 ID，例如 useai-paid / sensenova；CapabilityName 是协议能力名，
+	// 例如 useai / openrouter / ollama。二者拆开后，一个 provider 类型可以配置多个 API Key 实例。
+	if strings.TrimSpace(p.CapabilityName) != "" {
+		return p.CapabilityName
+	}
+	return p.NameStr
+}
+
 func joinURLPath(baseURL, path string) string {
+	// Web UI 允许用户填写两类 base_url：
+	// - https://host
+	// - https://host/v1
+	// fallback path 又是 v1/chat/completions。如果不去重，第二类会变成 /v1/v1/...
 	baseURL = strings.TrimRight(baseURL, "/")
 	path = strings.TrimLeft(path, "/")
+	if path == "" {
+		return baseURL
+	}
+	path = trimOverlappingPathSegments(baseURL, path)
 	if path == "" {
 		return baseURL
 	}
 	return baseURL + "/" + path
 }
 
+func trimOverlappingPathSegments(baseURL, path string) string {
+	// 从最长重叠片段开始匹配，既能处理 /v1 + v1/models，
+	// 也能处理 /v1beta/openai + v1beta/openai/models。
+	baseParts := strings.Split(strings.Trim(baseURL, "/"), "/")
+	pathParts := strings.Split(strings.Trim(path, "/"), "/")
+	maxOverlap := min(len(baseParts), len(pathParts))
+	for overlap := maxOverlap; overlap > 0; overlap-- {
+		matches := true
+		for i := 0; i < overlap; i++ {
+			if baseParts[len(baseParts)-overlap+i] != pathParts[i] {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return strings.Join(pathParts[overlap:], "/")
+		}
+	}
+	return strings.Join(pathParts, "/")
+}
+
 // OllamaProvider Ollama 提供商
 type OllamaProvider struct {
-	NameStr string
-	BaseURL string
-	Enabled bool
-	Client  *http.Client
+	NameStr        string
+	CapabilityName string
+	BaseURL        string
+	Enabled        bool
+	Client         *http.Client
 }
 
 // NewOllamaProvider 创建 Ollama 提供商
 func NewOllamaProvider(name, baseURL string, enabled bool, timeout time.Duration) *OllamaProvider {
+	return NewOllamaProviderWithCapability(name, "", baseURL, enabled, timeout)
+}
+
+func NewOllamaProviderWithCapability(name, capabilityName, baseURL string, enabled bool, timeout time.Duration) *OllamaProvider {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
 	return &OllamaProvider{
-		NameStr: name,
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		Enabled: enabled,
-		Client:  newProviderHTTPClient(timeout),
+		NameStr:        name,
+		CapabilityName: capabilityName,
+		BaseURL:        strings.TrimRight(baseURL, "/"),
+		Enabled:        enabled,
+		Client:         newProviderHTTPClient(timeout),
 	}
 }
 

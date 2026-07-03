@@ -9,8 +9,14 @@ func TestDefaultConfigIncludesUseAIAsFirstProvider(t *testing.T) {
 		t.Fatalf("default providers should not be empty")
 	}
 	useAI := cfg.Providers[0]
+	if useAI.ID != UseAIProviderID {
+		t.Fatalf("UseAI id = %q, want %q", useAI.ID, UseAIProviderID)
+	}
 	if useAI.Name != UseAIProviderName {
 		t.Fatalf("first provider = %q, want %q", useAI.Name, UseAIProviderName)
+	}
+	if useAI.DisplayName != UseAIProviderName {
+		t.Fatalf("UseAI display_name = %q, want %q", useAI.DisplayName, UseAIProviderName)
 	}
 	if useAI.BaseURL != UseAIProviderBaseURL {
 		t.Fatalf("UseAI base_url = %q, want %q", useAI.BaseURL, UseAIProviderBaseURL)
@@ -26,11 +32,11 @@ func TestDefaultConfigIncludesUseAIAsFirstProvider(t *testing.T) {
 	}
 }
 
-func TestEnsureBuiltInProvidersMovesUseAIToFirstAndKeepsKey(t *testing.T) {
+func TestEnsureBuiltInProvidersMovesUseAIToFirstAndPreservesConfigValues(t *testing.T) {
 	cfg := &AppConfig{
 		Providers: []ProviderConfig{
 			{Name: "deepseek", Type: "openai", Priority: 1},
-			{Name: "UseAI", Type: "custom", APIKey: "user-key", BaseURL: "https://wrong.example", Priority: 99},
+			{Name: "UseAI", DisplayName: "UseAI Free", Type: "custom", APIKey: "user-key", BaseURL: "https://custom.example/v1", Priority: 99},
 		},
 	}
 
@@ -46,15 +52,21 @@ func TestEnsureBuiltInProvidersMovesUseAIToFirstAndKeepsKey(t *testing.T) {
 	if useAI.APIKey != "user-key" {
 		t.Fatalf("UseAI api key = %q, want user-key", useAI.APIKey)
 	}
-	if useAI.BaseURL != UseAIProviderBaseURL {
-		t.Fatalf("UseAI base_url = %q, want %q", useAI.BaseURL, UseAIProviderBaseURL)
+	if useAI.BaseURL != "https://custom.example/v1" {
+		t.Fatalf("UseAI base_url = %q, want configured base_url", useAI.BaseURL)
+	}
+	if useAI.DisplayName != "UseAI Free" {
+		t.Fatalf("UseAI display_name = %q, want UseAI Free", useAI.DisplayName)
+	}
+	if useAI.Priority != 99 {
+		t.Fatalf("UseAI priority = %d, want 99", useAI.Priority)
 	}
 	if cfg.Providers[1].Name != "deepseek" {
 		t.Fatalf("second provider = %q, want deepseek", cfg.Providers[1].Name)
 	}
 }
 
-func TestEnsureBuiltInProvidersUsesEnvKey(t *testing.T) {
+func TestEnsureBuiltInProvidersDoesNotReadProviderEnvKey(t *testing.T) {
 	t.Setenv("PROVIDER_USEAI_API_KEY", "env-key")
 
 	cfg := &AppConfig{}
@@ -63,16 +75,32 @@ func TestEnsureBuiltInProvidersUsesEnvKey(t *testing.T) {
 	if len(cfg.Providers) != 1 {
 		t.Fatalf("providers len = %d, want 1", len(cfg.Providers))
 	}
-	if cfg.Providers[0].APIKey != "env-key" {
-		t.Fatalf("UseAI api key = %q, want env-key", cfg.Providers[0].APIKey)
+	if cfg.Providers[0].APIKey != "" {
+		t.Fatalf("UseAI api key = %q, want empty because provider env is no longer a config source", cfg.Providers[0].APIKey)
 	}
 }
 
-func TestApplyEnvOverridesOverridesPort(t *testing.T) {
-	t.Setenv("PROXY_PORT", "18080")
+func TestNormalizeProviderAndModelAddsStableIDs(t *testing.T) {
+	provider := NormalizeProvider(ProviderConfig{Name: "UseAI Paid"})
+	if provider.ID != "useai-paid" {
+		t.Fatalf("provider id = %q, want useai-paid", provider.ID)
+	}
+	if provider.DisplayName != "UseAI Paid" {
+		t.Fatalf("display name = %q, want UseAI Paid", provider.DisplayName)
+	}
+
+	model := NormalizeModel(ModelConfig{Name: "model-a", Provider: "UseAI Paid"})
+	if model.ProviderID != "useai-paid" {
+		t.Fatalf("model provider_id = %q, want useai-paid", model.ProviderID)
+	}
+}
+
+func TestApplyEnvOverridesUsesPort(t *testing.T) {
+	t.Setenv("PORT", "18080")
+	t.Setenv("PROXY_PORT", "19090")
 
 	cfg := DefaultConfig()
-	cfg.Port = 11434
+	cfg.Port = 12345
 	applyEnvOverrides(cfg)
 
 	if cfg.Port != 18080 {
@@ -80,14 +108,27 @@ func TestApplyEnvOverridesOverridesPort(t *testing.T) {
 	}
 }
 
-func TestApplyEnvOverridesIgnoresInvalidPort(t *testing.T) {
-	t.Setenv("PROXY_PORT", "not-a-number")
+func TestApplyEnvOverridesFallsBackToLegacyProxyPort(t *testing.T) {
+	t.Setenv("PORT", "")
+	t.Setenv("PROXY_PORT", "19090")
 
 	cfg := DefaultConfig()
-	cfg.Port = 11434
+	cfg.Port = 12345
 	applyEnvOverrides(cfg)
 
-	if cfg.Port != 11434 {
-		t.Fatalf("port = %d, want 11434", cfg.Port)
+	if cfg.Port != 19090 {
+		t.Fatalf("port = %d, want 19090", cfg.Port)
+	}
+}
+
+func TestApplyEnvOverridesIgnoresInvalidPort(t *testing.T) {
+	t.Setenv("PORT", "not-a-number")
+
+	cfg := DefaultConfig()
+	cfg.Port = 12345
+	applyEnvOverrides(cfg)
+
+	if cfg.Port != 12345 {
+		t.Fatalf("port = %d, want 12345", cfg.Port)
 	}
 }

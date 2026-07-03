@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	UseAIProviderID       = "useai"
 	UseAIProviderName     = "UseAI"
 	UseAIProviderBaseURL  = "https://api.eforge.xyz/v1"
 	UseAIProviderType     = "openai"
@@ -19,18 +20,21 @@ const (
 // ProviderConfig 表示一个 AI 提供商的配置。
 // Priority 数字越小越优先，会参与同模型多 provider 候选排序。
 type ProviderConfig struct {
-	Name     string `json:"name"`     // 提供商名称，作为内部唯一标识和展示名称
-	APIKey   string `json:"api_key"`  // API 密钥，OpenAI 兼容提供商按 Bearer Token 使用
-	BaseURL  string `json:"base_url"` // API 基础地址，末尾斜杠会被统一 TrimRight
-	Type     string `json:"type"`     // 提供商协议类型，可选值为 openai / ollama / custom
-	Enabled  bool   `json:"enabled"`  // 是否启用，禁用后不会参与模型发现和请求转发
-	Priority int    `json:"priority"` // 优先级，数字越小越优先
+	ID          string `json:"id"`           // provider 实例 ID，作为路由、日志、model@provider_id 的稳定标识
+	Name        string `json:"name"`         // 提供商名称，兼容旧配置；未设置 display_name 时也用于展示
+	DisplayName string `json:"display_name"` // UI 展示名称
+	APIKey      string `json:"api_key"`      // API 密钥，OpenAI 兼容提供商按 Bearer Token 使用
+	BaseURL     string `json:"base_url"`     // API 基础地址，末尾斜杠会被统一 TrimRight
+	Type        string `json:"type"`         // 提供商协议类型，可选值为 openai / ollama / custom
+	Enabled     bool   `json:"enabled"`      // 是否启用，禁用后不会参与模型发现和请求转发
+	Priority    int    `json:"priority"`     // 优先级，数字越小越优先
 }
 
 // ModelConfig 表示模型配置
 // 用于在管理界面展示和按模型名称注入默认请求参数。
 type ModelConfig struct {
 	Name                 string   `json:"name"`                   // 模型名称，管理界面展示用
+	ProviderID           string   `json:"provider_id"`            // 可选 provider 实例 ID；为空表示按 provider priority 自动选择
 	Provider             string   `json:"provider"`               // 所属提供商名称，用于和 provider 配置对照
 	ContextLength        *int     `json:"context_length"`         // 上下文长度，仅 UI 展示，当前不参与请求校验
 	MaxOutputTokens      *int     `json:"max_output_tokens"`      // 最大输出 token，仅 UI 展示
@@ -56,11 +60,12 @@ type AppConfig struct {
 // DefaultConfig 返回默认配置
 func DefaultConfig() *AppConfig {
 	cfg := &AppConfig{
-		Port:         11434,
+		Port:         12345,
 		DefaultModel: "deepseek-v4-pro",
 		Providers: []ProviderConfig{
 			DefaultUseAIProvider(),
 			{
+				ID:       "deepseek",
 				Name:     "deepseek",
 				BaseURL:  "https://api.deepseek.com",
 				Type:     "openai",
@@ -68,6 +73,7 @@ func DefaultConfig() *AppConfig {
 				Priority: 1,
 			},
 			{
+				ID:       "ollama-local",
 				Name:     "ollama",
 				BaseURL:  "http://localhost:11434",
 				Type:     "ollama",
@@ -78,6 +84,7 @@ func DefaultConfig() *AppConfig {
 		Models: []ModelConfig{
 			{
 				Name:            "deepseek-v4-pro",
+				ProviderID:      "deepseek",
 				Provider:        "deepseek",
 				ContextLength:   intPtr(1000000),
 				MaxOutputTokens: intPtr(384000),
@@ -86,6 +93,7 @@ func DefaultConfig() *AppConfig {
 			},
 			{
 				Name:            "llama-3.3-70b",
+				ProviderID:      "ollama-local",
 				Provider:        "ollama",
 				ContextLength:   intPtr(128000),
 				MaxOutputTokens: intPtr(16384),
@@ -101,47 +109,93 @@ func DefaultConfig() *AppConfig {
 // DefaultUseAIProvider returns the built-in first-party OpenAI-compatible provider.
 func DefaultUseAIProvider() ProviderConfig {
 	return ProviderConfig{
-		Name:     UseAIProviderName,
-		BaseURL:  UseAIProviderBaseURL,
-		Type:     UseAIProviderType,
-		Enabled:  true,
-		Priority: UseAIProviderPriority,
+		ID:          UseAIProviderID,
+		Name:        UseAIProviderName,
+		DisplayName: UseAIProviderName,
+		BaseURL:     UseAIProviderBaseURL,
+		Type:        UseAIProviderType,
+		Enabled:     true,
+		Priority:    UseAIProviderPriority,
 	}
 }
 
 // EnsureBuiltInProviders keeps first-party providers available even for older config files.
+//
+// 这里有两个产品约束：
+// 1. UseAI 是项目自带的第一方入口，必须始终出现在 provider 列表第一位，方便新用户开箱使用。
+// 2. provider 的 api_key/base_url 以 config.json 为唯一事实来源，不再读取 PROVIDER_* 环境变量。
+//
+// 旧配置可能只有 name 没有 id，或者模型仍使用 provider 字段；因此这里也承担轻量迁移职责。
 func EnsureBuiltInProviders(cfg *AppConfig) {
 	if cfg == nil {
 		return
 	}
 
 	useAI := DefaultUseAIProvider()
-	if apiKey := strings.TrimSpace(os.Getenv("PROVIDER_USEAI_API_KEY")); apiKey != "" {
-		useAI.APIKey = apiKey
-	}
-	if baseURL := strings.TrimSpace(os.Getenv("PROVIDER_USEAI_BASE_URL")); baseURL != "" {
-		useAI.BaseURL = baseURL
-	}
 
 	out := make([]ProviderConfig, 0, len(cfg.Providers)+1)
 	for _, p := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(p.Name), UseAIProviderName) {
+		p = NormalizeProvider(p)
+		if strings.EqualFold(ProviderKey(p), UseAIProviderID) ||
+			strings.EqualFold(strings.TrimSpace(p.Name), UseAIProviderName) {
 			if strings.TrimSpace(p.APIKey) != "" {
 				useAI.APIKey = p.APIKey
+			}
+			if strings.TrimSpace(p.BaseURL) != "" {
+				useAI.BaseURL = p.BaseURL
+			}
+			if strings.TrimSpace(p.DisplayName) != "" {
+				useAI.DisplayName = p.DisplayName
+			}
+			useAI.Enabled = p.Enabled
+			if p.Priority != 0 {
+				useAI.Priority = p.Priority
 			}
 			continue
 		}
 		out = append(out, p)
 	}
 	cfg.Providers = append([]ProviderConfig{useAI}, dedupeNonUseAIProviders(out)...)
+	for i := range cfg.Models {
+		cfg.Models[i] = NormalizeModel(cfg.Models[i])
+	}
+}
+
+func NormalizeProvider(p ProviderConfig) ProviderConfig {
+	// ID 是路由、日志、model@provider_id 的稳定标识；name/display_name 允许用户改展示文案。
+	p.ID = normalizeID(p.ID)
+	if p.ID == "" {
+		p.ID = normalizeID(p.Name)
+	}
+	if strings.TrimSpace(p.Name) == "" {
+		p.Name = p.ID
+	}
+	if strings.TrimSpace(p.DisplayName) == "" {
+		p.DisplayName = p.Name
+	}
+	return p
+}
+
+func NormalizeModel(m ModelConfig) ModelConfig {
+	// provider 是旧字段；provider_id 是新字段。保存/热更新时把旧值迁移为稳定 ID。
+	if strings.TrimSpace(m.ProviderID) == "" {
+		m.ProviderID = normalizeID(m.Provider)
+	}
+	return m
+}
+
+func ProviderKey(p ProviderConfig) string {
+	p = NormalizeProvider(p)
+	return p.ID
 }
 
 func dedupeNonUseAIProviders(providers []ProviderConfig) []ProviderConfig {
 	out := make([]ProviderConfig, 0, len(providers))
 	seen := map[string]struct{}{}
 	for _, p := range providers {
-		key := strings.ToLower(strings.TrimSpace(p.Name))
-		if key == "" || key == strings.ToLower(UseAIProviderName) {
+		p = NormalizeProvider(p)
+		key := strings.ToLower(ProviderKey(p))
+		if key == "" || key == UseAIProviderID {
 			continue
 		}
 		if _, ok := seen[key]; ok {
@@ -151,6 +205,12 @@ func dedupeNonUseAIProviders(providers []ProviderConfig) []ProviderConfig {
 		out = append(out, p)
 	}
 	return out
+}
+
+func normalizeID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, " ", "-")
+	return value
 }
 
 func intPtr(i int) *int {
@@ -165,7 +225,11 @@ func applyEnvOverrides(cfg *AppConfig) {
 	if cfg == nil {
 		return
 	}
-	port := strings.TrimSpace(os.Getenv("PROXY_PORT"))
+	port := strings.TrimSpace(os.Getenv("PORT"))
+	if port == "" {
+		// PROXY_PORT 是旧版双端口配置名，保留读取兼容已有 .env。
+		port = strings.TrimSpace(os.Getenv("PROXY_PORT"))
+	}
 	if port == "" {
 		return
 	}

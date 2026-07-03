@@ -6,12 +6,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dingyuwang/vs-ai-proxy/internal/config"
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
 
 // handleListModels 汇总所有启用 provider 的模型列表，并以 OpenAI /v1/models 格式返回。
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	_, _, catalog := s.snapshot()
+	// registry 的模型发现是异步完成的；catalog 创建时可能还没有发现结果。
+	// 每次模型列表请求前重建一次，确保 Visual Studio 立刻看到最新 provider 模型。
+	catalog.Rebuild()
 	entries := catalog.AllEntries()
 
 	items := make([]map[string]any, 0, len(entries))
@@ -33,12 +37,14 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 // handleOllamaTags 汇总所有启用 provider 的模型列表，并以 Ollama /api/tags 格式返回。
 func (s *Server) handleOllamaTags(w http.ResponseWriter, r *http.Request) {
-	_, _, catalog := s.snapshot()
+	cfg, _, catalog := s.snapshot()
+	// /api/tags 是 Ollama/Visual Studio 发现模型能力的入口，必须和 /api/show 使用同一份最新 catalog。
+	catalog.Rebuild()
 	entries := ollamaVisibleEntries(catalog.AllEntries())
 
 	items := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		items = append(items, buildOllamaTagModel(entry, catalog))
+		items = append(items, buildOllamaTagModel(entry, catalog, cfg))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -75,6 +81,7 @@ func ollamaVisibleEntries(entries []provider.CatalogEntry) []provider.CatalogEnt
 			continue
 		}
 
+		// 对 Ollama 只暴露 provider 绑定后的模型，避免同名模型在多个 provider 上重复且不可区分。
 		key := strings.ToLower(upstream + "@" + entry.Provider)
 		if _, ok := seen[key]; ok {
 			continue
@@ -88,7 +95,7 @@ func ollamaVisibleEntries(entries []provider.CatalogEntry) []provider.CatalogEnt
 	return out
 }
 
-func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCatalog) map[string]any {
+func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCatalog, cfg *config.AppConfig) map[string]any {
 	model := strings.TrimSpace(entry.UpstreamModel)
 	if model == "" {
 		model = strings.TrimSpace(entry.Model)
@@ -104,6 +111,22 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 	supportsTools := true
 	supportsVision := false
 	family := coalesceString(providerName, "api")
+	// 先应用 config.json 中用户维护的模型能力，随后再让内置/发现 profile 覆盖更精确的能力。
+	// 这样 SenseNova 这类自定义 OpenAI-compatible provider 也能在 /api/tags 中展示 1M 上下文。
+	if modelCfg, ok := findModelConfig(cfg, model, model, providerName); ok {
+		if modelCfg.ContextLength != nil && *modelCfg.ContextLength > 0 {
+			ctxLength = *modelCfg.ContextLength
+		}
+		if modelCfg.MaxOutputTokens != nil && *modelCfg.MaxOutputTokens > 0 {
+			maxOutput = *modelCfg.MaxOutputTokens
+		}
+		if modelCfg.SupportsTools != nil {
+			supportsTools = *modelCfg.SupportsTools
+		}
+		if modelCfg.SupportsVision != nil {
+			supportsVision = *modelCfg.SupportsVision
+		}
+	}
 	if catalog != nil {
 		if profile, ok := catalog.Profile(model, providerName); ok {
 			if profile.ContextLength != nil && *profile.ContextLength > 0 {

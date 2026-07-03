@@ -58,6 +58,34 @@ func GetCapabilities(name string) ProviderCapabilities {
 	return ProviderCapabilities{}
 }
 
+// InferCapabilityName 根据 provider 实例配置推断能力注册表名称。
+//
+// provider 实例 ID 可以是 useai-paid、sensenova、openai-team-a；能力名则决定：
+// - 上游 API path 规则，例如 /v1/chat/completions 还是 /chat/completions
+// - provider 专属 header，例如 OpenRouter referer/title
+// - 参数治理，例如 reasoning_effort/top_k 是否允许透传
+//
+// 未识别的 OpenAI-compatible provider 返回空字符串，调用方会使用标准 OpenAI fallback path。
+func InferCapabilityName(id, name, baseURL, providerType string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	name = strings.ToLower(strings.TrimSpace(name))
+	if IsKnownProvider(id) {
+		return id
+	}
+	if IsKnownProvider(name) {
+		return name
+	}
+	if strings.HasPrefix(id, "useai") || strings.Contains(strings.ToLower(baseURL), "api.eforge.xyz") {
+		return "useai"
+	}
+	switch strings.ToLower(strings.TrimSpace(providerType)) {
+	case string(ApiFormatOllama):
+		return "ollama"
+	default:
+		return ""
+	}
+}
+
 // MustGetCapabilities 获取已知 provider 的能力配置，未知 provider 会 panic。
 func MustGetCapabilities(name string) ProviderCapabilities {
 	if c, ok := providerCapabilities[strings.ToLower(name)]; ok {
@@ -192,8 +220,15 @@ var providerCapabilities = map[string]ProviderCapabilities{
 // ResolveApiFormat 根据 provider 能力判断上游接口格式，类型判断只作兜底。
 func ResolveApiFormat(prov Provider) ApiFormat {
 	if prov != nil {
-		if IsKnownProvider(prov.Name()) {
-			return GetCapabilities(prov.Name()).ApiFormat
+		name := prov.Name()
+		if p, ok := prov.(*OpenAIProvider); ok {
+			name = p.capabilityName()
+		}
+		if p, ok := prov.(*OllamaProvider); ok && strings.TrimSpace(p.CapabilityName) != "" {
+			name = p.CapabilityName
+		}
+		if IsKnownProvider(name) {
+			return GetCapabilities(name).ApiFormat
 		}
 	}
 	switch prov.(type) {

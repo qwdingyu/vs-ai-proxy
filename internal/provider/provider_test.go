@@ -71,6 +71,32 @@ func TestOpenAIProviderUsesCapabilityPaths(t *testing.T) {
 	}
 }
 
+func TestInferCapabilityNameSupportsProviderInstances(t *testing.T) {
+	tests := []struct {
+		name         string
+		id           string
+		providerName string
+		baseURL      string
+		providerType string
+		want         string
+	}{
+		{name: "known id", id: "openrouter", providerType: "openai", want: "openrouter"},
+		{name: "known display name", id: "team-a", providerName: "DeepSeek", providerType: "openai", want: "deepseek"},
+		{name: "useai paid id", id: "useai-paid", baseURL: "https://api.eforge.xyz/v1", providerType: "openai", want: "useai"},
+		{name: "ollama type", id: "local", providerType: "ollama", want: "ollama"},
+		{name: "custom openai compatible", id: "sensenova", baseURL: "https://token.sensenova.cn/v1", providerType: "openai", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := InferCapabilityName(tt.id, tt.providerName, tt.baseURL, tt.providerType)
+			if got != tt.want {
+				t.Fatalf("capability = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUseAIProviderUsesV1BaseURLWithoutDuplicatingPath(t *testing.T) {
 	seen := map[string]int{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +132,53 @@ func TestUseAIProviderUsesV1BaseURLWithoutDuplicatingPath(t *testing.T) {
 
 	if _, err := prov.ChatRaw(context.Background(), &ChatRequest{
 		Model:    "useai-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatRaw returned error: %v", err)
+	}
+	if seen["/v1/models"] != 1 {
+		t.Fatalf("models path count = %d, want 1; seen=%#v", seen["/v1/models"], seen)
+	}
+	if seen["/v1/chat/completions"] != 1 {
+		t.Fatalf("chat path count = %d, want 1; seen=%#v", seen["/v1/chat/completions"], seen)
+	}
+}
+
+func TestCustomOpenAIProviderUsesV1BaseURLWithoutDuplicatingFallbackPath(t *testing.T) {
+	seen := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Path]++
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":[{"id":"custom-model"}]}`))
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{
+				"id":"chatcmpl-custom",
+				"object":"chat.completion",
+				"created":1,
+				"model":"custom-model",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+			}`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("sensenova", "", "test-key", upstream.URL+"/v1", true, time.Second)
+
+	models, err := prov.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels returned error: %v", err)
+	}
+	if len(models) != 1 || models[0] != "custom-model" {
+		t.Fatalf("models = %#v, want custom-model", models)
+	}
+
+	if _, err := prov.ChatRaw(context.Background(), &ChatRequest{
+		Model:    "custom-model",
 		Messages: []Message{{Role: "user", Content: "hi"}},
 	}); err != nil {
 		t.Fatalf("ChatRaw returned error: %v", err)

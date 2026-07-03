@@ -21,6 +21,7 @@ func TestConfigSaveHotUpdatesProxyRegistry(t *testing.T) {
 		Port:         11434,
 		DefaultModel: "model-x",
 		Providers: []config.ProviderConfig{{
+			ID:      "openai-main",
 			Name:    "openai",
 			Type:    "openai",
 			APIKey:  "sk-test",
@@ -55,13 +56,114 @@ func TestConfigSaveHotUpdatesProxyRegistry(t *testing.T) {
 	if gotCfg.DefaultModel != "model-x" {
 		t.Fatalf("default_model = %q, want %q", gotCfg.DefaultModel, "model-x")
 	}
+	if gotCfg.Providers[0].ID != config.UseAIProviderID {
+		t.Fatalf("first provider id = %q, want built-in UseAI first", gotCfg.Providers[0].ID)
+	}
+	if _, ok := findProviderConfig(gotCfg.Providers, "openai-main"); !ok {
+		t.Fatalf("saved providers = %#v, want openai-main", gotCfg.Providers)
+	}
 
 	cfg, registry, _ := proxySrv.SnapshotComponents()
 	if cfg.DefaultModel != "model-x" {
 		t.Fatalf("proxy snapshot default model = %q, want %q", cfg.DefaultModel, "model-x")
 	}
-	if !containsString(registry.ProviderNames(), "openai") {
-		t.Fatalf("registry providers = %#v, want openai", registry.ProviderNames())
+	if !containsString(registry.ProviderNames(), "openai-main") {
+		t.Fatalf("registry providers = %#v, want openai-main", registry.ProviderNames())
+	}
+}
+
+func TestManagementAPIResponsesAreNotCached(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("Pragma = %q, want no-cache", got)
+	}
+}
+
+func TestAdminManagementAPIRoutesWorkAndAreNotCached(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/config", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/api/config status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("Pragma = %q, want no-cache", got)
+	}
+}
+
+func TestAdminManagementAPIRequiresBearerTokenWhenConfigured(t *testing.T) {
+	t.Setenv("ADMIN_API_KEY", "admin-secret")
+	apiSrv, _ := newAPITestHarness(t)
+
+	unauthorized := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/config", nil)
+	apiSrv.engine.ServeHTTP(unauthorized, req)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+
+	authorized := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/config", nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	apiSrv.engine.ServeHTTP(authorized, req)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d, want %d; body=%s", authorized.Code, http.StatusOK, authorized.Body.String())
+	}
+}
+
+func TestAdminManagementAPIFallsBackToProxyAPIKey(t *testing.T) {
+	t.Setenv("ADMIN_API_KEY", "")
+	t.Setenv("PROXY_API_KEY", "proxy-secret")
+	apiSrv, _ := newAPITestHarness(t)
+
+	unauthorized := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/config", nil)
+	apiSrv.engine.ServeHTTP(unauthorized, req)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+
+	authorized := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/config", nil)
+	req.Header.Set("Authorization", "Bearer proxy-secret")
+	apiSrv.engine.ServeHTTP(authorized, req)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d, want %d; body=%s", authorized.Code, http.StatusOK, authorized.Body.String())
+	}
+}
+
+func TestConfigSaveRejectsDuplicateProviderIDs(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	payload := config.AppConfig{
+		Port:         11434,
+		DefaultModel: "model-x",
+		Providers: []config.ProviderConfig{
+			{ID: "dup", Name: "A", Type: "openai", BaseURL: "https://a.invalid", Enabled: true},
+			{ID: "dup", Name: "B", Type: "openai", BaseURL: "https://b.invalid", Enabled: true},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/config", mustJSONBody(t, payload))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate provider config status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
 
@@ -69,7 +171,8 @@ func TestProviderEndpointsCRUDAndHotUpdate(t *testing.T) {
 	apiSrv, proxySrv := newAPITestHarness(t)
 
 	addReqBody := config.ProviderConfig{
-		Name:    "openai",
+		ID:      "openai-paid",
+		Name:    "OpenAI Paid",
 		Type:    "openai",
 		APIKey:  "sk-test",
 		BaseURL: "https://example.invalid",
@@ -85,41 +188,155 @@ func TestProviderEndpointsCRUDAndHotUpdate(t *testing.T) {
 	listRec := httptest.NewRecorder()
 	listReq := httptest.NewRequest(http.MethodGet, "/api/providers", nil)
 	apiSrv.engine.ServeHTTP(listRec, listReq)
-	if !bytes.Contains(listRec.Body.Bytes(), []byte(`"name":"openai"`)) {
-		t.Fatalf("provider list missing openai: %s", listRec.Body.String())
+	if !bytes.Contains(listRec.Body.Bytes(), []byte(`"id":"openai-paid"`)) {
+		t.Fatalf("provider list missing openai-paid: %s", listRec.Body.String())
 	}
 
 	updBody := config.ProviderConfig{
-		Name:    "openai",
+		ID:      "openai-paid",
+		Name:    "OpenAI Paid",
 		Type:    "openai",
 		APIKey:  "sk-updated",
 		BaseURL: "https://example.invalid",
 		Enabled: false,
 	}
 	updRec := httptest.NewRecorder()
-	updReq := httptest.NewRequest(http.MethodPut, "/api/providers/openai", mustJSONBody(t, updBody))
+	updReq := httptest.NewRequest(http.MethodPut, "/api/providers/openai-paid", mustJSONBody(t, updBody))
 	apiSrv.engine.ServeHTTP(updRec, updReq)
 	if updRec.Code != http.StatusOK {
-		t.Fatalf("PUT /api/providers/openai status = %d, want %d; body=%s", updRec.Code, http.StatusOK, updRec.Body.String())
+		t.Fatalf("PUT /api/providers/openai-paid status = %d, want %d; body=%s", updRec.Code, http.StatusOK, updRec.Body.String())
 	}
 
 	cfg, registry, _ := proxySrv.SnapshotComponents()
-	openAI, ok := findProviderConfig(cfg.Providers, "openai")
+	openAI, ok := findProviderConfig(cfg.Providers, "openai-paid")
 	if !ok {
-		t.Fatalf("openai provider missing after update: %#v", cfg.Providers)
+		t.Fatalf("openai-paid provider missing after update: %#v", cfg.Providers)
 	}
 	if openAI.APIKey != "sk-updated" {
 		t.Fatalf("updated provider key = %q, want sk-updated", openAI.APIKey)
 	}
-	if containsString(registry.ProviderNames(), "openai") {
+	if containsString(registry.ProviderNames(), "openai-paid") {
 		t.Fatalf("disabled provider should not be routed by registry")
 	}
 
 	delRec := httptest.NewRecorder()
-	delReq := httptest.NewRequest(http.MethodDelete, "/api/providers/openai", nil)
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/providers/openai-paid", nil)
 	apiSrv.engine.ServeHTTP(delRec, delReq)
 	if delRec.Code != http.StatusOK {
-		t.Fatalf("DELETE /api/providers/openai status = %d, want %d; body=%s", delRec.Code, http.StatusOK, delRec.Body.String())
+		t.Fatalf("DELETE /api/providers/openai-paid status = %d, want %d; body=%s", delRec.Code, http.StatusOK, delRec.Body.String())
+	}
+}
+
+func TestProviderEndpointsRejectInvalidProvider(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	tests := []struct {
+		name string
+		body config.ProviderConfig
+	}{
+		{name: "empty id and name", body: config.ProviderConfig{Type: "openai", BaseURL: "https://example.invalid"}},
+		{name: "empty base url", body: config.ProviderConfig{ID: "bad", Name: "Bad", Type: "openai"}},
+		{name: "bad type", body: config.ProviderConfig{ID: "bad", Name: "Bad", Type: "bad", BaseURL: "https://example.invalid"}},
+		{name: "useai renamed id", body: config.ProviderConfig{ID: "useai-paid", Name: "UseAI", Type: "openai", BaseURL: "https://api.eforge.xyz/v1"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, tt.body))
+			apiSrv.engine.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestProviderEndpointsRejectDuplicateIDs(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	body := config.ProviderConfig{
+		ID:      "openai-paid",
+		Name:    "OpenAI Paid",
+		Type:    "openai",
+		APIKey:  "sk-test",
+		BaseURL: "https://example.invalid",
+		Enabled: true,
+	}
+	firstRec := httptest.NewRecorder()
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, body))
+	apiSrv.engine.ServeHTTP(firstRec, firstReq)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first POST status = %d, want %d; body=%s", firstRec.Code, http.StatusOK, firstRec.Body.String())
+	}
+
+	secondRec := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, body))
+	apiSrv.engine.ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusConflict {
+		t.Fatalf("duplicate POST status = %d, want %d; body=%s", secondRec.Code, http.StatusConflict, secondRec.Body.String())
+	}
+}
+
+func TestProviderUpdateRejectsIDCollision(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	for _, body := range []config.ProviderConfig{
+		{ID: "provider-a", Name: "Provider A", Type: "openai", BaseURL: "https://a.invalid", Enabled: true},
+		{ID: "provider-b", Name: "Provider B", Type: "openai", BaseURL: "https://b.invalid", Enabled: true},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, body))
+		apiSrv.engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s status = %d, want %d; body=%s", body.ID, rec.Code, http.StatusOK, rec.Body.String())
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/providers/provider-b", mustJSONBody(t, config.ProviderConfig{
+		ID:      "provider-a",
+		Name:    "Provider B renamed",
+		Type:    "openai",
+		BaseURL: "https://b.invalid",
+		Enabled: true,
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("colliding PUT status = %d, want %d; body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestProviderUpdateRejectsBuiltInUseAIIDChange(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/providers/useai", mustJSONBody(t, config.ProviderConfig{
+		ID:      "useai-renamed",
+		Name:    "UseAI Renamed",
+		Type:    "openai",
+		BaseURL: "https://api.eforge.xyz/v1",
+		Enabled: true,
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("UseAI id change status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestDeleteProviderRejectsBuiltInUseAI(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/providers/useai", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE built-in UseAI status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("UseAI")) {
+		t.Fatalf("DELETE built-in UseAI response should explain UseAI is protected: %s", rec.Body.String())
 	}
 }
 
@@ -128,7 +345,7 @@ func TestModelEndpointsRoundTrip(t *testing.T) {
 
 	models := []config.ModelConfig{{
 		Name:            "model-a",
-		Provider:        "openai",
+		Provider:        "OpenAI Paid",
 		ContextLength:   intPtrLocal(8192),
 		MaxOutputTokens: intPtrLocal(2048),
 		Enabled:         true,
@@ -149,6 +366,9 @@ func TestModelEndpointsRoundTrip(t *testing.T) {
 	}
 	if !bytes.Contains(listRec.Body.Bytes(), []byte(`"name":"model-a"`)) {
 		t.Fatalf("model list missing model-a: %s", listRec.Body.String())
+	}
+	if !bytes.Contains(listRec.Body.Bytes(), []byte(`"provider_id":"openai-paid"`)) {
+		t.Fatalf("model list missing normalized provider_id: %s", listRec.Body.String())
 	}
 }
 
@@ -192,6 +412,42 @@ func TestManagementTestEndpoints(t *testing.T) {
 	apiSrv.engine.ServeHTTP(chatRec, chatReq)
 	if chatRec.Code != http.StatusOK || !bytes.Contains(chatRec.Body.Bytes(), []byte(`"success":true`)) {
 		t.Fatalf("test chat failed: status=%d body=%s", chatRec.Code, chatRec.Body.String())
+	}
+}
+
+func TestManagementTestChatHandlesEmptyChoices(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-empty","object":"chat.completion","created":1,"model":"model-a","choices":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	payload := config.ProviderConfig{
+		Name:    "openai",
+		Type:    "openai",
+		APIKey:  "sk-test",
+		BaseURL: upstream.URL,
+		Enabled: true,
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": payload,
+		"message":  "hello",
+		"model":    "model-a",
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"success":false`)) {
+		t.Fatalf("empty choices should be a failed test result, got: %s", rec.Body.String())
 	}
 }
 
@@ -245,7 +501,7 @@ func containsString(values []string, want string) bool {
 
 func findProviderConfig(values []config.ProviderConfig, name string) (config.ProviderConfig, bool) {
 	for _, value := range values {
-		if value.Name == name {
+		if config.ProviderKey(value) == name || value.Name == name {
 			return value, true
 		}
 	}

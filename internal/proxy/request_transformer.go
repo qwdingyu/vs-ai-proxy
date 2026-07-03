@@ -272,7 +272,7 @@ func findModelConfig(
 		if !m.Enabled || !modelConfigNameMatches(m, requestedModel, upstreamModel) {
 			continue
 		}
-		if providerName != "" && strings.TrimSpace(m.Provider) == providerName {
+		if providerName != "" && strings.EqualFold(modelProviderKey(m), providerName) {
 			return m, true
 		}
 	}
@@ -281,11 +281,19 @@ func findModelConfig(
 		if !m.Enabled || !modelConfigNameMatches(m, requestedModel, upstreamModel) {
 			continue
 		}
-		if strings.TrimSpace(m.Provider) == "" || providerName == "" {
+		if modelProviderKey(m) == "" || providerName == "" {
 			return m, true
 		}
 	}
 	return config.ModelConfig{}, false
+}
+
+func modelProviderKey(m config.ModelConfig) string {
+	key := strings.TrimSpace(m.ProviderID)
+	if key == "" {
+		key = strings.TrimSpace(m.Provider)
+	}
+	return key
 }
 
 func modelConfigNameMatches(m config.ModelConfig, requestedModel, upstreamModel string) bool {

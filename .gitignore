@@ -1,11 +1,15 @@
 # 构建产物
 /vs-ai-proxy
 /vs-ai-proxy.exe
+/server
 /dist/
 
 # 本地配置与运行时数据
+/.env
 /.vs-ai-proxy/
 /.config/
+/.omx/
+/.qwen/
 
 # IDE / 系统文件
 .idea/

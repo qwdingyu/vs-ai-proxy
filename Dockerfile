@@ -23,8 +23,9 @@ WORKDIR /app
 COPY --from=build /out/vs-ai-proxy /usr/local/bin/vs-ai-proxy
 
 ENV CONFIG_PATH=/data/config.json
+ENV HOST=0.0.0.0
 
-EXPOSE 11434 12434
+EXPOSE 12345
 
 USER app
 

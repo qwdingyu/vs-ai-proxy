@@ -26,7 +26,7 @@ func (s *Server) buildOllamaShowBody(
 	maxOutput := intValue(modelCfg.MaxOutputTokens, defaultMaxOutputTokens)
 	supportsTools := boolValue(modelCfg.SupportsTools, true)
 	supportsVision := boolValue(modelCfg.SupportsVision, false)
-	family := coalesceString(providerName, modelCfg.Provider, "api")
+	family := coalesceString(providerName, modelCfg.ProviderID, modelCfg.Provider, "api")
 	exec := executionMapFromModelConfig(modelCfg)
 
 	if catalog != nil {

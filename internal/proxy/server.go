@@ -101,9 +101,8 @@ func configDir(cfg *config.AppConfig) string {
 
 func (s *Server) buildRegistry(cfg *config.AppConfig) *provider.Registry {
 	registry := provider.NewRegistry(cfg.DefaultModel, 5*time.Minute)
-	configured := make(map[string]config.ProviderConfig, len(cfg.Providers))
 	for _, p := range cfg.Providers {
-		configured[strings.ToLower(p.Name)] = p
+		p = config.NormalizeProvider(p)
 		prov := s.providerFromConfig(p)
 		if prov == nil {
 			continue
@@ -115,166 +114,32 @@ func (s *Server) buildRegistry(cfg *config.AppConfig) *provider.Registry {
 			Priority: p.Priority,
 		})
 
-		s.logger.Info("已注册提供商: %s (%s)", p.Name, p.Type)
+		s.logger.Info("已注册提供商: %s (%s)", config.ProviderKey(p), p.Type)
 	}
-	s.discoverEnvProviders(registry, configured, len(cfg.Providers)+1)
 	return registry
 }
 
-func (s *Server) discoverEnvProviders(
-	registry *provider.Registry,
-	configured map[string]config.ProviderConfig,
-	priorityStart int,
-) {
-	priority := priorityStart
-	for _, name := range provider.KnownProviders() {
-		caps := provider.GetCapabilities(name)
-		apiKey := providerAPIKeyFromEnv(name, caps)
-		if strings.TrimSpace(apiKey) == "" {
-			continue
-		}
-		if cfg, exists := configured[strings.ToLower(name)]; exists && (cfg.Enabled || strings.TrimSpace(cfg.APIKey) != "") {
-			continue
-		}
-
-		baseURL := firstNonEmptyEnv(
-			"PROVIDER_"+caps.EnvPrefix+"_BASE_URL",
-			nameSpecificBaseURLFallback(name),
-		)
-		if strings.TrimSpace(baseURL) == "" {
-			baseURL = caps.DefaultBaseUrl
-		}
-
-		prov := providerFromCapabilities(name, apiKey, baseURL, caps, 60*time.Second)
-		if prov == nil {
-			continue
-		}
-		registry.Add(&provider.ProviderEntry{
-			Provider: prov,
-			Models:   []string{},
-			Priority: priority,
-		})
-		priority++
-		s.logger.Info("已从环境变量注册提供商: %s", name)
-	}
-
-	priority = s.discoverLocalOllama(registry, configured, priority)
-	s.discoverLegacyDeepSeek(registry, configured, priority)
-}
-
-func providerAPIKeyFromEnv(name string, caps provider.ProviderCapabilities) string {
-	apiKey := strings.TrimSpace(os.Getenv("PROVIDER_" + caps.EnvPrefix + "_API_KEY"))
-	if apiKey == "" && strings.EqualFold(name, "ollamacloud") {
-		apiKey = strings.TrimSpace(os.Getenv("PROVIDER_OLLAMACLOUD_API_KEY"))
-	}
-	return apiKey
-}
-
-func nameSpecificBaseURLFallback(name string) string {
-	switch strings.ToLower(name) {
-	case "deepseek":
-		return "DEEPSEEK_BASE_URL"
-	default:
-		return ""
-	}
-}
-
-func firstNonEmptyEnv(keys ...string) string {
-	for _, key := range keys {
-		if strings.TrimSpace(key) == "" {
-			continue
-		}
-		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func providerFromCapabilities(
-	name string,
-	apiKey string,
-	baseURL string,
-	caps provider.ProviderCapabilities,
-	timeout time.Duration,
-) provider.Provider {
-	switch caps.ApiFormat {
-	case provider.ApiFormatOllama:
-		return provider.NewOllamaProvider(name, baseURL, true, timeout)
-	case provider.ApiFormatOpenAi:
-		return provider.NewOpenAIProvider(name, apiKey, baseURL, true, timeout)
-	default:
-		return nil
-	}
-}
-
-func (s *Server) discoverLocalOllama(
-	registry *provider.Registry,
-	configured map[string]config.ProviderConfig,
-	priority int,
-) int {
-	if cfg, exists := configured["ollama"]; exists && cfg.Enabled {
-		return priority
-	}
-	baseURL := strings.TrimSpace(os.Getenv("PROVIDER_OLLAMA_BASE_URL"))
-	if baseURL == "" || !isLocalBaseURL(baseURL) {
-		return priority
-	}
-	registry.Add(&provider.ProviderEntry{
-		Provider: provider.NewOllamaProvider("ollama", baseURL, true, 60*time.Second),
-		Models:   []string{},
-		Priority: priority,
-	})
-	s.logger.Info("已从 PROVIDER_OLLAMA_BASE_URL 注册本地 Ollama: %s", baseURL)
-	return priority + 1
-}
-
-func isLocalBaseURL(baseURL string) bool {
-	baseURL = strings.ToLower(baseURL)
-	return strings.Contains(baseURL, "localhost") ||
-		strings.Contains(baseURL, "127.0.0.1") ||
-		strings.Contains(baseURL, "::1")
-}
-
-func (s *Server) discoverLegacyDeepSeek(
-	registry *provider.Registry,
-	configured map[string]config.ProviderConfig,
-	priority int,
-) {
-	if cfg, exists := configured["deepseek"]; exists && (cfg.Enabled || strings.TrimSpace(cfg.APIKey) != "") {
-		return
-	}
-	apiKey := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
-	if apiKey == "" {
-		return
-	}
-	if strings.TrimSpace(os.Getenv("PROVIDER_DEEPSEEK_API_KEY")) != "" {
-		return
-	}
-	caps := provider.GetCapabilities("deepseek")
-	baseURL := firstNonEmptyEnv("DEEPSEEK_BASE_URL")
-	if baseURL == "" {
-		baseURL = caps.DefaultBaseUrl
-	}
-	registry.Add(&provider.ProviderEntry{
-		Provider: provider.NewOpenAIProvider("deepseek", apiKey, baseURL, true, 60*time.Second),
-		Models:   []string{},
-		Priority: priority,
-	})
-	s.logger.Info("已从 legacy DEEPSEEK_API_KEY 注册提供商: deepseek")
-}
-
 func (s *Server) providerFromConfig(p config.ProviderConfig) provider.Provider {
+	p = config.NormalizeProvider(p)
 	timeout := 60 * time.Second
+	id := config.ProviderKey(p)
+	// id 是 provider 实例名，参与日志/路由/model@provider_id；
+	// capability 是能力注册表名，决定 OpenAI/Ollama 路径、header 和参数过滤。
+	// 例如 useai-paid 的 id 不在能力表中，但 capability 应归一到 useai。
+	capability := providerCapabilityNameFromConfig(p)
 	switch p.Type {
 	case "ollama":
-		return provider.NewOllamaProvider(p.Name, p.BaseURL, p.Enabled, timeout)
+		return provider.NewOllamaProviderWithCapability(id, capability, p.BaseURL, p.Enabled, timeout)
 	case "openai", "custom":
-		return provider.NewOpenAIProvider(p.Name, p.APIKey, p.BaseURL, p.Enabled, timeout)
+		return provider.NewOpenAIProviderWithCapability(id, capability, p.APIKey, p.BaseURL, p.Enabled, timeout)
 	default:
 		s.logger.Warn("未知提供商类型: %s", p.Type)
 		return nil
 	}
+}
+
+func providerCapabilityNameFromConfig(p config.ProviderConfig) string {
+	return provider.InferCapabilityName(config.ProviderKey(p), p.Name, p.BaseURL, p.Type)
 }
 
 // refreshModels 刷新提供商模型列表
@@ -299,25 +164,39 @@ func (s *Server) refreshModels(prov provider.Provider, entry *provider.ProviderE
 	s.logger.Info("提供商 %s 发现 %d 个模型", prov.Name(), len(models))
 }
 
-// Start 启动服务器
-func (s *Server) Start() error {
-	cfg, _, _ := s.snapshot()
+// Handler 返回代理协议处理器。
+//
+// 该处理器只承载 Visual Studio / OpenAI / Ollama 兼容端点，供 cmd/server
+// 在单端口模式下挂到根路径；Web 管理端必须通过 /admin 独立分流，避免和
+// Ollama 的 /api/chat、/api/tags、/api/show 等协议路径冲突。
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	return s.loggingMiddleware(s.authMiddleware(mux))
+}
 
-	// 代理端点
+// RegisterRoutes 注册代理协议路由。
+func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+	// OpenAI-compatible endpoints used by Visual Studio / Copilot clients.
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/v1/models", s.handleListModels)
 
-	// Ollama 兼容端点
+	// Ollama-compatible endpoints used by BYOM model discovery and chat.
 	mux.HandleFunc("/api/chat", s.handleOllamaChat)
 	mux.HandleFunc("/api/tags", s.handleOllamaTags)
 	mux.HandleFunc("/api/show", s.handleOllamaShow)
 	mux.HandleFunc("/api/version", s.handleOllamaVersion)
 
-	// 健康检查
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/", s.handleRoot)
+}
+
+// Start 启动服务器
+func (s *Server) Start() error {
+	cfg, _, _ := s.snapshot()
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
 
 	s.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
@@ -352,9 +231,28 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(ww, r)
 
 		elapsed := time.Since(start).Seconds() * 1000
+
+		// 优先使用 responseWriter 上 handler 直接设置的字段，
+		// 兜底从响应头读取（兼容测试代码等不走 handler 直接设置头部的路径）。
+		provider := ww.provider
+		if provider == "" {
+			provider = firstNonEmptyHeader(ww.Header(), "X-Proxy-Provider", "X-Proxy-Primary-Provider")
+		}
+		model := ww.model
+		if model == "" {
+			model = firstNonEmptyHeader(ww.Header(), "X-Proxy-Requested-Model", "X-Proxy-Resolved-Model")
+		}
+		upstream := ww.upstream
+		if upstream == "" {
+			upstream = firstNonEmptyHeader(ww.Header(), "X-Proxy-Upstream-Model", "X-Proxy-Primary-Upstream")
+		}
+
 		s.store.AddLog(store.RequestLog{
 			Method:     r.Method,
 			Path:       r.URL.Path,
+			Provider:   provider,
+			Model:      model,
+			Upstream:   upstream,
 			StatusCode: ww.statusCode,
 			ElapsedMs:  elapsed,
 			IsSuccess:  ww.statusCode < 400,
@@ -362,6 +260,15 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 		s.logger.Info("%s %s - %d (%.0f ms)", r.Method, r.URL.Path, ww.statusCode, elapsed)
 	})
+}
+
+func firstNonEmptyHeader(header http.Header, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(header.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -395,11 +302,16 @@ func isAuthorizedProxyRequest(r *http.Request, proxyKey string) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(proxyKey)) == 1
 }
 
-// responseWriter 记录状态码
+// responseWriter 记录状态码及提供商/模型信息
 // 通过包装 http.ResponseWriter，在 WriteHeader 被调用时缓存最终状态码。
+// provider/model/upstream 字段由 handler 在请求处理过程中设置，
+// 供 loggingMiddleware 在请求完成后读取并写入 Store。
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
+	provider   string
+	model      string
+	upstream   string
 }
 
 func (w *responseWriter) WriteHeader(code int) {
@@ -410,6 +322,23 @@ func (w *responseWriter) WriteHeader(code int) {
 func (w *responseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok && flusher != nil {
 		flusher.Flush()
+	}
+}
+
+// setResponseLogFields 尝试从 http.ResponseWriter 中解出 *responseWriter，
+// 并设置 provider/model/upstream 信息供 loggingMiddleware 记录到 Store。
+// 当 w 类型不是 *responseWriter 时静默忽略（此时走响应头的兜底逻辑）。
+func setResponseLogFields(w http.ResponseWriter, provider, model, upstream string) {
+	if rw, ok := w.(*responseWriter); ok {
+		if provider != "" {
+			rw.provider = provider
+		}
+		if model != "" {
+			rw.model = model
+		}
+		if upstream != "" {
+			rw.upstream = upstream
+		}
 	}
 }
 
@@ -495,6 +424,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			modelID = modelName
 		}
 		setAttemptDiagnosticHeaders(w, prov.Name(), modelID)
+		setResponseLogFields(w, prov.Name(), modelName, modelID)
 
 		req := cloneChatRequest(baseReq)
 		req.Model = modelID
@@ -635,6 +565,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			modelID = modelName
 		}
 		setAttemptDiagnosticHeaders(w, prov.Name(), modelID)
+		setResponseLogFields(w, prov.Name(), modelName, modelID)
 
 		req := &provider.ChatRequest{
 			Model:    modelID,
