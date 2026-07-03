@@ -1,14 +1,16 @@
 # VS AI Proxy 自动构建工作流
 # 触发条件:
 #   - push/PR 到 main: 编译验证 + go vet
-#   - 推送 v* 标签: 全平台编译 + 创建 GitHub Release
+#   - 推送 v* 或数字开头标签: 全平台编译 + 创建 GitHub Release
 
 name: build
 
 on:
   push:
     branches: [main]
-    tags: [v*]
+    tags:
+      - 'v*'
+      - '[0-9]*'
   pull_request:
     branches: [main]
 
@@ -32,7 +34,7 @@ jobs:
 
   # ─── 全平台构建 + 发布 ─────────────────────
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     needs: check
     runs-on: ubuntu-latest
     permissions:

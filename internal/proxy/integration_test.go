@@ -523,7 +523,7 @@ func TestChatCompletionsPreservesOpenAIRawResponseFields(t *testing.T) {
 		"created":1700000000,
 		"model":"gpt-test",
 		"provider_trace":{"request_id":"trace-1"},
-		"choices":[{"index":0,"message":{"role":"assistant","content":"raw ok","reasoning_content":"kept for cache"},"finish_reason":"stop"}],
+		"choices":[{"index":0,"message":{"role":"assistant","content":"raw ok","reasoning_content":"kept for cache"},"finish_reason":""}],
 		"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
 	}`)
 	prov := newFakeProvider("openai", true, []string{"gpt-test"}, nil, "")
@@ -562,7 +562,11 @@ func TestChatCompletionsPreservesOpenAIRawResponseFields(t *testing.T) {
 		t.Fatalf("provider_trace should be preserved in raw response: %s", rec.Body.String())
 	}
 	choices := body["choices"].([]any)
-	message := choices[0].(map[string]any)["message"].(map[string]any)
+	choice := choices[0].(map[string]any)
+	if choice["finish_reason"] != "stop" {
+		t.Fatalf("finish_reason = %v, want stop; body=%s", choice["finish_reason"], rec.Body.String())
+	}
+	message := choice["message"].(map[string]any)
 	if message["reasoning_content"] != "kept for cache" {
 		t.Fatalf("reasoning_content should remain in raw response: %v", message)
 	}
@@ -770,6 +774,10 @@ func TestAuthMiddlewareBlocksUnauthorizedRequests(t *testing.T) {
 }
 
 func TestHealthReturnsModelAndProviderState(t *testing.T) {
+	oldVersion := buildVersion
+	SetBuildVersion("test-version")
+	t.Cleanup(func() { buildVersion = oldVersion })
+
 	prov := newFakeProvider("openai", true, []string{"gpt-test"}, &fakeChatResponse{Model: "gpt-test", Content: "ok"}, "")
 	server := newOpenServer(prov)
 	handler := withMux(server, func(mux *http.ServeMux) {
@@ -790,6 +798,9 @@ func TestHealthReturnsModelAndProviderState(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Fatalf("status = %v, want ok", body["status"])
+	}
+	if body["version"] != "test-version" {
+		t.Fatalf("version = %v, want test-version", body["version"])
 	}
 	if body["model"] != "default-model" {
 		t.Fatalf("model = %v, want default-model", body["model"])

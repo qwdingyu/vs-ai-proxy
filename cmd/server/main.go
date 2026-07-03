@@ -23,6 +23,8 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/web"
 )
 
+var version = "dev"
+
 // main 进程入口
 // 负责组装配置、日志、存储、代理服务与 API 服务，
 // 并监听系统退出信号完成优雅停止。
@@ -50,6 +52,7 @@ func main() {
 	}
 	staticFS := web.MustSubFS()
 
+	proxy.SetBuildVersion(version)
 	// 创建代理服务器，对外提供 /v1/chat/completions、/api/chat 等兼容接口
 	proxySrv := proxy.NewServer(cfg, configMgr, st, logger)
 	// 创建 API 服务器，对外提供配置、提供商、模型、日志、统计及静态资源服务
@@ -82,7 +85,7 @@ func main() {
 	go watchConfigLoop(ctx, configMgr, proxySrv, logger)
 
 	publicAddr := displayAddr(appAddr)
-	logger.Info("VS AI Proxy 已启动，监听地址=http://%s，管理面板=http://%s/admin", publicAddr, publicAddr)
+	logger.Info("VS AI Proxy %s 已启动，监听地址=http://%s，管理面板=http://%s/admin", version, publicAddr, publicAddr)
 	logPublicAccessHint(appAddr, logger)
 
 	// 监听退出信号，优雅关闭

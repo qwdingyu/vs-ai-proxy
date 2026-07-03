@@ -479,6 +479,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					continue
 				}
+				body = normalizeOpenAIChatResponseForVisualStudio(body)
 				s.cacheRawOpenAIChatResponse(body)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)

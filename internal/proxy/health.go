@@ -3,17 +3,27 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
 
+var buildVersion = "dev"
+
 type healthResponse struct {
 	Status               string   `json:"status"`
+	Version              string   `json:"version"`
 	Model                string   `json:"model"`
 	AvailableModels      []string `json:"available_models"`
 	Providers            []string `json:"providers"`
 	ModelsLastRefreshUTC string   `json:"models_last_refresh_utc"`
+}
+
+func SetBuildVersion(version string) {
+	if trimmed := strings.TrimSpace(version); trimmed != "" {
+		buildVersion = trimmed
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +43,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func buildHealthResponse(registry *provider.Registry, catalog *provider.ModelCatalog) healthResponse {
 	resp := healthResponse{
 		Status:               "ok",
+		Version:              buildVersion,
 		AvailableModels:      []string{},
 		Providers:            []string{},
 		ModelsLastRefreshUTC: "",
