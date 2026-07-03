@@ -93,6 +93,23 @@ func TestModelCatalogLoadsEmbeddedDefaultSelections(t *testing.T) {
 	}
 }
 
+func TestModelCatalogProfileAnyFindsEmbeddedModelAcrossProviders(t *testing.T) {
+	catalog := NewModelCatalog(nil, "", time.Minute)
+	profile, ok := catalog.ProfileAny("deepseek-v4-flash")
+	if !ok {
+		t.Fatalf("expected embedded profile")
+	}
+	if profile.ContextLength == nil || *profile.ContextLength != 1048576 {
+		t.Fatalf("context_length = %v, want 1048576", profile.ContextLength)
+	}
+	if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 131072 {
+		t.Fatalf("max_output_tokens = %v, want 131072", profile.MaxOutputTokens)
+	}
+	if profile.ReasoningEffort != "medium" {
+		t.Fatalf("reasoning_effort = %q, want medium", profile.ReasoningEffort)
+	}
+}
+
 func TestModelCatalogUserSelectionOverridesEmbeddedDefault(t *testing.T) {
 	dir := t.TempDir()
 	selectionDir := filepath.Join(dir, "model-selection")

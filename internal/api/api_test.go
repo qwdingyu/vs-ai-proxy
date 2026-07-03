@@ -372,6 +372,110 @@ func TestProviderEndpointsRejectDuplicateIDs(t *testing.T) {
 	}
 }
 
+func TestProviderProbeOpenAICorrectsBaseURL(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"model-a"},{"id":"model-b"}]}`))
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/providers/probe", mustJSONBody(t, map[string]any{
+		"provider": config.ProviderConfig{
+			ID:      "probe",
+			Name:    "Probe",
+			Type:    "openai",
+			BaseURL: upstream.URL + "/v1/chat/completions",
+			Enabled: true,
+		},
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers/probe status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"reachable":true`)) {
+		t.Fatalf("probe should be reachable: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"corrected_base_url":"`+upstream.URL+`/v1"`)) {
+		t.Fatalf("probe should suggest /v1 base URL: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"models_count":2`)) {
+		t.Fatalf("probe should count models: %s", rec.Body.String())
+	}
+}
+
+func TestProviderProbeOllamaCorrectsBaseURL(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"models":[{"name":"llama3"},{"name":"qwen3"}]}`))
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/providers/probe", mustJSONBody(t, map[string]any{
+		"provider": config.ProviderConfig{
+			ID:      "ollama-local",
+			Name:    "Ollama",
+			Type:    "ollama",
+			BaseURL: upstream.URL + "/api/tags",
+			Enabled: true,
+		},
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers/probe status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"reachable":true`)) {
+		t.Fatalf("probe should be reachable: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"corrected_base_url":"`+upstream.URL+`"`)) {
+		t.Fatalf("probe should suggest root Ollama base URL: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"models_count":2`)) {
+		t.Fatalf("probe should count models: %s", rec.Body.String())
+	}
+}
+
+func TestProviderProbeReportsFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad key", http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/providers/probe", mustJSONBody(t, map[string]any{
+		"provider": config.ProviderConfig{
+			ID:      "bad",
+			Name:    "Bad",
+			Type:    "openai",
+			BaseURL: upstream.URL,
+			Enabled: true,
+		},
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers/probe status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"reachable":false`)) {
+		t.Fatalf("probe should fail: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"attempts"`)) {
+		t.Fatalf("probe should include attempts: %s", rec.Body.String())
+	}
+}
+
 func TestProviderUpdateRejectsIDCollision(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 
@@ -554,6 +658,76 @@ func TestModelEndpointsRoundTrip(t *testing.T) {
 	}
 	if !bytes.Contains(listRec.Body.Bytes(), []byte(`"provider_id":"openai-paid"`)) {
 		t.Fatalf("model list missing normalized provider_id: %s", listRec.Body.String())
+	}
+}
+
+func TestModelSaveEnrichesMissingMetadata(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	models := []config.ModelConfig{{
+		Name:       "deepseek-v4-flash",
+		ProviderID: config.UseAIProviderID,
+		Provider:   config.UseAIProviderID,
+		Enabled:    true,
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/models", mustJSONBody(t, models))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/models status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cfgRec := httptest.NewRecorder()
+	cfgReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	apiSrv.engine.ServeHTTP(cfgRec, cfgReq)
+	if cfgRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d, want %d", cfgRec.Code, http.StatusOK)
+	}
+
+	var got config.AppConfig
+	if err := json.Unmarshal(cfgRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if len(got.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(got.Models))
+	}
+	model := got.Models[0]
+	if model.ContextLength == nil || *model.ContextLength != 1048576 {
+		t.Fatalf("context_length = %v, want 1048576", model.ContextLength)
+	}
+	if model.MaxOutputTokens == nil || *model.MaxOutputTokens != 131072 {
+		t.Fatalf("max_output_tokens = %v, want 131072", model.MaxOutputTokens)
+	}
+	if model.SupportsTools == nil || !*model.SupportsTools {
+		t.Fatalf("supports_tools = %v, want true", model.SupportsTools)
+	}
+	if model.SupportsVision == nil || *model.SupportsVision {
+		t.Fatalf("supports_vision = %v, want false", model.SupportsVision)
+	}
+	if model.ReasoningEffort != "medium" {
+		t.Fatalf("reasoning_effort = %q, want medium", model.ReasoningEffort)
+	}
+}
+
+func TestModelMetadataEndpointReturnsCatalogDefaults(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/models/metadata?name=deepseek-v4-flash&provider_id=useai", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/models/metadata status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"found":true`)) {
+		t.Fatalf("metadata should be found: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"context_length":1048576`)) {
+		t.Fatalf("metadata should include context_length: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"max_output_tokens":131072`)) {
+		t.Fatalf("metadata should include max_output_tokens: %s", rec.Body.String())
 	}
 }
 

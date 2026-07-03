@@ -176,6 +176,7 @@
             <label>优先级 <input type="number" id="pPriority" /></label>
             <label>启用 <input type="checkbox" id="pEnabled" checked /></label>
             <div class="actions">
+              <button class="btn" id="btnProbeProvider">探测</button>
               <button class="btn" id="btnCancelProvider">取消</button>
               <button class="btn primary" id="btnSaveProvider">保存</button>
             </div>
@@ -574,6 +575,24 @@
       $('testOutput').textContent = output;
     };
 
+    const applyModelMetadataToForm = async () => {
+      const name = $('mName').value.trim();
+      if (!name) return;
+      const providerId = $('mProvider').value.trim();
+      try {
+        const meta = await fetchJSON('/models/metadata?name=' + encodeURIComponent(name) + '&provider_id=' + encodeURIComponent(providerId));
+        if (!meta.found) return;
+        if ((!$('mCtx').value || Number($('mCtx').value) <= 0) && meta.context_length) {
+          $('mCtx').value = meta.context_length;
+        }
+        if ((!$('mMax').value || Number($('mMax').value) <= 0) && meta.max_output_tokens) {
+          $('mMax').value = meta.max_output_tokens;
+        }
+      } catch (e) {
+        console.debug('模型元数据查询失败', e);
+      }
+    };
+
     const loadMonitor = async () => {
       try {
         const [health, metrics] = await Promise.all([
@@ -718,11 +737,11 @@
     $('btnCancelProvider').addEventListener('click', () => {
       $('providerModal').classList.add('hidden');
     });
-    // 保存提供商
-    $('btnSaveProvider').addEventListener('click', async () => {
+
+    const readProviderForm = () => {
       const id = $('pId').value.trim();
       const name = $('pName').value.trim() || id;
-      const payload = {
+      return {
         id,
         name,
         display_name: $('pDisplay').value.trim() || name,
@@ -732,6 +751,37 @@
         priority: Number($('pPriority').value || 0),
         enabled: $('pEnabled').checked
       };
+    };
+
+    $('btnProbeProvider').addEventListener('click', async () => {
+      const provider = readProviderForm();
+      if (!provider.base_url) return alert('Base URL 不能为空。');
+      try {
+        const result = await fetchJSON('/providers/probe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider })
+        });
+        if (!result.reachable) {
+          return alert('探测失败：' + result.message + '\n\n' + JSON.stringify(result.attempts || [], null, 2));
+        }
+        const summary = `探测成功\n类型：${result.detected_type}\n建议 Base URL：${result.corrected_base_url}\n模型数：${result.models_count}\n示例：${(result.models_preview || []).join(', ')}`;
+        if (result.corrected_base_url && result.corrected_base_url !== provider.base_url) {
+          if (window.confirm(summary + '\n\n是否将建议 Base URL 填入表单？')) {
+            $('pBase').value = result.corrected_base_url;
+            if (result.detected_type) $('pType').value = result.detected_type;
+          }
+          return;
+        }
+        alert(summary);
+      } catch (e) {
+        alert('探测失败：' + String(e.message || e));
+      }
+    });
+
+    // 保存提供商
+    $('btnSaveProvider').addEventListener('click', async () => {
+      const payload = readProviderForm();
       if (!payload.id) return alert('ID 不能为空');
       if (!payload.name) return alert('名称不能为空');
       if (!['openai', 'ollama', 'custom'].includes(payload.type)) return alert('类型必须是 openai、ollama 或 custom。');
@@ -803,6 +853,8 @@
     });
     // 关闭新增/编辑模型弹窗
     $('btnCancelModel').addEventListener('click', () => $('modelModal').classList.add('hidden'));
+    $('mName').addEventListener('blur', applyModelMetadataToForm);
+    $('mProvider').addEventListener('blur', applyModelMetadataToForm);
     // 保存模型
     $('btnSaveModel').addEventListener('click', async () => {
       const providerId = $('mProvider').value.trim();

@@ -153,6 +153,39 @@ func (c *ModelCatalog) Profile(model, provider string) (ModelProfile, bool) {
 	return ModelProfile{}, false
 }
 
+// ProfileAny 返回跨 provider 的最佳模型 profile。
+// 管理端新增模型时 provider 可能是自定义聚合商，无法与内置 provider 名完全对应；
+// 这里只用模型名做元数据补齐，不参与真实请求路由。
+func (c *ModelCatalog) ProfileAny(model string) (ModelProfile, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	model = StripModelTag(strings.TrimSpace(model))
+	if model == "" {
+		return ModelProfile{}, false
+	}
+
+	bestScore := -1
+	var best ModelProfile
+	for _, entry := range c.entries {
+		if !entry.Enabled || !entry.Configured {
+			continue
+		}
+		score := profileNameMatchScore(model, entry.Model)
+		if score < 0 {
+			continue
+		}
+		if score > bestScore || (score == bestScore && entry.Priority < best.MatchPriority) {
+			bestScore = score
+			best = entry.Profile
+		}
+	}
+	if bestScore < 0 {
+		return ModelProfile{}, false
+	}
+	return best, true
+}
+
 // Rebuild 重建 catalog，通常在 provider 发现结果或配置变更后调用。
 func (c *ModelCatalog) Rebuild() {
 	c.mu.Lock()
@@ -277,6 +310,33 @@ func (c *ModelCatalog) providerActiveLocked(providerName string) bool {
 
 func catalogKey(model, provider string) string {
 	return strings.TrimSpace(model) + "@" + strings.TrimSpace(provider)
+}
+
+func profileNameMatchScore(requested, candidate string) int {
+	requested = strings.ToLower(StripModelTag(strings.TrimSpace(requested)))
+	candidate = strings.ToLower(StripModelTag(strings.TrimSpace(candidate)))
+	if requested == "" || candidate == "" {
+		return -1
+	}
+	if requested == candidate {
+		return 10_000 + len(candidate)
+	}
+
+	requestedBase := strings.ToLower(ModelBasename(requested))
+	candidateBase := strings.ToLower(ModelBasename(candidate))
+	if requestedBase != "" && requestedBase == candidateBase {
+		return 9_000 + len(candidateBase)
+	}
+	if strings.Contains(requested, candidate) {
+		return 7_000 + len(candidate)
+	}
+	if strings.Contains(candidate, requested) {
+		return 6_000 + len(requested)
+	}
+	if requestedBase != "" && strings.Contains(candidateBase, requestedBase) {
+		return 5_000 + len(requestedBase)
+	}
+	return -1
 }
 
 func resolveProviderName(registry *Registry, model string) string {

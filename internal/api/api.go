@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -177,12 +179,14 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 
 	// 提供商相关
 	group.GET("/providers", s.listProviders)
+	group.POST("/providers/probe", s.probeProvider)
 	group.POST("/providers", s.addProvider)
 	group.PUT("/providers/:name", s.updateProvider)
 	group.DELETE("/providers/:name", s.deleteProvider)
 
 	// 模型相关
 	group.GET("/models", s.listModels)
+	group.GET("/models/metadata", s.getModelMetadata)
 	group.PUT("/models", s.saveModels)
 
 	// 测试相关
@@ -330,6 +334,214 @@ func (s *Server) deleteProvider(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{"error": "提供商未找到"})
 }
 
+type providerProbeRequest struct {
+	Provider config.ProviderConfig `json:"provider"`
+}
+
+type providerProbeAttempt struct {
+	Type    string `json:"type"`
+	BaseURL string `json:"base_url"`
+	Error   string `json:"error,omitempty"`
+}
+
+type providerProbeResult struct {
+	Reachable        bool                   `json:"reachable"`
+	DetectedType     string                 `json:"detected_type,omitempty"`
+	CorrectedBaseURL string                 `json:"corrected_base_url,omitempty"`
+	ModelsCount      int                    `json:"models_count"`
+	ModelsPreview    []string               `json:"models_preview,omitempty"`
+	Message          string                 `json:"message"`
+	Attempts         []providerProbeAttempt `json:"attempts,omitempty"`
+}
+
+func (s *Server) probeProvider(c *gin.Context) {
+	var req providerProbeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	providerCfg := config.NormalizeProvider(req.Provider)
+	if strings.TrimSpace(providerCfg.BaseURL) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "提供商 Base URL 不能为空"})
+		return
+	}
+
+	result := probeProviderConfig(c.Request.Context(), providerCfg)
+	c.JSON(http.StatusOK, result)
+}
+
+func probeProviderConfig(ctx context.Context, providerCfg config.ProviderConfig) providerProbeResult {
+	providerType := strings.ToLower(strings.TrimSpace(providerCfg.Type))
+	if providerType == "" || providerType == "custom" {
+		providerType = "openai"
+	}
+	if providerType == "ollama" {
+		return probeOllamaProvider(ctx, providerCfg)
+	}
+	return probeOpenAIProvider(ctx, providerCfg)
+}
+
+func probeOpenAIProvider(ctx context.Context, providerCfg config.ProviderConfig) providerProbeResult {
+	attempts := []providerProbeAttempt{}
+	for _, baseURL := range openAIProbeBaseURLs(providerCfg.BaseURL) {
+		prov := provider.NewOpenAIProviderWithCapability(
+			config.ProviderKey(providerCfg),
+			providerCapabilityNameFromConfig(providerCfg),
+			providerCfg.APIKey,
+			baseURL,
+			true,
+			10*time.Second,
+		)
+		models, err := prov.ListModels(ctx)
+		if err == nil && len(models) > 0 {
+			return successfulProbeResult("openai", baseURL, models, attempts)
+		}
+		attempts = append(attempts, providerProbeAttempt{
+			Type:    "openai",
+			BaseURL: baseURL,
+			Error:   probeErrorMessage(err, len(models)),
+		})
+	}
+	return failedProbeResult("OpenAI-compatible endpoint 探测失败", attempts)
+}
+
+func probeOllamaProvider(ctx context.Context, providerCfg config.ProviderConfig) providerProbeResult {
+	attempts := []providerProbeAttempt{}
+	for _, baseURL := range ollamaProbeBaseURLs(providerCfg.BaseURL) {
+		prov := provider.NewOllamaProviderWithCapability(
+			config.ProviderKey(providerCfg),
+			providerCapabilityNameFromConfig(providerCfg),
+			baseURL,
+			true,
+			10*time.Second,
+		)
+		models, err := prov.ListModels(ctx)
+		if err == nil && len(models) > 0 {
+			return successfulProbeResult("ollama", baseURL, models, attempts)
+		}
+		attempts = append(attempts, providerProbeAttempt{
+			Type:    "ollama",
+			BaseURL: baseURL,
+			Error:   probeErrorMessage(err, len(models)),
+		})
+	}
+	return failedProbeResult("Ollama endpoint 探测失败", attempts)
+}
+
+func successfulProbeResult(providerType, baseURL string, models []string, attempts []providerProbeAttempt) providerProbeResult {
+	preview := models
+	if len(preview) > 10 {
+		preview = preview[:10]
+	}
+	return providerProbeResult{
+		Reachable:        true,
+		DetectedType:     providerType,
+		CorrectedBaseURL: baseURL,
+		ModelsCount:      len(models),
+		ModelsPreview:    append([]string(nil), preview...),
+		Message:          fmt.Sprintf("探测成功，发现 %d 个模型", len(models)),
+		Attempts:         attempts,
+	}
+}
+
+func failedProbeResult(message string, attempts []providerProbeAttempt) providerProbeResult {
+	return providerProbeResult{
+		Reachable: false,
+		Message:   message,
+		Attempts:  attempts,
+	}
+}
+
+func probeErrorMessage(err error, modelCount int) string {
+	if err != nil {
+		return err.Error()
+	}
+	if modelCount == 0 {
+		return "模型列表为空"
+	}
+	return ""
+}
+
+func openAIProbeBaseURLs(rawBaseURL string) []string {
+	base := normalizeProbeBaseURL(rawBaseURL, "openai")
+	trimmed := trimKnownProviderEndpointSuffix(base)
+	baseSite := probeBaseSite(trimmed)
+	return uniqueStrings([]string{
+		trimmed,
+		strings.TrimRight(trimmed, "/") + "/v1",
+		baseSite,
+		strings.TrimRight(baseSite, "/") + "/v1",
+		strings.TrimRight(baseSite, "/") + "/api",
+		strings.TrimRight(baseSite, "/") + "/api/v1",
+	})
+}
+
+func ollamaProbeBaseURLs(rawBaseURL string) []string {
+	base := normalizeProbeBaseURL(rawBaseURL, "ollama")
+	trimmed := trimKnownProviderEndpointSuffix(base)
+	return uniqueStrings([]string{trimmed, probeBaseSite(trimmed)})
+}
+
+func normalizeProbeBaseURL(rawBaseURL, providerType string) string {
+	value := strings.TrimRight(strings.TrimSpace(rawBaseURL), "/")
+	if value == "" || strings.Contains(value, "://") {
+		return value
+	}
+	if providerType == "ollama" {
+		return "http://" + value
+	}
+	return "https://" + value
+}
+
+func trimKnownProviderEndpointSuffix(baseURL string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	lower := strings.ToLower(base)
+	for _, suffix := range []string{
+		"/chat/completions",
+		"/models",
+		"/api/tags",
+		"/api/chat",
+	} {
+		if strings.HasSuffix(lower, suffix) {
+			return strings.TrimRight(base[:len(base)-len(suffix)], "/")
+		}
+	}
+	return base
+}
+
+func probeBaseSite(baseURL string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	schemeEnd := strings.Index(baseURL, "://")
+	if schemeEnd < 0 {
+		return baseURL
+	}
+	rest := baseURL[schemeEnd+3:]
+	slash := strings.Index(rest, "/")
+	if slash < 0 {
+		return baseURL
+	}
+	return baseURL[:schemeEnd+3+slash]
+}
+
+func uniqueStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimRight(strings.TrimSpace(value), "/")
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 // listModels 列出所有模型配置
 func (s *Server) listModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"models": s.configMgr.Get().Models})
@@ -462,6 +674,145 @@ func providerReferenceSet(providers []config.ProviderConfig) map[string]struct{}
 	return refs
 }
 
+type modelMetadataResponse struct {
+	Found           bool   `json:"found"`
+	Source          string `json:"source,omitempty"`
+	Model           string `json:"model,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	ContextLength   *int   `json:"context_length,omitempty"`
+	MaxOutputTokens *int   `json:"max_output_tokens,omitempty"`
+	SupportsTools   *bool  `json:"supports_tools,omitempty"`
+	SupportsVision  *bool  `json:"supports_vision,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+}
+
+func (s *Server) getModelMetadata(c *gin.Context) {
+	model := strings.TrimSpace(c.Query("name"))
+	providerID := strings.TrimSpace(c.Query("provider_id"))
+	if model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "模型名称不能为空"})
+		return
+	}
+
+	profile, source, ok := s.lookupModelProfile(model, providerID)
+	if !ok {
+		c.JSON(http.StatusOK, modelMetadataResponse{Found: false})
+		return
+	}
+
+	c.JSON(http.StatusOK, modelMetadataResponse{
+		Found:           true,
+		Source:          source,
+		Model:           profile.Model,
+		Provider:        profile.Provider,
+		ContextLength:   copyIntPtr(profile.ContextLength),
+		MaxOutputTokens: copyIntPtr(profile.MaxOutputTokens),
+		SupportsTools:   copyBoolPtr(profile.SupportsTools),
+		SupportsVision:  copyBoolPtr(profile.SupportsVision),
+		ReasoningEffort: profile.ReasoningEffort,
+	})
+}
+
+func (s *Server) enrichModelDefaults(cfg *config.AppConfig) {
+	if cfg == nil {
+		return
+	}
+	catalog := s.modelMetadataCatalog()
+	for i := range cfg.Models {
+		model := config.NormalizeModel(cfg.Models[i])
+		profile, _, ok := lookupModelProfile(catalog, model.Name, model.ProviderID)
+		if ok {
+			applyProfileDefaults(&model, profile)
+		}
+		applySafeModelFallbacks(&model)
+		cfg.Models[i] = model
+	}
+}
+
+func (s *Server) lookupModelProfile(model, providerID string) (provider.ModelProfile, string, bool) {
+	return lookupModelProfile(s.modelMetadataCatalog(), model, providerID)
+}
+
+func lookupModelProfile(catalog *provider.ModelCatalog, model, providerID string) (provider.ModelProfile, string, bool) {
+	if catalog == nil {
+		return provider.ModelProfile{}, "", false
+	}
+	if providerID != "" {
+		if profile, ok := catalog.Profile(model, providerID); ok {
+			return profile, "provider_profile", true
+		}
+	}
+	if profile, ok := catalog.ProfileAny(model); ok {
+		return profile, "model_catalog", true
+	}
+	return provider.ModelProfile{}, "", false
+}
+
+func (s *Server) modelMetadataCatalog() *provider.ModelCatalog {
+	configDir := ""
+	if s.configMgr != nil {
+		configDir = filepath.Dir(s.configMgr.ConfigPath())
+	}
+	return provider.NewModelCatalog(nil, configDir, 0)
+}
+
+func applyProfileDefaults(model *config.ModelConfig, profile provider.ModelProfile) {
+	if model.ContextLength == nil || *model.ContextLength <= 0 {
+		model.ContextLength = copyIntPtr(profile.ContextLength)
+	}
+	if model.MaxOutputTokens == nil || *model.MaxOutputTokens <= 0 {
+		model.MaxOutputTokens = copyIntPtr(profile.MaxOutputTokens)
+	}
+	if model.SupportsTools == nil {
+		model.SupportsTools = copyBoolPtr(profile.SupportsTools)
+	}
+	if model.SupportsVision == nil {
+		model.SupportsVision = copyBoolPtr(profile.SupportsVision)
+	}
+	if strings.TrimSpace(model.ReasoningEffort) == "" {
+		model.ReasoningEffort = profile.ReasoningEffort
+	}
+}
+
+func applySafeModelFallbacks(model *config.ModelConfig) {
+	if model.ContextLength == nil || *model.ContextLength <= 0 {
+		model.ContextLength = intPtr(128000)
+	}
+	if model.MaxOutputTokens == nil || *model.MaxOutputTokens <= 0 {
+		model.MaxOutputTokens = intPtr(4096)
+	}
+	if model.SupportsTools == nil {
+		model.SupportsTools = boolPtr(true)
+	}
+	if model.SupportsVision == nil {
+		model.SupportsVision = boolPtr(false)
+	}
+}
+
+func copyIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
+}
+
+func copyBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
 func (s *Server) cloneConfig() *config.AppConfig {
 	src := s.configMgr.Get()
 	cfg := *src
@@ -542,6 +893,7 @@ func providerCapabilityNameFromConfig(p config.ProviderConfig) string {
 }
 
 func (s *Server) saveAndApplyConfig(c *gin.Context, cfg *config.AppConfig) bool {
+	s.enrichModelDefaults(cfg)
 	if err := s.configMgr.Save(cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return false
