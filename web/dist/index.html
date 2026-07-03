@@ -369,27 +369,18 @@
       const seconds = Math.ceil(Number(ms) / 1000);
       return `<span class="badge warn">冷却 ${seconds}s</span>`;
     };
-    const withAdminAuth = (opts = {}) => {
-      const headers = new Headers(opts.headers || {});
-      const token = localStorage.getItem('vs_ai_proxy_admin_token') || '';
-      if (token && !headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + token);
-      return { ...opts, headers };
-    };
+    const withAdminAuth = (opts = {}) => ({ ...opts, credentials: opts.credentials || 'same-origin' });
 
-    const requestAdminTokenAndRetry = async (requestFn) => {
-      const token = window.prompt('请输入管理 API Token');
-      if (!token) throw new Error('管理 API 需要 Token');
-      localStorage.setItem('vs_ai_proxy_admin_token', token.trim());
-      return requestFn();
+    const redirectToAdminLogin = () => {
+      localStorage.removeItem('vs_ai_proxy_admin_token');
+      window.location.assign('/admin');
+      throw new Error('管理登录已失效，请重新登录。');
     };
 
     // 统一 fetch JSON 请求封装，失败时抛出来统一处理
-    const fetchJSON = async (path, opts = {}, retried = false) => {
+    const fetchJSON = async (path, opts = {}) => {
       const res = await fetch(API_BASE + path, withAdminAuth(opts));
-      if (res.status === 401 && !retried) {
-        localStorage.removeItem('vs_ai_proxy_admin_token');
-        return requestAdminTokenAndRetry(() => fetchJSON(path, opts, true));
-      }
+      if (res.status === 401) return redirectToAdminLogin();
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const err = new Error(data.error || '请求失败');
@@ -400,12 +391,9 @@
       return data;
     };
 
-    const fetchText = async (path, opts = {}, retried = false) => {
+    const fetchText = async (path, opts = {}) => {
       const res = await fetch(API_BASE + path, withAdminAuth(opts));
-      if (res.status === 401 && !retried) {
-        localStorage.removeItem('vs_ai_proxy_admin_token');
-        return requestAdminTokenAndRetry(() => fetchText(path, opts, true));
-      }
+      if (res.status === 401) return redirectToAdminLogin();
       const text = await res.text();
       if (!res.ok) throw new Error(text || '请求失败');
       return text;
