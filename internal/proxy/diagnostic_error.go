@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -13,6 +14,7 @@ var (
 	secretTokenPattern = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}`)
 	openAIKeyPattern   = regexp.MustCompile(`sk-[A-Za-z0-9_-]{12,}`)
 	useAIKeyPattern    = regexp.MustCompile(`(?i)(api[_-]?key["'\s:=]+)[A-Za-z0-9._~+/=-]{12,}`)
+	upstreamStatusCode = regexp.MustCompile(`(?i)(?:API|Ollama)\s*错误\s*(\d{3})`)
 )
 
 type attemptDiagnostic struct {
@@ -118,9 +120,18 @@ func sanitizeDiagnosticMessage(message string) string {
 
 func classifyProxyError(message string) string {
 	lower := strings.ToLower(message)
+	status := upstreamHTTPStatus(message)
 	switch {
 	case strings.Contains(lower, "context deadline exceeded") || strings.Contains(lower, "timeout"):
 		return "timeout"
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return "upstream_auth_error"
+	case status == http.StatusTooManyRequests:
+		return "upstream_rate_limit"
+	case status == http.StatusBadRequest || status == http.StatusNotFound:
+		return "upstream_request_error"
+	case status >= http.StatusInternalServerError:
+		return "upstream_server_error"
 	case strings.Contains(lower, "connect: connection refused") ||
 		strings.Contains(lower, "no such host") ||
 		strings.Contains(lower, "network is unreachable") ||
@@ -137,10 +148,30 @@ func classifyProxyError(message string) string {
 	}
 }
 
+func upstreamHTTPStatus(message string) int {
+	match := upstreamStatusCode.FindStringSubmatch(message)
+	if len(match) != 2 {
+		return 0
+	}
+	status, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return status
+}
+
 func diagnosticHint(category string) string {
 	switch category {
 	case "network_error":
 		return "检查 provider base_url、DNS、代理网络、云主机防火墙，或上游连接是否被重置。"
+	case "upstream_auth_error":
+		return "请求已到达上游但鉴权失败；检查 API key 是否正确、是否过期，以及 provider 是否要求额外鉴权头。"
+	case "upstream_rate_limit":
+		return "请求已到达上游但触发限流或额度限制；检查账号余额、免费额度、并发限制，或等待冷却后重试。"
+	case "upstream_request_error":
+		return "请求已到达上游但参数或模型不可用；检查模型名、provider 类型、base_url 与请求参数治理。"
+	case "upstream_server_error":
+		return "请求已到达上游但上游服务异常；可切换 provider、等待上游恢复，或查看 provider 状态页。"
 	case "upstream_api_error":
 		return "请求已到达上游；检查 API key、余额、模型名是否被该 provider 支持，以及上游错误正文。"
 	case "timeout":

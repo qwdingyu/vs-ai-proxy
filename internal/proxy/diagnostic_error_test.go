@@ -23,3 +23,36 @@ func TestSanitizeDiagnosticMessageRedactsSecretsAndTruncates(t *testing.T) {
 		t.Fatalf("diagnostic message len = %d, want bounded", len(got))
 	}
 }
+
+func TestClassifyProxyErrorDistinguishesNetworkAndUpstreamStatus(t *testing.T) {
+	tests := map[string]string{
+		`请求失败: dial tcp: connect: connection refused`: "network_error",
+		`openai stream error: API 错误 401`:             "upstream_auth_error",
+		`ollama stream error: Ollama 错误 403`:          "upstream_auth_error",
+		`openai stream error: API 错误 400`:             "upstream_request_error",
+		`openai stream error: API 错误 404`:             "upstream_request_error",
+		`openai stream error: API 错误 429`:             "upstream_rate_limit",
+		`openai stream error: API 错误 503`:             "upstream_server_error",
+		`context deadline exceeded`:                   "timeout",
+		`解析响应失败: invalid character`:                   "proxy_parse_error",
+	}
+
+	for message, want := range tests {
+		if got := classifyProxyError(message); got != want {
+			t.Fatalf("%q classified as %q, want %q", message, got, want)
+		}
+	}
+}
+
+func TestDiagnosticHintCoversSpecificUpstreamCategories(t *testing.T) {
+	for _, category := range []string{
+		"upstream_auth_error",
+		"upstream_rate_limit",
+		"upstream_request_error",
+		"upstream_server_error",
+	} {
+		if got := diagnosticHint(category); got == "" || got == diagnosticHint("provider_error") {
+			t.Fatalf("hint for %s = %q, want specific non-default hint", category, got)
+		}
+	}
+}
