@@ -127,16 +127,22 @@ assert_status() {
 smoke_test() {
     echo "Running smoke tests against ${BASE_URL}..."
     assert_status "200" "health" "${BASE_URL}/health"
-    assert_status "200" "admin html" "${BASE_URL}/admin"
     assert_status "200" "openai models" "${BASE_URL}/v1/models"
     assert_status "200" "ollama tags" "${BASE_URL}/api/tags"
     assert_status "404" "root /api/config must not be management API" "${BASE_URL}/api/config"
 
     token="$(admin_token)"
     if [ -n "${token}" ]; then
+        cookie_jar="$(mktemp)"
+        assert_status "401" "admin html without login" "${BASE_URL}/admin"
+        assert_status "303" "admin login" -c "${cookie_jar}" --data-urlencode "token=${token}" "${BASE_URL}/admin/login"
+        assert_status "200" "admin html with login cookie" -b "${cookie_jar}" "${BASE_URL}/admin"
         assert_status "401" "admin api without token" "${BASE_URL}/admin/api/config"
         assert_status "200" "admin api with token" -H "Authorization: Bearer ${token}" "${BASE_URL}/admin/api/config"
+        assert_status "200" "admin api with login cookie" -b "${cookie_jar}" "${BASE_URL}/admin/api/config"
+        rm -f "${cookie_jar}"
     else
+        assert_status "200" "admin html" "${BASE_URL}/admin"
         assert_status "200" "admin api without token" "${BASE_URL}/admin/api/config"
     fi
 

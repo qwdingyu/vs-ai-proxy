@@ -23,6 +23,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const adminSessionCookieName = "vs_ai_proxy_admin_token"
+
 // Server API 服务器
 // 对外提供管理界面所需的配置、提供商、模型、测试、日志、统计接口，
 // 并在 staticFS 非空时兼做静态资源与 SPA 路由的宿主。
@@ -50,7 +52,7 @@ func NewServer(
 	engine := gin.New()
 	engine.Use(gin.Recovery())
 	engine.Use(noStoreForManagementAPI())
-	engine.Use(adminAPIAuthMiddleware())
+	engine.Use(adminAuthMiddleware())
 
 	s := &Server{
 		engine:    engine,
@@ -68,7 +70,8 @@ func NewServer(
 func noStoreForManagementAPI() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/admin/api/") {
+		if path == "/admin" || strings.HasPrefix(path, "/admin/") ||
+			strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/admin/api/") {
 			// 管理 API 会返回 config.json 中的 provider api_key。
 			// 即使默认只监听 127.0.0.1，也要避免浏览器磁盘缓存或中间代理缓存敏感配置。
 			c.Header("Cache-Control", "no-store")
@@ -78,7 +81,7 @@ func noStoreForManagementAPI() gin.HandlerFunc {
 	}
 }
 
-func adminAPIAuthMiddleware() gin.HandlerFunc {
+func adminAuthMiddleware() gin.HandlerFunc {
 	adminKey := strings.TrimSpace(os.Getenv("ADMIN_API_KEY"))
 	if adminKey == "" {
 		// 单端口部署时，如果用户已经为代理设置了 PROXY_API_KEY，默认复用它保护管理 API。
@@ -88,18 +91,102 @@ func adminAPIAuthMiddleware() gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if adminKey == "" || !strings.HasPrefix(path, "/admin/api/") {
+		if adminKey == "" || !strings.HasPrefix(path, "/admin") {
 			c.Next()
 			return
 		}
-		token := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(adminKey)) != 1 {
+
+		if path == "/admin/login" && c.Request.Method == http.MethodPost {
+			if adminTokenMatches(formAdminToken(c), adminKey) {
+				http.SetCookie(c.Writer, &http.Cookie{
+					Name:     adminSessionCookieName,
+					Value:    adminKey,
+					Path:     "/admin",
+					MaxAge:   int((12 * time.Hour).Seconds()),
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+				})
+				c.Redirect(http.StatusSeeOther, "/admin")
+				c.Abort()
+				return
+			}
+
+			writeAdminLoginPage(c, http.StatusUnauthorized, "Token 不正确，请重试。")
+			c.Abort()
+			return
+		}
+
+		if adminRequestAuthorized(c, adminKey) {
+			c.Next()
+			return
+		}
+
+		if strings.HasPrefix(path, "/admin/api/") {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			c.Abort()
 			return
 		}
-		c.Next()
+
+		writeAdminLoginPage(c, http.StatusUnauthorized, "")
+		c.Abort()
 	}
+}
+
+func formAdminToken(c *gin.Context) string {
+	if err := c.Request.ParseForm(); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Request.FormValue("token"))
+}
+
+func adminRequestAuthorized(c *gin.Context, adminKey string) bool {
+	token := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+	if adminTokenMatches(token, adminKey) {
+		return true
+	}
+	if cookie, err := c.Request.Cookie(adminSessionCookieName); err == nil {
+		return adminTokenMatches(cookie.Value, adminKey)
+	}
+	return false
+}
+
+func adminTokenMatches(token string, adminKey string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" || adminKey == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(adminKey)) == 1
+}
+
+func writeAdminLoginPage(c *gin.Context, status int, message string) {
+	if message == "" {
+		message = "请输入 .env 中配置的 ADMIN_API_KEY。"
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(status, `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VS AI Proxy Admin Login</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f1115;color:#e6edf3;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+    form{width:min(360px,calc(100vw - 32px));background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+    h1{font-size:18px;margin:0 0 8px}
+    p{margin:0 0 14px;color:#8b949e;font-size:13px;line-height:1.5}
+    input{width:100%;box-sizing:border-box;background:#0f1115;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:10px;margin:4px 0 12px}
+    button{width:100%;border:0;border-radius:8px;padding:10px;background:#238636;color:white;cursor:pointer}
+  </style>
+</head>
+<body>
+  <form method="post" action="/admin/login">
+    <h1>VS AI Proxy 管理面板</h1>
+    <p>%s</p>
+    <input name="token" type="password" autofocus autocomplete="current-password" placeholder="ADMIN_API_KEY" />
+    <button type="submit">进入管理面板</button>
+  </form>
+</body>
+</html>`, message)
 }
 
 // Handler 返回管理端 HTTP 处理器，供 cmd/server 挂载到 /admin。

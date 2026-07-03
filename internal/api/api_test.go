@@ -3,10 +3,13 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
@@ -208,6 +211,62 @@ func TestAdminManagementAPIRequiresBearerTokenWhenConfigured(t *testing.T) {
 	apiSrv.engine.ServeHTTP(authorized, req)
 	if authorized.Code != http.StatusOK {
 		t.Fatalf("authorized status = %d, want %d; body=%s", authorized.Code, http.StatusOK, authorized.Body.String())
+	}
+}
+
+func TestAdminRouteRequiresLoginWhenConfigured(t *testing.T) {
+	t.Setenv("ADMIN_API_KEY", "admin-secret")
+	apiSrv, _ := newAPITestHarnessWithStaticFS(t, fstest.MapFS{
+		"index.html": {Data: []byte("admin-app")},
+	})
+
+	unauthorizedPage := httptest.NewRecorder()
+	pageReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	apiSrv.engine.ServeHTTP(unauthorizedPage, pageReq)
+	if unauthorizedPage.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized admin page status = %d, want %d", unauthorizedPage.Code, http.StatusUnauthorized)
+	}
+	if !strings.Contains(unauthorizedPage.Body.String(), "ADMIN_API_KEY") {
+		t.Fatalf("unauthorized admin page should render login form: %s", unauthorizedPage.Body.String())
+	}
+
+	badLogin := httptest.NewRecorder()
+	badReq := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader("token=wrong"))
+	badReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	apiSrv.engine.ServeHTTP(badLogin, badReq)
+	if badLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("bad login status = %d, want %d", badLogin.Code, http.StatusUnauthorized)
+	}
+
+	login := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader("token=admin-secret"))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	apiSrv.engine.ServeHTTP(login, loginReq)
+	if login.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want %d", login.Code, http.StatusSeeOther)
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatalf("login did not set session cookie")
+	}
+
+	authorizedPage := httptest.NewRecorder()
+	authorizedReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	authorizedReq.AddCookie(cookies[0])
+	apiSrv.engine.ServeHTTP(authorizedPage, authorizedReq)
+	if authorizedPage.Code != http.StatusOK {
+		t.Fatalf("authorized admin page status = %d, want %d; body=%s", authorizedPage.Code, http.StatusOK, authorizedPage.Body.String())
+	}
+	if authorizedPage.Body.String() != "admin-app" {
+		t.Fatalf("authorized admin page body = %q, want admin-app", authorizedPage.Body.String())
+	}
+
+	authorizedAPI := httptest.NewRecorder()
+	apiReq := httptest.NewRequest(http.MethodGet, "/admin/api/config", nil)
+	apiReq.AddCookie(cookies[0])
+	apiSrv.engine.ServeHTTP(authorizedAPI, apiReq)
+	if authorizedAPI.Code != http.StatusOK {
+		t.Fatalf("authorized admin api status = %d, want %d; body=%s", authorizedAPI.Code, http.StatusOK, authorizedAPI.Body.String())
 	}
 }
 
@@ -988,6 +1047,10 @@ func TestManagementTestChatHandlesEmptyChoices(t *testing.T) {
 }
 
 func newAPITestHarness(t *testing.T) (*Server, *proxy.Server) {
+	return newAPITestHarnessWithStaticFS(t, nil)
+}
+
+func newAPITestHarnessWithStaticFS(t *testing.T, staticFS fs.FS) (*Server, *proxy.Server) {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -1009,7 +1072,7 @@ func newAPITestHarness(t *testing.T) (*Server, *proxy.Server) {
 	logger := log.New(nil, log.LevelError, false)
 	st := store.New(50)
 	proxySrv := proxy.NewServer(cfg, mgr, st, logger)
-	apiSrv := NewServer(cfg.Port, mgr, proxySrv, st, logger, nil)
+	apiSrv := NewServer(cfg.Port, mgr, proxySrv, st, logger, staticFS)
 	return apiSrv, proxySrv
 }
 
