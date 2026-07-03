@@ -47,7 +47,9 @@ jobs:
           cache: true
 
       - name: 跨平台编译 + 打包
-        run: make release
+        run: |
+          make release
+          make install
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2

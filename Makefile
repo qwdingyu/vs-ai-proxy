@@ -2,6 +2,7 @@
 # 用法:
 #   make build         构建当前平台
 #   make build-all     构建所有平台
+#   make install       构建所有平台便携包（可执行文件）
 #   make release       构建并打包所有平台（压缩包）
 #   make clean         清理构建产物
 
@@ -23,7 +24,7 @@ PLATFORMS := \
 	windows/amd64
 
 # ─── 默认目标 ──────────────────────────────────────────
-.PHONY: all build build-all release clean
+.PHONY: all build build-all install release clean
 
 all: build
 
@@ -48,6 +49,20 @@ build-all:
 	@echo "✅ 全部构建完成: $(OUTPUT_DIR)/"
 	@ls -lh $(OUTPUT_DIR)
 
+# ─── 构建所有平台便携包（仅可执行文件，最直观） ──────────
+install: build-all
+	@echo "📦 生成便携二进制包..."
+	@for plat in $(PLATFORMS); do \
+		GOOS=$$(echo $$plat | cut -d/ -f1); \
+		GOARCH=$$(echo $$plat | cut -d/ -f2); \
+		EXT=$$( [ "$$GOOS" = "windows" ] && echo ".exe" || echo "" ); \
+		SRC="$(OUTPUT_DIR)/$(APP_NAME)-v$(VERSION_TAG)-$${GOOS}-$${GOARCH}$${EXT}"; \
+		DST="$(OUTPUT_DIR)/$(APP_NAME)-$${GOOS}-$${GOARCH}$${EXT}"; \
+		mv "$$SRC" "$$DST"; \
+	done
+	@echo "✅ 便携包已生成: $(OUTPUT_DIR)/"
+	@ls -lh $(OUTPUT_DIR)
+
 # ─── 构建并打包 ────────────────────────────────────────
 release: build-all
 	@echo "📦 打包压缩包..."
@@ -69,6 +84,7 @@ release: build-all
 			echo "  📦 $$DIR.tar.gz"; \
 		fi; \
 		rm -rf "$$DIR"; \
+		rm -f "$$BIN"; \
 		cd ..; \
 	done
 	@echo "✅ 发布包已生成: $(OUTPUT_DIR)/"
