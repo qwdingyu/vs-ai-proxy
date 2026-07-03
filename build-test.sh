@@ -140,6 +140,8 @@ smoke_test() {
         assert_status "401" "admin api without token" "${BASE_URL}/admin/api/config"
         assert_status "200" "admin api with token" -H "Authorization: Bearer ${token}" "${BASE_URL}/admin/api/config"
         assert_status "200" "admin api with login cookie" -b "${cookie_jar}" "${BASE_URL}/admin/api/config"
+        assert_status "303" "admin logout" -b "${cookie_jar}" -c "${cookie_jar}" -X POST "${BASE_URL}/admin/logout"
+        assert_status "401" "admin html after logout" -b "${cookie_jar}" "${BASE_URL}/admin"
         rm -f "${cookie_jar}"
     else
         assert_status "200" "admin html" "${BASE_URL}/admin"

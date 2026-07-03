@@ -268,6 +268,24 @@ func TestAdminRouteRequiresLoginWhenConfigured(t *testing.T) {
 	if authorizedAPI.Code != http.StatusOK {
 		t.Fatalf("authorized admin api status = %d, want %d; body=%s", authorizedAPI.Code, http.StatusOK, authorizedAPI.Body.String())
 	}
+
+	logout := httptest.NewRecorder()
+	logoutReq := httptest.NewRequest(http.MethodPost, "/admin/logout", nil)
+	logoutReq.AddCookie(cookies[0])
+	apiSrv.engine.ServeHTTP(logout, logoutReq)
+	if logout.Code != http.StatusSeeOther {
+		t.Fatalf("logout status = %d, want %d", logout.Code, http.StatusSeeOther)
+	}
+	cleared := false
+	for _, cookie := range logout.Result().Cookies() {
+		if cookie.Name == adminSessionCookieName && cookie.MaxAge < 0 && cookie.Path == "/admin" {
+			cleared = true
+			break
+		}
+	}
+	if !cleared {
+		t.Fatalf("logout did not clear %s cookie: %v", adminSessionCookieName, logout.Result().Cookies())
+	}
 }
 
 func TestAdminManagementAPIFallsBackToProxyAPIKey(t *testing.T) {

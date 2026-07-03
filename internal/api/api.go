@@ -96,6 +96,13 @@ func adminAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		if path == "/admin/logout" && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodPost) {
+			clearAdminSessionCookie(c)
+			c.Redirect(http.StatusSeeOther, "/admin")
+			c.Abort()
+			return
+		}
+
 		if path == "/admin/login" && c.Request.Method == http.MethodPost {
 			if adminTokenMatches(formAdminToken(c), adminKey) {
 				http.SetCookie(c.Writer, &http.Cookie{
@@ -148,6 +155,18 @@ func adminRequestAuthorized(c *gin.Context, adminKey string) bool {
 		return adminTokenMatches(cookie.Value, adminKey)
 	}
 	return false
+}
+
+func clearAdminSessionCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     adminSessionCookieName,
+		Value:    "",
+		Path:     "/admin",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Unix(0, 0),
+	})
 }
 
 func adminTokenMatches(token string, adminKey string) bool {
