@@ -23,6 +23,19 @@ type Candidate struct {
 	Priority   int
 }
 
+// ProviderHealth 是 provider 的内存运行态健康快照。
+// 这些指标只影响当前进程内的候选排序和短冷却，不写入 config.json。
+type ProviderHealth struct {
+	Successes           int           `json:"successes"`
+	Failures            int           `json:"failures"`
+	ConsecutiveFailures int           `json:"consecutive_failures"`
+	LastSuccess         time.Time     `json:"last_success,omitempty"`
+	LastFailure         time.Time     `json:"last_failure,omitempty"`
+	CooldownUntil       time.Time     `json:"cooldown_until,omitempty"`
+	LatencyEWMA         time.Duration `json:"latency_ewma,omitempty"`
+	LastError           string        `json:"last_error,omitempty"`
+}
+
 // Registry 管理 provider 与模型映射，并提供故障转移候选解析
 type Registry struct {
 	mu                    sync.RWMutex
@@ -37,6 +50,7 @@ type Registry struct {
 	defaultModel          string
 	modelsRefreshInterval time.Duration
 	modelsLastRefresh     time.Time
+	health                map[string]ProviderHealth
 }
 
 // NewRegistry 创建 registry
@@ -55,6 +69,7 @@ func NewRegistry(defaultModel string, refreshInterval time.Duration) *Registry {
 		catalogUpstream:       make(map[string][]*ProviderEntry),
 		defaultModel:          defaultModel,
 		modelsRefreshInterval: refreshInterval,
+		health:                make(map[string]ProviderHealth),
 	}
 }
 
@@ -92,7 +107,7 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 	resolved := r.resolveModelLocked(model)
 	candidates := r.resolveCandidatesLocked(resolved)
 	if len(candidates) > 0 || strings.Contains(StripModelTag(strings.TrimSpace(model)), "@") {
-		return candidates
+		return r.rankCandidatesLocked(candidates)
 	}
 	if r.hasAmbiguousNamespacedModelSuffixLocked(StripModelTag(strings.TrimSpace(model))) {
 		return nil
@@ -107,15 +122,76 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 		displayResolved := r.resolveModelLocked(displayModel)
 		displayCandidates := r.resolveCandidatesLocked(displayResolved)
 		if len(displayCandidates) > 0 {
-			return displayCandidates
+			return r.rankCandidatesLocked(displayCandidates)
 		}
 		if r.hasAmbiguousNamespacedModelSuffixLocked(displayModel) {
 			return nil
 		}
-		return r.fallbackCandidatesLocked(displayResolved)
+		return r.rankCandidatesLocked(r.fallbackCandidatesLocked(displayResolved))
 	}
 
-	return r.fallbackCandidatesLocked(resolved)
+	return r.rankCandidatesLocked(r.fallbackCandidatesLocked(resolved))
+}
+
+// RecordCandidateSuccess 记录 provider 成功请求，用于同优先级内健康排序。
+func (r *Registry) RecordCandidateSuccess(providerName string, elapsed time.Duration) {
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	health := r.health[providerName]
+	health.Successes++
+	health.ConsecutiveFailures = 0
+	health.LastSuccess = time.Now()
+	health.CooldownUntil = time.Time{}
+	health.LastError = ""
+	if elapsed > 0 {
+		if health.LatencyEWMA <= 0 {
+			health.LatencyEWMA = elapsed
+		} else {
+			health.LatencyEWMA = (health.LatencyEWMA*4 + elapsed) / 5
+		}
+	}
+	r.health[providerName] = health
+}
+
+// RecordCandidateFailure 记录 provider 失败请求，并在连续失败时进入短冷却。
+func (r *Registry) RecordCandidateFailure(providerName string, err error) {
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	health := r.health[providerName]
+	health.Failures++
+	health.ConsecutiveFailures++
+	health.LastFailure = time.Now()
+	if err != nil {
+		health.LastError = err.Error()
+	}
+	if cooldown := providerCooldownDuration(health.ConsecutiveFailures, health.LastError); cooldown > 0 {
+		health.CooldownUntil = time.Now().Add(cooldown)
+	}
+	r.health[providerName] = health
+}
+
+// ProviderHealthSnapshot 返回 provider 健康快照，供后续管理端展示使用。
+func (r *Registry) ProviderHealthSnapshot() map[string]ProviderHealth {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make(map[string]ProviderHealth, len(r.health))
+	for providerName, health := range r.health {
+		out[providerName] = health
+	}
+	return out
 }
 
 // ResolveModel 返回请求模型经 tag/provider hint/catalog 映射后的代理内部模型名。
@@ -357,6 +433,112 @@ func (r *Registry) fallbackCandidatesLocked(model string) []Candidate {
 		})
 	}
 	return candidates
+}
+
+func (r *Registry) rankCandidatesLocked(candidates []Candidate) []Candidate {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+
+	now := time.Now()
+	active := make([]Candidate, 0, len(candidates))
+	cooling := make([]Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Provider == nil || candidate.Provider.Provider == nil {
+			continue
+		}
+		health := r.health[candidate.Provider.Provider.Name()]
+		if health.CooldownUntil.After(now) {
+			cooling = append(cooling, candidate)
+			continue
+		}
+		active = append(active, candidate)
+	}
+
+	if len(active) > 0 {
+		sortCandidatesByHealth(active, r.health)
+		return active
+	}
+
+	sortCandidatesByHealth(cooling, r.health)
+	return cooling
+}
+
+func sortCandidatesByHealth(candidates []Candidate, health map[string]ProviderHealth) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i]
+		right := candidates[j]
+		if left.Priority != right.Priority {
+			return left.Priority < right.Priority
+		}
+
+		leftHealth := providerCandidateHealth(left, health)
+		rightHealth := providerCandidateHealth(right, health)
+		if leftHealth.ConsecutiveFailures != rightHealth.ConsecutiveFailures {
+			return leftHealth.ConsecutiveFailures < rightHealth.ConsecutiveFailures
+		}
+
+		leftRate := providerSuccessRate(leftHealth)
+		rightRate := providerSuccessRate(rightHealth)
+		if leftRate != rightRate {
+			return leftRate > rightRate
+		}
+
+		leftLatency := comparableLatency(leftHealth)
+		rightLatency := comparableLatency(rightHealth)
+		if leftLatency != rightLatency {
+			return leftLatency < rightLatency
+		}
+
+		return providerCandidateName(left) < providerCandidateName(right)
+	})
+}
+
+func providerCandidateHealth(candidate Candidate, health map[string]ProviderHealth) ProviderHealth {
+	if candidate.Provider == nil || candidate.Provider.Provider == nil {
+		return ProviderHealth{}
+	}
+	return health[candidate.Provider.Provider.Name()]
+}
+
+func providerCandidateName(candidate Candidate) string {
+	if candidate.Provider == nil || candidate.Provider.Provider == nil {
+		return ""
+	}
+	return candidate.Provider.Provider.Name()
+}
+
+func providerSuccessRate(health ProviderHealth) float64 {
+	total := health.Successes + health.Failures
+	if total <= 0 {
+		return 0.5
+	}
+	return float64(health.Successes) / float64(total)
+}
+
+func comparableLatency(health ProviderHealth) time.Duration {
+	if health.LatencyEWMA <= 0 {
+		return time.Duration(1<<63 - 1)
+	}
+	return health.LatencyEWMA
+}
+
+func providerCooldownDuration(consecutiveFailures int, lastError string) time.Duration {
+	if consecutiveFailures <= 0 {
+		return 0
+	}
+
+	lower := strings.ToLower(lastError)
+	switch {
+	case strings.Contains(lower, "401") || strings.Contains(lower, "403") || strings.Contains(lower, "unauthorized"):
+		return 5 * time.Minute
+	case strings.Contains(lower, "429") || strings.Contains(lower, "503") || strings.Contains(lower, "timeout"):
+		return time.Duration(min(consecutiveFailures, 5)) * 30 * time.Second
+	case consecutiveFailures >= 2:
+		return time.Duration(min(consecutiveFailures-1, 5)) * 15 * time.Second
+	default:
+		return 0
+	}
 }
 
 // UpdateModelMappings 更新模型映射

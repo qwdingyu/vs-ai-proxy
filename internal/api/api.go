@@ -179,6 +179,7 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 
 	// 提供商相关
 	group.GET("/providers", s.listProviders)
+	group.GET("/providers/health", s.getProviderHealth)
 	group.POST("/providers/probe", s.probeProvider)
 	group.POST("/providers", s.addProvider)
 	group.PUT("/providers/:name", s.updateProvider)
@@ -204,6 +205,57 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 // getConfig 获取当前配置快照
 func (s *Server) getConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, s.configMgr.Get())
+}
+
+type providerHealthResponse struct {
+	Provider            string    `json:"provider"`
+	Successes           int       `json:"successes"`
+	Failures            int       `json:"failures"`
+	ConsecutiveFailures int       `json:"consecutive_failures"`
+	SuccessRate         float64   `json:"success_rate"`
+	LatencyMs           float64   `json:"latency_ms"`
+	LastSuccess         time.Time `json:"last_success,omitempty"`
+	LastFailure         time.Time `json:"last_failure,omitempty"`
+	CooldownUntil       time.Time `json:"cooldown_until,omitempty"`
+	CooldownRemainingMs int64     `json:"cooldown_remaining_ms"`
+	LastError           string    `json:"last_error,omitempty"`
+}
+
+func (s *Server) getProviderHealth(c *gin.Context) {
+	if s.proxy == nil {
+		c.JSON(http.StatusOK, []providerHealthResponse{})
+		return
+	}
+
+	health := s.proxy.ProviderHealthSnapshot()
+	out := make([]providerHealthResponse, 0, len(health))
+	now := time.Now()
+	for providerName, item := range health {
+		total := item.Successes + item.Failures
+		successRate := 0.0
+		if total > 0 {
+			successRate = float64(item.Successes) / float64(total)
+		}
+
+		remaining := int64(0)
+		if item.CooldownUntil.After(now) {
+			remaining = item.CooldownUntil.Sub(now).Milliseconds()
+		}
+		out = append(out, providerHealthResponse{
+			Provider:            providerName,
+			Successes:           item.Successes,
+			Failures:            item.Failures,
+			ConsecutiveFailures: item.ConsecutiveFailures,
+			SuccessRate:         successRate,
+			LatencyMs:           float64(item.LatencyEWMA.Microseconds()) / 1000,
+			LastSuccess:         item.LastSuccess,
+			LastFailure:         item.LastFailure,
+			CooldownUntil:       item.CooldownUntil,
+			CooldownRemainingMs: remaining,
+			LastError:           item.LastError,
+		})
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // saveConfig 保存配置，并热更新代理路由。

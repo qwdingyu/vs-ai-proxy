@@ -595,7 +595,7 @@
 
     const loadMonitor = async () => {
       try {
-        const [health, metrics] = await Promise.all([
+        const [health, metrics, providerHealth] = await Promise.all([
           fetch('/health').then(async (res) => {
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.error || '请求失败');
@@ -605,12 +605,16 @@
             const text = await res.text();
             if (!res.ok) throw new Error(text || '请求失败');
             return text;
-          })
+          }),
+          fetchJSON('/providers/health')
         ]);
         $('healthStatus').textContent = health.status || '-';
         $('healthProviders').textContent = (health.providers || []).length;
         $('healthModels').textContent = (health.available_models || []).length;
-        $('healthOutput').textContent = JSON.stringify(health, null, 2);
+        $('healthOutput').textContent = JSON.stringify({
+          ...health,
+          provider_health: providerHealth
+        }, null, 2);
         $('metricsOutput').textContent = metrics;
       } catch (e) {
         console.error(e);

@@ -42,6 +42,7 @@ type fakeProvider struct {
 	rawBody       []byte
 	rawErr        error
 	rawCalls      int
+	chatCalls     int
 }
 
 func newFakeProvider(name string, enabled bool, models []string, resp *fakeChatResponse, streamBody string) *fakeProvider {
@@ -63,6 +64,7 @@ func (p *fakeProvider) IsEnabled() bool {
 }
 
 func (p *fakeProvider) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p.chatCalls++
 	p.lastReq = cloneChatRequest(req)
 	_, p.hadDeadline = ctx.Deadline()
 	if p.chatErr != nil {
@@ -1311,6 +1313,38 @@ func TestChatCompletionsProviderFailureReturnsDiagnosticAttempts(t *testing.T) {
 	attempt := body.Error.Details.Attempts[0]
 	if attempt.Provider != "useai" || attempt.Upstream != "deepseek-v4-flash" || attempt.Category != "network_error" {
 		t.Fatalf("attempt = %#v, want useai/deepseek-v4-flash/network_error", attempt)
+	}
+}
+
+func TestChatCompletionsSkipsCoolingProviderOnNextRequest(t *testing.T) {
+	primary := newFakeProvider("primary", true, []string{"shared"}, nil, "")
+	primary.chatErr = errors.New("API 错误 503")
+	secondary := newFakeProvider("secondary", true, []string{"shared"}, &fakeChatResponse{
+		Model:   "shared",
+		Content: "ok",
+	}, "")
+	server := newOpenServer(primary, secondary)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"shared","messages":[{"role":"user","content":"ping"}]}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d, want %d; body=%s", i+1, rec.Code, http.StatusOK, rec.Body.String())
+		}
+	}
+
+	if primary.chatCalls != 1 {
+		t.Fatalf("primary chat calls = %d, want 1 after cooldown skip", primary.chatCalls)
+	}
+	if secondary.chatCalls != 2 {
+		t.Fatalf("secondary chat calls = %d, want 2", secondary.chatCalls)
 	}
 }
 

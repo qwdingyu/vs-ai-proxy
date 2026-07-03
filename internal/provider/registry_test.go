@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -76,6 +77,85 @@ func TestRegistryBuildsModelAliasesAndPriorityCandidates(t *testing.T) {
 	tagged := registry.ResolveCandidates("shared@fast:latest")
 	if len(tagged) != 1 || tagged[0].Provider.Provider.Name() != "fast" {
 		t.Fatalf("expected tagged alias to pin fast provider, got %#v", tagged)
+	}
+}
+
+func TestRegistryRanksSamePriorityCandidatesByHealth(t *testing.T) {
+	registry := NewRegistry("shared", time.Minute)
+	slow := &fakeProvider{name: "slow", enabled: true, models: []string{"shared"}}
+	fast := &fakeProvider{name: "fast", enabled: true, models: []string{"shared"}}
+
+	registry.Add(&ProviderEntry{Provider: slow, Models: slow.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: fast, Models: fast.models, Priority: 1})
+	registry.SetModels("slow", slow.models)
+	registry.SetModels("fast", fast.models)
+	registry.RecordCandidateSuccess("slow", 900*time.Millisecond)
+	registry.RecordCandidateSuccess("fast", 120*time.Millisecond)
+
+	candidates := registry.ResolveCandidates("shared")
+	if len(candidates) != 2 {
+		t.Fatalf("candidates len = %d, want 2", len(candidates))
+	}
+	if candidates[0].Provider.Provider.Name() != "fast" {
+		t.Fatalf("expected faster healthy provider first, got %#v", candidates)
+	}
+}
+
+func TestRegistryKeepsManualPriorityBeforeHealth(t *testing.T) {
+	registry := NewRegistry("shared", time.Minute)
+	primary := &fakeProvider{name: "primary", enabled: true, models: []string{"shared"}}
+	secondary := &fakeProvider{name: "secondary", enabled: true, models: []string{"shared"}}
+
+	registry.Add(&ProviderEntry{Provider: primary, Models: primary.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: secondary, Models: secondary.models, Priority: 2})
+	registry.SetModels("primary", primary.models)
+	registry.SetModels("secondary", secondary.models)
+	registry.RecordCandidateSuccess("secondary", 10*time.Millisecond)
+
+	candidates := registry.ResolveCandidates("shared")
+	if len(candidates) != 2 {
+		t.Fatalf("candidates len = %d, want 2", len(candidates))
+	}
+	if candidates[0].Provider.Provider.Name() != "primary" {
+		t.Fatalf("manual priority should win before health, got %#v", candidates)
+	}
+}
+
+func TestRegistrySkipsCoolingCandidateWhenAlternativeExists(t *testing.T) {
+	registry := NewRegistry("shared", time.Minute)
+	flaky := &fakeProvider{name: "flaky", enabled: true, models: []string{"shared"}}
+	healthy := &fakeProvider{name: "healthy", enabled: true, models: []string{"shared"}}
+
+	registry.Add(&ProviderEntry{Provider: flaky, Models: flaky.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: healthy, Models: healthy.models, Priority: 1})
+	registry.SetModels("flaky", flaky.models)
+	registry.SetModels("healthy", healthy.models)
+	registry.RecordCandidateFailure("flaky", fmt.Errorf("API 错误 503"))
+
+	candidates := registry.ResolveCandidates("shared")
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].Provider.Provider.Name() != "healthy" {
+		t.Fatalf("expected cooling provider skipped, got %#v", candidates)
+	}
+}
+
+func TestRegistryReturnsCoolingCandidatesWhenAllAreCooling(t *testing.T) {
+	registry := NewRegistry("shared", time.Minute)
+	left := &fakeProvider{name: "left", enabled: true, models: []string{"shared"}}
+	right := &fakeProvider{name: "right", enabled: true, models: []string{"shared"}}
+
+	registry.Add(&ProviderEntry{Provider: left, Models: left.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: right, Models: right.models, Priority: 1})
+	registry.SetModels("left", left.models)
+	registry.SetModels("right", right.models)
+	registry.RecordCandidateFailure("left", fmt.Errorf("API 错误 503"))
+	registry.RecordCandidateFailure("right", fmt.Errorf("API 错误 503"))
+
+	candidates := registry.ResolveCandidates("shared")
+	if len(candidates) != 2 {
+		t.Fatalf("all cooling candidates should remain as last resort, got %#v", candidates)
 	}
 }
 

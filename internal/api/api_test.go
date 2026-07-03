@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
 	"github.com/dingyuwang/vs-ai-proxy/internal/log"
@@ -85,6 +86,48 @@ func TestManagementAPIResponsesAreNotCached(t *testing.T) {
 	}
 	if got := rec.Header().Get("Pragma"); got != "no-cache" {
 		t.Fatalf("Pragma = %q, want no-cache", got)
+	}
+}
+
+func TestProviderHealthEndpointReturnsRuntimeSnapshot(t *testing.T) {
+	apiSrv, proxySrv := newAPITestHarness(t)
+	_, registry, _ := proxySrv.SnapshotComponents()
+	registry.RecordCandidateSuccess("useai", 125*time.Millisecond)
+	registry.RecordCandidateFailure("useai", nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/providers/health", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/providers/health status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got []struct {
+		Provider            string  `json:"provider"`
+		Successes           int     `json:"successes"`
+		Failures            int     `json:"failures"`
+		ConsecutiveFailures int     `json:"consecutive_failures"`
+		SuccessRate         float64 `json:"success_rate"`
+		LatencyMs           float64 `json:"latency_ms"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal provider health: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("health len = %d, want 1: %s", len(got), rec.Body.String())
+	}
+	item := got[0]
+	if item.Provider != "useai" {
+		t.Fatalf("provider = %q, want useai", item.Provider)
+	}
+	if item.Successes != 1 || item.Failures != 1 || item.ConsecutiveFailures != 1 {
+		t.Fatalf("health counters = %#v, want one success and one consecutive failure", item)
+	}
+	if item.SuccessRate != 0.5 {
+		t.Fatalf("success_rate = %v, want 0.5", item.SuccessRate)
+	}
+	if item.LatencyMs != 125 {
+		t.Fatalf("latency_ms = %v, want 125", item.LatencyMs)
 	}
 }
 

@@ -88,6 +88,15 @@ func (s *Server) SnapshotComponents() (*config.AppConfig, *provider.Registry, *p
 	return s.snapshot()
 }
 
+// ProviderHealthSnapshot 返回 provider 运行态健康快照，供管理端只读展示。
+func (s *Server) ProviderHealthSnapshot() map[string]provider.ProviderHealth {
+	_, registry, _ := s.snapshot()
+	if registry == nil {
+		return map[string]provider.ProviderHealth{}
+	}
+	return registry.ProviderHealthSnapshot()
+}
+
 func (s *Server) configDir() string {
 	if s != nil && s.configMgr != nil {
 		if path := strings.TrimSpace(s.configMgr.ConfigPath()); path != "" {
@@ -464,6 +473,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if modelID == "" {
 			modelID = modelName
 		}
+		attemptStart := time.Now()
 		setAttemptDiagnosticHeaders(w, prov.Name(), modelID)
 		setResponseLogFields(w, prov.Name(), modelName, modelID)
 
@@ -496,10 +506,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if streamWriter.HasWritten() {
+					registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 					return
 				}
+				registry.RecordCandidateFailure(prov.Name(), err)
 				continue
 			}
+			registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 			return
 		}
 
@@ -511,6 +524,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
+					registry.RecordCandidateFailure(prov.Name(), err)
 					continue
 				}
 				// Visual Studio Copilot 适配：
@@ -521,6 +535,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(body)
+				registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 				return
 			}
 		}
@@ -531,6 +546,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
+			registry.RecordCandidateFailure(prov.Name(), err)
 			continue
 		}
 		s.cacheChatResponse(resp)
@@ -538,6 +554,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(resp)
+		registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 		return
 	}
 
@@ -621,6 +638,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 		if modelID == "" {
 			modelID = modelName
 		}
+		attemptStart := time.Now()
 		setAttemptDiagnosticHeaders(w, prov.Name(), modelID)
 		setResponseLogFields(w, prov.Name(), modelName, modelID)
 
@@ -685,10 +703,13 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if streamWriter.HasWritten() {
+					registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 					return
 				}
+				registry.RecordCandidateFailure(prov.Name(), err)
 				continue
 			}
+			registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 			return
 		}
 
@@ -701,6 +722,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
+					registry.RecordCandidateFailure(prov.Name(), err)
 					continue
 				}
 				if converted, convErr := converter.OllamaChatResponse2OpenAI(body, req.Model); convErr == nil {
@@ -713,6 +735,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				w.Write(ensureOllamaContentFromThinking(body))
+				registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 				return
 			}
 		}
@@ -723,6 +746,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
+			registry.RecordCandidateFailure(prov.Name(), err)
 			continue
 		}
 		s.cacheChatResponse(resp)
@@ -730,6 +754,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(buildOllamaChatResponse(modelName, resp))
+		registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 		return
 	}
 
