@@ -18,8 +18,13 @@ type ModelIdentity struct {
 }
 
 func NewModelIdentity(upstream, provider string) ModelIdentity {
+	return NewModelIdentityWithDisplay(upstream, provider, provider)
+}
+
+func NewModelIdentityWithDisplay(upstream, provider, providerDisplay string) ModelIdentity {
 	upstream = strings.TrimSpace(upstream)
 	provider = strings.TrimSpace(provider)
+	providerDisplay = strings.TrimSpace(providerDisplay)
 	basename := ModelBasename(upstream)
 	qualified := upstream
 	if provider != "" {
@@ -28,7 +33,10 @@ func NewModelIdentity(upstream, provider string) ModelIdentity {
 
 	display := basename
 	if provider != "" {
-		display = strings.ToUpper(provider) + " - " + basename
+		if providerDisplay == "" {
+			providerDisplay = provider
+		}
+		display = providerDisplay + " - " + basename
 	}
 
 	return ModelIdentity{
@@ -102,6 +110,9 @@ func StripModelTag(model string) string {
 	model = strings.TrimSpace(model)
 	colon := strings.LastIndex(model, ":")
 	if colon <= 0 {
+		return model
+	}
+	if !strings.EqualFold(model[colon+1:], "latest") {
 		return model
 	}
 	if strings.Contains(model[colon+1:], "/") {

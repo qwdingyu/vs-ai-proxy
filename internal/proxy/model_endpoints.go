@@ -12,7 +12,7 @@ import (
 
 // handleListModels 汇总所有启用 provider 的模型列表，并以 OpenAI /v1/models 格式返回。
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
-	_, _, catalog := s.snapshot()
+	cfg, _, catalog := s.snapshot()
 	// registry 的模型发现是异步完成的；catalog 创建时可能还没有发现结果。
 	// 每次模型列表请求前重建一次，确保 Visual Studio 立刻看到最新 provider 模型。
 	catalog.Rebuild()
@@ -20,12 +20,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		items = append(items, map[string]any{
-			"id":       entry.Model,
-			"object":   "model",
-			"created":  1700000000,
-			"owned_by": coalesceString(entry.Provider, "unknown"),
-		})
+		items = append(items, buildOpenAIModelItem(entry, cfg))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -33,6 +28,26 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		"object": "list",
 		"data":   items,
 	})
+}
+
+func buildOpenAIModelItem(entry provider.CatalogEntry, cfg *config.AppConfig) map[string]any {
+	upstream := strings.TrimSpace(entry.UpstreamModel)
+	if upstream == "" {
+		upstream = strings.TrimSpace(entry.Model)
+	}
+	providerName := strings.TrimSpace(entry.Provider)
+	identity := provider.NewModelIdentityWithDisplay(upstream, providerName, providerDisplayNameFromConfig(cfg, providerName))
+
+	return map[string]any{
+		"id":             entry.Model,
+		"object":         "model",
+		"created":        1700000000,
+		"owned_by":       coalesceString(providerName, "unknown"),
+		"display_name":   identity.Display,
+		"upstream_model": identity.Upstream,
+		"canonical":      identity.Qualified,
+		"aliases":        identity.Aliases,
+	}
 }
 
 // handleOllamaTags 汇总所有启用 provider 的模型列表，并以 Ollama /api/tags 格式返回。
@@ -101,7 +116,7 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 		model = strings.TrimSpace(entry.Model)
 	}
 	providerName := strings.TrimSpace(entry.Provider)
-	identity := provider.NewModelIdentity(model, providerName)
+	identity := provider.NewModelIdentityWithDisplay(model, providerName, providerDisplayNameFromConfig(cfg, providerName))
 
 	ctxLength := defaultContextLength
 	maxOutput := defaultMaxOutputTokens
@@ -195,4 +210,18 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 			"supports_images":        supportsVision,
 		},
 	}
+}
+
+func providerDisplayNameFromConfig(cfg *config.AppConfig, providerName string) string {
+	providerName = strings.TrimSpace(providerName)
+	if cfg == nil || providerName == "" {
+		return providerName
+	}
+	for _, p := range cfg.Providers {
+		p = config.NormalizeProvider(p)
+		if strings.EqualFold(config.ProviderKey(p), providerName) || strings.EqualFold(strings.TrimSpace(p.Name), providerName) {
+			return strings.TrimSpace(p.DisplayName)
+		}
+	}
+	return providerName
 }

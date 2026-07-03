@@ -57,6 +57,20 @@ func noCandidateDiagnostic(requestedModel, resolvedModel string, candidateCount 
 	}
 }
 
+func ambiguousModelAliasDiagnostic(requestedModel, resolvedModel string) proxyDiagnosticError {
+	return proxyDiagnosticError{
+		Message: "模型短名匹配到多个上游模型，无法安全自动路由",
+		Type:    "routing_error",
+		Code:    "model_alias_ambiguous",
+		Details: proxyDiagnosticDetails{
+			RequestedModel: requestedModel,
+			ResolvedModel:  resolvedModel,
+			CandidateCount: 0,
+			Hint:           "请在 Visual Studio 中选择带 provider 的模型，或直接使用完整模型名 / model@provider_id，避免短名歧义。",
+		},
+	}
+}
+
 func allCandidatesFailedDiagnostic(requestedModel, resolvedModel string, candidateCount int, attempts []attemptDiagnostic) proxyDiagnosticError {
 	category := "provider_error"
 	if len(attempts) > 0 {

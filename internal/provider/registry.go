@@ -94,6 +94,9 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 	if len(candidates) > 0 || strings.Contains(StripModelTag(strings.TrimSpace(model)), "@") {
 		return candidates
 	}
+	if r.hasAmbiguousNamespacedModelSuffixLocked(StripModelTag(strings.TrimSpace(model))) {
+		return nil
+	}
 
 	// Visual Studio Copilot 适配：
 	// VS 的 BYOM/Copilot UI 可能把 /api/tags 中用于展示的 name 字段
@@ -105,6 +108,9 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 		displayCandidates := r.resolveCandidatesLocked(displayResolved)
 		if len(displayCandidates) > 0 {
 			return displayCandidates
+		}
+		if r.hasAmbiguousNamespacedModelSuffixLocked(displayModel) {
+			return nil
 		}
 		return r.fallbackCandidatesLocked(displayResolved)
 	}
@@ -119,6 +125,16 @@ func (r *Registry) ResolveModel(model string) string {
 	return r.resolveModelLocked(model)
 }
 
+func (r *Registry) HasAmbiguousModelAlias(model string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	clean := StripModelTag(strings.TrimSpace(model))
+	if displayModel := DisplayNameModelSuffix(clean); displayModel != "" {
+		clean = displayModel
+	}
+	return r.hasAmbiguousNamespacedModelSuffixLocked(clean)
+}
+
 func (r *Registry) resolveModelLocked(model string) string {
 	clean := StripModelTag(strings.TrimSpace(model))
 	if clean == "" {
@@ -130,7 +146,7 @@ func (r *Registry) resolveModelLocked(model string) string {
 	if _, ok := r.upstreamToProviders[clean]; ok {
 		return clean
 	}
-	if resolved := r.resolveNamespacedModelSuffixLocked(clean); resolved != "" {
+	if resolved, ambiguous := r.resolveNamespacedModelSuffixLocked(clean); resolved != "" && !ambiguous {
 		return resolved
 	}
 	if resolved := r.resolveProviderHintModelLocked(clean); resolved != "" {
@@ -173,12 +189,13 @@ func (r *Registry) resolveProviderHintCandidatesLocked(model string) []Candidate
 	}}
 }
 
-func (r *Registry) resolveNamespacedModelSuffixLocked(clean string) string {
+func (r *Registry) resolveNamespacedModelSuffixLocked(clean string) (string, bool) {
 	clean = strings.TrimSpace(clean)
 	if clean == "" || strings.Contains(clean, "/") || strings.Contains(clean, "@") {
-		return ""
+		return "", false
 	}
 
+	matches := map[string]*ProviderEntry{}
 	for _, entry := range r.orderedEntriesLocked() {
 		if entry == nil || entry.Provider == nil || !entry.Provider.IsEnabled() {
 			continue
@@ -189,13 +206,11 @@ func (r *Registry) resolveNamespacedModelSuffixLocked(clean string) string {
 				continue
 			}
 			if strings.EqualFold(ModelBasename(upstream), clean) {
-				return upstream
+				matches[upstream] = entry
 			}
 		}
 	}
 
-	var resolved string
-	bestPriority := int(^uint(0) >> 1)
 	for model, providerEntry := range r.modelToProvider {
 		if providerEntry == nil || providerEntry.Provider == nil || !providerEntry.Provider.IsEnabled() {
 			continue
@@ -210,13 +225,20 @@ func (r *Registry) resolveNamespacedModelSuffixLocked(clean string) string {
 		if !strings.EqualFold(ModelBasename(upstream), clean) {
 			continue
 		}
-		if resolved == "" || providerEntry.Priority < bestPriority ||
-			(providerEntry.Priority == bestPriority && strings.Compare(upstream, resolved) < 0) {
-			resolved = upstream
-			bestPriority = providerEntry.Priority
-		}
+		matches[upstream] = providerEntry
 	}
-	return resolved
+	if len(matches) != 1 {
+		return "", len(matches) > 1
+	}
+	for upstream := range matches {
+		return upstream, false
+	}
+	return "", false
+}
+
+func (r *Registry) hasAmbiguousNamespacedModelSuffixLocked(clean string) bool {
+	_, ambiguous := r.resolveNamespacedModelSuffixLocked(clean)
+	return ambiguous
 }
 
 func (r *Registry) resolveProviderHintModelLocked(clean string) string {

@@ -319,6 +319,47 @@ func TestCatalogEndpointsRebuildAfterRegistryModelDiscovery(t *testing.T) {
 	}
 }
 
+func TestOpenAIModelsExposeIdentityMetadata(t *testing.T) {
+	prov := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "ok"}, "")
+	server := newOpenServer(prov)
+	server.config.Providers = []config.ProviderConfig{{
+		ID:          "usecpa",
+		Name:        "UseCpa",
+		DisplayName: "UseCpa Paid",
+		Type:        "openai",
+		Enabled:     true,
+	}}
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/models", server.handleListModels)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	data, _ := body["data"].([]any)
+	if len(data) == 0 {
+		t.Fatalf("models missing: %s", rec.Body.String())
+	}
+	item, _ := data[0].(map[string]any)
+	if item["display_name"] != "UseCpa Paid - glm-5.2" {
+		t.Fatalf("display_name = %v, want UseCpa Paid - glm-5.2", item["display_name"])
+	}
+	if item["upstream_model"] != "z-ai/glm-5.2" {
+		t.Fatalf("upstream_model = %v, want z-ai/glm-5.2", item["upstream_model"])
+	}
+	if item["canonical"] != "z-ai/glm-5.2@usecpa" {
+		t.Fatalf("canonical = %v, want z-ai/glm-5.2@usecpa", item["canonical"])
+	}
+}
+
 func TestOllamaTagsExposeQualifiedAliasesAndCapabilities(t *testing.T) {
 	provA := newFakeProvider("provider-a", true, []string{"shared"}, &fakeChatResponse{Model: "shared", Content: "hi"}, "")
 	provB := newFakeProvider("provider-b", true, []string{"shared"}, nil, "")
@@ -408,6 +449,41 @@ func TestOllamaTagsUseModelConfigLimits(t *testing.T) {
 	}
 	if got := int(item["max_output_tokens"].(float64)); got != 65536 {
 		t.Fatalf("max_output_tokens = %d, want 65536; body=%s", got, rec.Body.String())
+	}
+}
+
+func TestOllamaTagsUseConfiguredProviderDisplayName(t *testing.T) {
+	prov := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "hi"}, "")
+	server := newOpenServer(prov)
+	server.config.Providers = []config.ProviderConfig{{
+		ID:          "usecpa",
+		Name:        "UseCpa",
+		DisplayName: "UseCpa Paid",
+		Type:        "openai",
+		Enabled:     true,
+	}}
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/tags", server.handleOllamaTags)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tags", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	models, _ := body["models"].([]any)
+	if len(models) != 1 {
+		t.Fatalf("models len = %d, want 1: %s", len(models), rec.Body.String())
+	}
+	item, _ := models[0].(map[string]any)
+	if item["name"] != "UseCpa Paid - glm-5.2" {
+		t.Fatalf("name = %v, want UseCpa Paid - glm-5.2", item["name"])
 	}
 }
 
@@ -1124,6 +1200,37 @@ func TestChatCompletionsMapsVisualStudioBasenameToNamespacedUpstream(t *testing.
 	}
 	if prov.lastReq == nil || prov.lastReq.Model != "z-ai/glm-5.2" {
 		t.Fatalf("provider request model = %#v, want z-ai/glm-5.2", prov.lastReq)
+	}
+}
+
+func TestChatCompletionsRejectsAmbiguousVisualStudioBasename(t *testing.T) {
+	provA := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "pong"}, "")
+	provB := newFakeProvider("other", true, []string{"other/glm-5.2"}, &fakeChatResponse{Model: "other/glm-5.2", Content: "pong"}, "")
+	server := newOpenServer(provA, provB)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	errObj, _ := body["error"].(map[string]any)
+	if errObj["code"] != "model_alias_ambiguous" {
+		t.Fatalf("error.code = %v, want model_alias_ambiguous; body=%s", errObj["code"], rec.Body.String())
+	}
+	if provA.lastReq != nil || provB.lastReq != nil {
+		t.Fatalf("ambiguous basename should not call providers: a=%#v b=%#v", provA.lastReq, provB.lastReq)
 	}
 }
 

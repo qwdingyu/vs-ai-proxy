@@ -446,6 +446,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	resolvedModel := registry.ResolveModel(modelName)
 	setCandidateDiagnosticHeaders(w, modelName, resolvedModel, candidates)
 	if len(candidates) == 0 {
+		if registry.HasAmbiguousModelAlias(modelName) {
+			writeProxyDiagnosticError(w, http.StatusBadRequest, ambiguousModelAliasDiagnostic(modelName, resolvedModel))
+			return
+		}
 		writeProxyDiagnosticError(w, http.StatusBadRequest, noCandidateDiagnostic(modelName, resolvedModel, len(candidates)))
 		return
 	}
@@ -578,6 +582,10 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 	candidates := registry.ResolveCandidates(modelName)
 	resolvedModel := registry.ResolveModel(modelName)
 	if len(candidates) == 0 {
+		if registry.HasAmbiguousModelAlias(modelName) {
+			writeProxyDiagnosticError(w, http.StatusBadRequest, ambiguousModelAliasDiagnostic(modelName, resolvedModel))
+			return
+		}
 		writeProxyDiagnosticError(w, http.StatusBadRequest, noCandidateDiagnostic(modelName, resolvedModel, len(candidates)))
 		return
 	}

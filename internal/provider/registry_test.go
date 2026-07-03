@@ -186,6 +186,46 @@ func TestRegistryResolvesVisualStudioDisplayBasenameToNamespacedUpstream(t *test
 	}
 }
 
+func TestRegistryDoesNotStripRealColonModelSuffix(t *testing.T) {
+	registry := NewRegistry("qwen3-coder:480b", time.Minute)
+	ollamaCloud := &fakeProvider{
+		name:    "ollama-cloud",
+		enabled: true,
+		models:  []string{"qwen3-coder:480b"},
+	}
+
+	registry.Add(&ProviderEntry{Provider: ollamaCloud, Models: ollamaCloud.models, Priority: 1})
+	registry.SetModels("ollama-cloud", ollamaCloud.models)
+
+	candidates := registry.ResolveCandidates("qwen3-coder:480b")
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].ModelID != "qwen3-coder:480b" {
+		t.Fatalf("model id = %q, want qwen3-coder:480b", candidates[0].ModelID)
+	}
+}
+
+func TestRegistryRejectsAmbiguousNamespacedBasename(t *testing.T) {
+	registry := NewRegistry("z-ai/glm-5.2", time.Minute)
+	usecpa := &fakeProvider{name: "usecpa", enabled: true, models: []string{"z-ai/glm-5.2"}}
+	other := &fakeProvider{name: "other", enabled: true, models: []string{"other/glm-5.2"}}
+
+	registry.Add(&ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: other, Models: other.models, Priority: 2})
+	registry.SetModels("usecpa", usecpa.models)
+	registry.SetModels("other", other.models)
+
+	if candidates := registry.ResolveCandidates("glm-5.2"); len(candidates) != 0 {
+		t.Fatalf("ambiguous basename should not route automatically: %#v", candidates)
+	}
+
+	qualified := registry.ResolveCandidates("z-ai/glm-5.2@usecpa")
+	if len(qualified) != 1 || qualified[0].Provider.Provider.Name() != "usecpa" {
+		t.Fatalf("qualified model should still route to usecpa: %#v", qualified)
+	}
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {
