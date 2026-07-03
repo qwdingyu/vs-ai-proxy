@@ -283,16 +283,22 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if upstream == "" {
 			upstream = firstNonEmptyHeader(ww.Header(), "X-Proxy-Upstream-Model", "X-Proxy-Primary-Upstream")
 		}
+		errorCode := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Code")
+		errorMessage := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Message")
+		errorHint := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Hint")
 
 		s.store.AddLog(store.RequestLog{
-			Method:     r.Method,
-			Path:       r.URL.Path,
-			Provider:   provider,
-			Model:      model,
-			Upstream:   upstream,
-			StatusCode: ww.statusCode,
-			ElapsedMs:  elapsed,
-			IsSuccess:  ww.statusCode < 400,
+			Method:       r.Method,
+			Path:         r.URL.Path,
+			Provider:     provider,
+			Model:        model,
+			Upstream:     upstream,
+			StatusCode:   ww.statusCode,
+			ElapsedMs:    elapsed,
+			IsSuccess:    ww.statusCode < 400,
+			ErrorCode:    errorCode,
+			ErrorMessage: errorMessage,
+			ErrorHint:    errorHint,
 		})
 
 		s.logger.Info("%s %s - %d (%.0f ms)", r.Method, r.URL.Path, ww.statusCode, elapsed)

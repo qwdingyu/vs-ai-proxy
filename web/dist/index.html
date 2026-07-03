@@ -100,12 +100,13 @@
               <th>路径</th>
               <th>提供商</th>
               <th>模型</th>
+              <th>错误</th>
               <th>状态</th>
               <th>延迟</th>
             </tr>
           </thead>
           <tbody id="dashboardLogs">
-            <tr><td colspan="7" class="empty">暂无日志</td></tr>
+            <tr><td colspan="8" class="empty">暂无日志</td></tr>
           </tbody>
         </table>
       </section>
@@ -316,12 +317,13 @@
               <th>路径</th>
               <th>提供商</th>
               <th>模型</th>
+              <th>错误</th>
               <th>状态</th>
               <th>延迟</th>
             </tr>
           </thead>
           <tbody id="logTable">
-            <tr><td colspan="7" class="empty">加载中...</td></tr>
+            <tr><td colspan="8" class="empty">加载中...</td></tr>
           </tbody>
         </table>
       </section>
@@ -346,6 +348,13 @@
       if (Number.isNaN(d.getTime())) return ts;
       return d.toLocaleString();
     };
+    const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[ch]));
     const formatPercent = (value) => {
       if (value == null || Number.isNaN(Number(value))) return '-';
       return Math.round(Number(value) * 100) + '%';
@@ -417,6 +426,13 @@
       if (model && upstream && model !== upstream) return `${model} -> ${upstream}`;
       return model || upstream || '-';
     };
+    const formatLogError = (log) => {
+      if (!log || log.is_success) return '-';
+      const code = escapeHTML(log.error_code || 'error');
+      const message = escapeHTML(log.error_message || '请求失败');
+      const hint = log.error_hint ? `&#10;建议: ${escapeHTML(log.error_hint)}` : '';
+      return `<span class="badge warn" title="${message}${hint}">${code}</span>`;
+    };
 
     const providerKey = (provider) => provider?.id || provider?.name || '';
     const providerLabel = (provider) => {
@@ -484,7 +500,7 @@
         const tbody = $('dashboardLogs');
         const logs = logsRes.logs || [];
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无日志</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无日志</td></tr>';
           return;
         }
         tbody.innerHTML = logs.map(log => `
@@ -494,6 +510,7 @@
             <td>${log.path}</td>
             <td>${log.provider || '-'}</td>
             <td>${formatModelRoute(log)}</td>
+            <td>${formatLogError(log)}</td>
             <td><span class="${statusClass(log.status_code)}">${log.status_code}</span></td>
             <td>${Number(log.elapsed_ms).toFixed(0)} ms</td>
           </tr>
@@ -709,7 +726,7 @@
 
         const tbody = $('logTable');
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无日志</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无日志</td></tr>';
           return;
         }
         tbody.innerHTML = logs.map(log => `
@@ -719,6 +736,7 @@
             <td>${log.path}</td>
             <td>${log.provider || '-'}</td>
             <td>${formatModelRoute(log)}</td>
+            <td>${formatLogError(log)}</td>
             <td><span class="${statusClass(log.status_code)}">${log.status_code}</span></td>
             <td>${Number(log.elapsed_ms).toFixed(0)} ms</td>
           </tr>

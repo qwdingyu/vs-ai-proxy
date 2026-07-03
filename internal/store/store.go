@@ -11,36 +11,38 @@ import (
 
 // RequestLog 单条请求日志
 type RequestLog struct {
-	ID          string    `json:"id"`
-	Timestamp   time.Time `json:"timestamp"`
-	Method      string    `json:"method"`
-	Path        string    `json:"path"`
-	Provider    string    `json:"provider,omitempty"`
-	Model       string    `json:"model,omitempty"`
-	Upstream    string    `json:"upstream,omitempty"`
-	StatusCode  int       `json:"status_code"`
-	ElapsedMs   float64   `json:"elapsed_ms"`
-	IsSuccess   bool      `json:"is_success"`
-	ErrorMessage string   `json:"error_message,omitempty"`
+	ID           string    `json:"id"`
+	Timestamp    time.Time `json:"timestamp"`
+	Method       string    `json:"method"`
+	Path         string    `json:"path"`
+	Provider     string    `json:"provider,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	Upstream     string    `json:"upstream,omitempty"`
+	StatusCode   int       `json:"status_code"`
+	ElapsedMs    float64   `json:"elapsed_ms"`
+	IsSuccess    bool      `json:"is_success"`
+	ErrorCode    string    `json:"error_code,omitempty"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	ErrorHint    string    `json:"error_hint,omitempty"`
 }
 
 // Statistics 统计数据
 type Statistics struct {
-	TotalRequests int64   `json:"total_requests"`
-	SuccessCount  int64   `json:"success_count"`
-	FailureCount  int64   `json:"failure_count"`
-	AvgLatencyMs  float64 `json:"avg_latency_ms"`
+	TotalRequests int64     `json:"total_requests"`
+	SuccessCount  int64     `json:"success_count"`
+	FailureCount  int64     `json:"failure_count"`
+	AvgLatencyMs  float64   `json:"avg_latency_ms"`
 	LastUpdated   time.Time `json:"last_updated"`
 }
 
 // Store 内存中的日志与统计存储
 // 所有公开方法都是并发安全的；内部更新统计时约定必须在 logMu 持有锁的前提下调用 updateStatsLocked。
 type Store struct {
-	logs      []RequestLog
-	stats     Statistics
-	logMu     sync.RWMutex
-	statsMu   sync.RWMutex
-	maxLogs   int
+	logs    []RequestLog
+	stats   Statistics
+	logMu   sync.RWMutex
+	statsMu sync.RWMutex
+	maxLogs int
 }
 
 // New 创建 Store

@@ -1316,6 +1316,37 @@ func TestChatCompletionsProviderFailureReturnsDiagnosticAttempts(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsProviderFailureIsRecordedInRequestLog(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"deepseek-v4-flash"}, nil, "")
+	prov.chatErr = errors.New("请求失败: dial tcp: connect: connection refused")
+	server := newOpenServer(prov)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	logs := server.store.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	got := logs[0]
+	if got.ErrorCode != "network_error" {
+		t.Fatalf("log error_code = %q, want network_error; log=%#v", got.ErrorCode, got)
+	}
+	if got.ErrorMessage == "" {
+		t.Fatalf("log error_message is empty: %#v", got)
+	}
+	if got.ErrorHint == "" {
+		t.Fatalf("log error_hint is empty: %#v", got)
+	}
+}
+
 func TestChatCompletionsSkipsCoolingProviderOnNextRequest(t *testing.T) {
 	primary := newFakeProvider("primary", true, []string{"shared"}, nil, "")
 	primary.chatErr = errors.New("API 错误 503")

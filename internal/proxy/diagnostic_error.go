@@ -39,6 +39,9 @@ type proxyDiagnosticError struct {
 
 func writeProxyDiagnosticError(w http.ResponseWriter, status int, diag proxyDiagnosticError) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Proxy-Error-Code", diag.Code)
+	w.Header().Set("X-Proxy-Error-Message", sanitizeDiagnosticMessage(diag.Message))
+	w.Header().Set("X-Proxy-Error-Hint", sanitizeDiagnosticMessage(diag.Details.Hint))
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": diag})
 }
