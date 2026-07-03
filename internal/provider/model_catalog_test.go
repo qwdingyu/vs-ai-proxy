@@ -110,6 +110,67 @@ func TestModelCatalogProfileAnyFindsEmbeddedModelAcrossProviders(t *testing.T) {
 	}
 }
 
+func TestModelCatalogProfileAnyFindsEmbeddedMetadataSeed(t *testing.T) {
+	catalog := NewModelCatalog(nil, "", time.Minute)
+	profile, ok := catalog.ProfileAny("openai/gpt-4.1")
+	if !ok {
+		t.Fatalf("expected embedded metadata profile")
+	}
+	if profile.ContextLength == nil || *profile.ContextLength != 1047576 {
+		t.Fatalf("context_length = %v, want 1047576", profile.ContextLength)
+	}
+	if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 32768 {
+		t.Fatalf("max_output_tokens = %v, want 32768", profile.MaxOutputTokens)
+	}
+	if profile.SupportsVision == nil || !*profile.SupportsVision {
+		t.Fatalf("supports_vision = %v, want true", profile.SupportsVision)
+	}
+	if profile.SupportsTools == nil || !*profile.SupportsTools {
+		t.Fatalf("supports_tools = %v, want true", profile.SupportsTools)
+	}
+}
+
+func TestModelCatalogProfileAnySupportsZAIAlias(t *testing.T) {
+	catalog := NewModelCatalog(nil, "", time.Minute)
+	profile, ok := catalog.ProfileAny("z-ai/glm-5.2")
+	if !ok {
+		t.Fatalf("expected z-ai alias metadata profile")
+	}
+	if profile.Model != "z-ai/glm-5.2" {
+		t.Fatalf("profile model = %q, want z-ai/glm-5.2", profile.Model)
+	}
+	if profile.ContextLength == nil || *profile.ContextLength != 1000000 {
+		t.Fatalf("context_length = %v, want 1000000", profile.ContextLength)
+	}
+	if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 131072 {
+		t.Fatalf("max_output_tokens = %v, want 131072", profile.MaxOutputTokens)
+	}
+	if profile.SupportsReasoning == nil || !*profile.SupportsReasoning {
+		t.Fatalf("supports_reasoning = %v, want true", profile.SupportsReasoning)
+	}
+}
+
+func TestModelMetadataSeedDoesNotBecomeRoutableCatalogEntries(t *testing.T) {
+	registry := NewRegistry("gpt-4.1", time.Minute)
+	prov := &fakeProvider{
+		name:    "openai",
+		enabled: true,
+		models:  []string{"real-discovered-model"},
+	}
+	registry.Add(&ProviderEntry{Provider: prov, Models: prov.models, Priority: 1})
+	registry.SetModels("openai", prov.models)
+
+	catalog := NewModelCatalog(registry, "", time.Minute)
+	for _, entry := range catalog.AllEntries() {
+		if entry.Model == "openai/gpt-4.1" {
+			t.Fatalf("metadata seed model should not be exposed as routable catalog entry")
+		}
+	}
+	if _, ok := catalog.ProfileAny("openai/gpt-4.1"); !ok {
+		t.Fatalf("metadata seed should still be available for default enrichment")
+	}
+}
+
 func TestModelCatalogUserSelectionOverridesEmbeddedDefault(t *testing.T) {
 	dir := t.TempDir()
 	selectionDir := filepath.Join(dir, "model-selection")

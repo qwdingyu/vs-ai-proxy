@@ -37,6 +37,27 @@ type ModelSelection struct {
 	Models   []ModelProfile `json:"models"`
 }
 
+type modelMetadataSeed map[string]rawModelMetadata
+
+type rawModelMetadata struct {
+	ID         string             `json:"id"`
+	Family     string             `json:"family"`
+	Reasoning  bool               `json:"reasoning"`
+	ToolCall   bool               `json:"tool_call"`
+	Modalities rawModelModalities `json:"modalities"`
+	Limit      rawModelLimit      `json:"limit"`
+}
+
+type rawModelModalities struct {
+	Input []string `json:"input"`
+}
+
+type rawModelLimit struct {
+	Context int `json:"context"`
+	Input   int `json:"input"`
+	Output  int `json:"output"`
+}
+
 // CatalogEntry 是 catalog 对外的模型条目。
 type CatalogEntry struct {
 	Model         string
@@ -53,6 +74,7 @@ type ModelCatalog struct {
 	mu           sync.RWMutex
 	registry     *Registry
 	configs      []ModelSelection
+	metadata     []ModelProfile
 	entries      map[string]CatalogEntry
 	upstreamMap  map[string][]CatalogEntry
 	refreshEvery time.Duration
@@ -71,6 +93,7 @@ func NewModelCatalog(registry *Registry, configDir string, refreshEvery time.Dur
 		upstreamMap:  make(map[string][]CatalogEntry),
 		refreshEvery: refreshEvery,
 	}
+	c.loadEmbeddedModelMetadata()
 	c.loadEmbeddedModelSelections()
 	c.loadModelSelections(configDir)
 	c.rebuildLocked()
@@ -171,13 +194,23 @@ func (c *ModelCatalog) ProfileAny(model string) (ModelProfile, bool) {
 		if !entry.Enabled || !entry.Configured {
 			continue
 		}
-		score := profileNameMatchScore(model, entry.Model)
-		if score < 0 {
-			continue
-		}
-		if score > bestScore || (score == bestScore && entry.Priority < best.MatchPriority) {
+		if score := profileNameMatchScore(model, entry.Model); betterProfileMatch(score, entry.Priority, bestScore, best) {
 			bestScore = score
 			best = entry.Profile
+		}
+	}
+	for _, profile := range c.metadata {
+		if !profile.Enabled {
+			continue
+		}
+		if score := profileNameMatchScore(model, profile.Model); betterProfileMatch(
+			score,
+			profile.MatchPriority,
+			bestScore,
+			best,
+		) {
+			bestScore = score
+			best = profile
 		}
 	}
 	if bestScore < 0 {
@@ -220,6 +253,10 @@ func (c *ModelCatalog) loadEmbeddedModelSelections() {
 	c.loadModelSelectionsFromFS(defaultModelSelectionFS, "model-selection")
 }
 
+func (c *ModelCatalog) loadEmbeddedModelMetadata() {
+	c.loadModelMetadataFromFS(defaultModelMetadataFS, "model-metadata/models.json")
+}
+
 func (c *ModelCatalog) loadModelSelectionsFromFS(fsys fs.FS, dir string) {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
@@ -244,6 +281,114 @@ func (c *ModelCatalog) loadModelSelectionsFromFS(fsys fs.FS, dir string) {
 		}
 		c.configs = append(c.configs, ms)
 	}
+}
+
+func (c *ModelCatalog) loadModelMetadataFromFS(fsys fs.FS, path string) {
+	data, err := fs.ReadFile(fsys, path)
+	if err != nil {
+		return
+	}
+
+	var seed modelMetadataSeed
+	if err := json.Unmarshal(data, &seed); err != nil {
+		return
+	}
+
+	profilesByID := make(map[string]ModelProfile)
+	for key, metadata := range seed {
+		modelID := coalesceModelID(metadata.ID, key)
+		appendModelMetadataProfile(profilesByID, modelID, metadata)
+		for _, alias := range metadataModelAliases(modelID) {
+			appendModelMetadataProfile(profilesByID, alias, metadata)
+		}
+	}
+
+	modelIDs := make([]string, 0, len(profilesByID))
+	for modelID := range profilesByID {
+		modelIDs = append(modelIDs, modelID)
+	}
+	sort.Strings(modelIDs)
+	for _, modelID := range modelIDs {
+		c.metadata = append(c.metadata, profilesByID[modelID])
+	}
+}
+
+func appendModelMetadataProfile(
+	profilesByID map[string]ModelProfile,
+	modelID string,
+	metadata rawModelMetadata,
+) {
+	modelID = strings.TrimSpace(modelID)
+	providerID := modelMetadataProvider(modelID)
+	if modelID == "" || providerID == "" {
+		return
+	}
+
+	contextLength := metadata.Limit.Context
+	if contextLength <= 0 {
+		contextLength = metadata.Limit.Input
+	}
+
+	profilesByID[modelID] = ModelProfile{
+		Model:             modelID,
+		Provider:          providerID,
+		ContextLength:     positiveIntPtr(contextLength),
+		MaxOutputTokens:   positiveIntPtr(metadata.Limit.Output),
+		SupportsTools:     boolPtr(metadata.ToolCall),
+		SupportsVision:    boolPtr(metadataSupportsVision(metadata)),
+		Family:            strings.TrimSpace(metadata.Family),
+		SupportsReasoning: boolPtr(metadata.Reasoning),
+		MatchPriority:     1000,
+		Enabled:           true,
+	}
+}
+
+func metadataModelAliases(modelID string) []string {
+	providerID := modelMetadataProvider(modelID)
+	if providerID != "zhipuai" {
+		return nil
+	}
+
+	base := ModelBasename(modelID)
+	if base == "" {
+		return nil
+	}
+	return []string{"z-ai/" + base}
+}
+
+func modelMetadataProvider(modelID string) string {
+	before, _, ok := strings.Cut(strings.TrimSpace(modelID), "/")
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(before))
+}
+
+func metadataSupportsVision(metadata rawModelMetadata) bool {
+	for _, input := range metadata.Modalities.Input {
+		if strings.EqualFold(strings.TrimSpace(input), "image") {
+			return true
+		}
+	}
+	return false
+}
+
+func positiveIntPtr(value int) *int {
+	if value <= 0 {
+		return nil
+	}
+	return &value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func betterProfileMatch(score, priority, bestScore int, best ModelProfile) bool {
+	if score < 0 {
+		return false
+	}
+	return score > bestScore || (score == bestScore && priority < best.MatchPriority)
 }
 
 func (c *ModelCatalog) rebuildLocked() {

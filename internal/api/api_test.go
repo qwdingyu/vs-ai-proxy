@@ -710,6 +710,52 @@ func TestModelSaveEnrichesMissingMetadata(t *testing.T) {
 	}
 }
 
+func TestModelSaveEnrichesAPISwitchMetadataSeed(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	models := []config.ModelConfig{{
+		Name:       "z-ai/glm-5.2",
+		ProviderID: config.UseAIProviderID,
+		Provider:   config.UseAIProviderID,
+		Enabled:    true,
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/models", mustJSONBody(t, models))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/models status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cfgRec := httptest.NewRecorder()
+	cfgReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	apiSrv.engine.ServeHTTP(cfgRec, cfgReq)
+	if cfgRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d, want %d", cfgRec.Code, http.StatusOK)
+	}
+
+	var got config.AppConfig
+	if err := json.Unmarshal(cfgRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if len(got.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(got.Models))
+	}
+	model := got.Models[0]
+	if model.ContextLength == nil || *model.ContextLength != 1000000 {
+		t.Fatalf("context_length = %v, want 1000000", model.ContextLength)
+	}
+	if model.MaxOutputTokens == nil || *model.MaxOutputTokens != 131072 {
+		t.Fatalf("max_output_tokens = %v, want 131072", model.MaxOutputTokens)
+	}
+	if model.SupportsTools == nil || !*model.SupportsTools {
+		t.Fatalf("supports_tools = %v, want true", model.SupportsTools)
+	}
+	if model.SupportsVision == nil || *model.SupportsVision {
+		t.Fatalf("supports_vision = %v, want false", model.SupportsVision)
+	}
+}
+
 func TestModelMetadataEndpointReturnsCatalogDefaults(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 
@@ -724,6 +770,30 @@ func TestModelMetadataEndpointReturnsCatalogDefaults(t *testing.T) {
 		t.Fatalf("metadata should be found: %s", rec.Body.String())
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"context_length":1048576`)) {
+		t.Fatalf("metadata should include context_length: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"max_output_tokens":131072`)) {
+		t.Fatalf("metadata should include max_output_tokens: %s", rec.Body.String())
+	}
+}
+
+func TestModelMetadataEndpointReturnsAPISwitchMetadataSeed(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/models/metadata?name=z-ai/glm-5.2&provider_id=useai", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/models/metadata status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"found":true`)) {
+		t.Fatalf("metadata should be found: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"model":"z-ai/glm-5.2"`)) {
+		t.Fatalf("metadata should use z-ai alias: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"context_length":1000000`)) {
 		t.Fatalf("metadata should include context_length: %s", rec.Body.String())
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"max_output_tokens":131072`)) {

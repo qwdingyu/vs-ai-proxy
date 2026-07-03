@@ -8,3 +8,10 @@ import "embed"
 //
 //go:embed model-selection/*.json
 var defaultModelSelectionFS embed.FS
+
+// defaultModelMetadataFS embeds the upstream model metadata seed copied from
+// API-Switch. It is intentionally lower priority than model-selection so
+// curated project defaults and user overrides keep winning.
+//
+//go:embed model-metadata/*.json
+var defaultModelMetadataFS embed.FS
