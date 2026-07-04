@@ -91,15 +91,16 @@ func adminAuthMiddleware() gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if adminKey == "" || !strings.HasPrefix(path, "/admin") {
-			c.Next()
-			return
-		}
 
 		if path == "/admin/logout" && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodPost) {
 			clearAdminSessionCookie(c)
 			c.Redirect(http.StatusSeeOther, "/admin")
 			c.Abort()
+			return
+		}
+
+		if adminKey == "" || !strings.HasPrefix(path, "/admin") {
+			c.Next()
 			return
 		}
 
@@ -295,6 +296,7 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 	// 模型相关
 	group.GET("/models", s.listModels)
 	group.GET("/models/metadata", s.getModelMetadata)
+	group.GET("/models/search", s.searchModels)
 	group.PUT("/models", s.saveModels)
 
 	// 测试相关
@@ -483,12 +485,11 @@ func (s *Server) updateProvider(c *gin.Context) {
 				c.JSON(http.StatusConflict, gin.H{"error": "提供商 ID 已存在"})
 				return
 			}
-			cfg.Providers[i] = p
-			result := validateAppConfig(cfg)
-			if !result.Valid {
+			if result := validateProviderIDMutation(cfg.Models, currentKey, config.ProviderKey(p)); !result.Valid {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "配置校验失败", "validation": result})
 				return
 			}
+			cfg.Providers[i] = p
 			if !s.saveAndApplyConfig(c, cfg) {
 				return
 			}
@@ -509,12 +510,11 @@ func (s *Server) deleteProvider(c *gin.Context) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "UseAI 是内置提供商，不能删除；如需停用可在配置中关闭启用状态"})
 				return
 			}
-			cfg.Providers = append(cfg.Providers[:i], cfg.Providers[i+1:]...)
-			result := validateAppConfig(cfg)
-			if !result.Valid {
+			if result := validateProviderIDMutation(cfg.Models, config.ProviderKey(prov), ""); !result.Valid {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "配置校验失败", "validation": result})
 				return
 			}
+			cfg.Providers = append(cfg.Providers[:i], cfg.Providers[i+1:]...)
 			if !s.saveAndApplyConfig(c, cfg) {
 				return
 			}
@@ -867,6 +867,29 @@ func providerReferenceSet(providers []config.ProviderConfig) map[string]struct{}
 	return refs
 }
 
+func validateProviderIDMutation(models []config.ModelConfig, oldProviderID string, newProviderID string) configValidationResult {
+	result := configValidationResult{Valid: true}
+	oldProviderID = strings.TrimSpace(oldProviderID)
+	newProviderID = strings.TrimSpace(newProviderID)
+	if oldProviderID == "" || strings.EqualFold(oldProviderID, newProviderID) {
+		return result
+	}
+
+	for i, model := range models {
+		model = config.NormalizeModel(model)
+		providerID := strings.TrimSpace(model.ProviderID)
+		if !strings.EqualFold(providerID, oldProviderID) {
+			continue
+		}
+		result.addError(
+			"model_provider_not_found",
+			fmt.Sprintf("models[%d].provider_id", i),
+			fmt.Sprintf("模型 %q 仍绑定 provider_id %q；请先把该模型迁移到新 provider 或删除该模型后再修改 provider ID", model.Name, oldProviderID),
+		)
+	}
+	return result
+}
+
 type modelMetadataResponse struct {
 	Found           bool   `json:"found"`
 	Source          string `json:"source,omitempty"`
@@ -904,6 +927,34 @@ func (s *Server) getModelMetadata(c *gin.Context) {
 		SupportsVision:  copyBoolPtr(profile.SupportsVision),
 		ReasoningEffort: profile.ReasoningEffort,
 	})
+}
+
+func (s *Server) searchModels(c *gin.Context) {
+	query := strings.TrimSpace(c.Query("q"))
+	if query == "" {
+		c.JSON(http.StatusOK, gin.H{"models": []provider.ModelProfile{}})
+		return
+	}
+
+	catalog := s.modelMetadataCatalog()
+	if catalog == nil {
+		c.JSON(http.StatusOK, gin.H{"models": []provider.ModelProfile{}})
+		return
+	}
+
+	lowerQuery := strings.ToLower(query)
+	var results []provider.ModelProfile
+	for _, profile := range catalog.MetadataEntries() {
+		modelID := strings.ToLower(profile.Model)
+		if !strings.Contains(modelID, lowerQuery) && !strings.Contains(strings.ToLower(profile.Family), lowerQuery) {
+			continue
+		}
+		results = append(results, profile)
+		if len(results) >= 50 {
+			break
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"models": results})
 }
 
 func (s *Server) enrichModelDefaults(cfg *config.AppConfig) {

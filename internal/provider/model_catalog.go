@@ -118,6 +118,18 @@ func (c *ModelCatalog) AllEntries() []CatalogEntry {
 	return out
 }
 
+// MetadataEntries 返回内置模型元数据列表。
+func (c *ModelCatalog) MetadataEntries() []ModelProfile {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.metadata == nil {
+		return nil
+	}
+	out := make([]ModelProfile, len(c.metadata))
+	copy(out, c.metadata)
+	return out
+}
+
 // UpstreamEntries 返回某个 upstream model 对应的 catalog entries，用于 failover 排序。
 func (c *ModelCatalog) UpstreamEntries(upstream string) []CatalogEntry {
 	c.mu.RLock()

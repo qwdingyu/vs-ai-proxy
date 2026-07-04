@@ -712,6 +712,48 @@ func TestProviderUpdateRejectsBreakingModelBinding(t *testing.T) {
 	}
 }
 
+func TestProviderUpdateAllowsUnrelatedInvalidModelBinding(t *testing.T) {
+	apiSrv, proxySrv := newAPITestHarness(t)
+	dirtyCfg := config.AppConfig{
+		Port:         11434,
+		DefaultModel: "z-ai/glm-5.2",
+		Providers: []config.ProviderConfig{
+			{ID: "usecpa", Name: "UseCpa", Type: "openai", BaseURL: "https://cpa.eforge.xyz/v1", Enabled: true},
+		},
+		Models: []config.ModelConfig{
+			{Name: "deepseek-v4-flash", ProviderID: "deepseek-v4-flash", Provider: "deepseek-v4-flash", Enabled: true},
+			{Name: "z-ai/glm-5.2", ProviderID: "usecpa", Provider: "usecpa", Enabled: true},
+		},
+	}
+	if err := apiSrv.configMgr.Save(&dirtyCfg); err != nil {
+		t.Fatalf("Save dirty config: %v", err)
+	}
+	proxySrv.Reconfigure(apiSrv.configMgr.Get())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/providers/usecpa", mustJSONBody(t, config.ProviderConfig{
+		ID:      "usecpa",
+		Name:    "UseCpa",
+		Type:    "openai",
+		APIKey:  "sk-updated",
+		BaseURL: "https://cpa.eforge.xyz/v1",
+		Enabled: true,
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT unrelated dirty provider status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	cfg, _, _ := proxySrv.SnapshotComponents()
+	updated, ok := findProviderConfig(cfg.Providers, "usecpa")
+	if !ok {
+		t.Fatalf("usecpa provider missing after update: %#v", cfg.Providers)
+	}
+	if updated.APIKey != "sk-updated" {
+		t.Fatalf("updated api key = %q, want sk-updated", updated.APIKey)
+	}
+}
+
 func TestProviderUpdateRejectsBuiltInUseAIIDChange(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 
@@ -963,6 +1005,21 @@ func TestModelMetadataEndpointReturnsAPISwitchMetadataSeed(t *testing.T) {
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"max_output_tokens":131072`)) {
 		t.Fatalf("metadata should include max_output_tokens: %s", rec.Body.String())
+	}
+}
+
+func TestModelSearchReturnsMetadataCatalogMatches(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/models/search?q=glm-5.2", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/models/search status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"model":"z-ai/glm-5.2"`)) {
+		t.Fatalf("search response should include z-ai/glm-5.2: %s", rec.Body.String())
 	}
 }
 

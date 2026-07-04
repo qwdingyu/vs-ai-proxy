@@ -53,6 +53,12 @@
     .pre { white-space: pre-wrap; word-break: break-word; background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 280px; overflow: auto; }
     .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #0f1115; font-size: 12px; }
     .badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; background: #0f1115; border: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+    .search-results { background: #0f1115; border: 1px solid var(--border); border-radius: 6px; padding: 6px; margin-top: 8px; max-height: 240px; overflow: auto; }
+    .search-item { padding: 10px 8px; border-bottom: 1px solid var(--border); cursor: pointer; }
+    .search-item:last-child { border-bottom: none; }
+    .search-item:hover { background: #161b22; }
+    .search-item-name { font-weight: 600; color: var(--text); margin-bottom: 4px; }
+    .search-item-meta { font-size: 12px; color: var(--muted); line-height: 1.4; }
   </style>
 </head>
 <body>
@@ -210,6 +216,8 @@
         <div id="modelModal" class="modal-backdrop hidden">
           <div class="modal">
             <h3 id="modelModalTitle">新增模型</h3>
+            <label>搜索内置模型 <input id="mSearch" placeholder="输入模型名称或厂商（如 gpt、claude、deepseek）" /></label>
+            <div id="modelSearchResults" class="search-results hidden"></div>
             <label>名称 <input id="mName" /></label>
             <label>Provider ID <input id="mProvider" placeholder="留空表示按优先级自动选择" /></label>
             <label>上下文长度 <input type="number" id="mCtx" /></label>
@@ -377,6 +385,13 @@
       return `<span class="badge warn" title="${text}">${shortText}</span>`;
     };
     const withAdminAuth = (opts = {}) => ({ ...opts, credentials: opts.credentials || 'same-origin' });
+    const debounce = (fn, wait) => {
+      let timer;
+      return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), wait);
+      };
+    };
 
     const redirectToAdminLogin = () => {
       localStorage.removeItem('vs_ai_proxy_admin_token');
@@ -910,23 +925,28 @@
     // 保存提供商
     $('btnSaveProvider').addEventListener('click', async () => {
       const payload = readProviderForm();
-      if (!payload.id) return alert('ID 不能为空');
-      if (!payload.name) return alert('名称不能为空');
-      if (!['openai', 'ollama', 'custom'].includes(payload.type)) return alert('类型必须是 openai、ollama 或 custom。');
-      if (!payload.base_url) return alert('Base URL 不能为空。');
-      if (currentProviders.some((p) => providerKey(p).toLowerCase() === payload.id.toLowerCase() && providerKey(p) !== editingProviderName)) {
-        return alert('Provider ID 已存在，请换一个 ID。');
+      try {
+        if (!payload.id) return alert('ID 不能为空');
+        if (!payload.name) return alert('名称不能为空');
+        if (!['openai', 'ollama', 'custom'].includes(payload.type)) return alert('类型必须是 openai、ollama 或 custom。');
+        if (!payload.base_url) return alert('Base URL 不能为空。');
+        if (currentProviders.some((p) => providerKey(p).toLowerCase() === payload.id.toLowerCase() && providerKey(p) !== editingProviderName)) {
+          return alert('Provider ID 已存在，请换一个 ID。');
+        }
+        if (editingProviderName) {
+          await fetchJSON('/providers/' + encodeURIComponent(editingProviderName), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        } else {
+          await fetchJSON('/providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        }
+        await maybeImportProbedModels(payload);
+        $('providerModal').classList.add('hidden');
+        editingProviderName = null;
+        lastProviderProbe = null;
+        loadProviders();
+      } catch (e) {
+        const msg = formatValidationIssues(e.validation) || String(e.message || e);
+        alert(msg);
       }
-      if (editingProviderName) {
-        await fetchJSON('/providers/' + encodeURIComponent(editingProviderName), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      } else {
-        await fetchJSON('/providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      }
-      await maybeImportProbedModels(payload);
-      $('providerModal').classList.add('hidden');
-      editingProviderName = null;
-      lastProviderProbe = null;
-      loadProviders();
     });
 
     $('btnTestConnection').addEventListener('click', async () => {
@@ -986,6 +1006,43 @@
     $('btnCancelModel').addEventListener('click', () => $('modelModal').classList.add('hidden'));
     $('mName').addEventListener('blur', applyModelMetadataToForm);
     $('mProvider').addEventListener('blur', applyModelMetadataToForm);
+    $('mSearch').addEventListener('input', debounce(async () => {
+      const query = $('mSearch').value.trim();
+      const resultsEl = $('modelSearchResults');
+      if (!query) {
+        resultsEl.classList.add('hidden');
+        resultsEl.innerHTML = '';
+        return;
+      }
+      try {
+        const data = await fetchJSON('/models/search?q=' + encodeURIComponent(query));
+        const models = data.models || [];
+        if (!models.length) {
+          resultsEl.innerHTML = '<div class="search-item">未找到匹配模型</div>';
+        } else {
+          resultsEl.innerHTML = models.map((item) => `
+            <div class="search-item" data-model="${escapeHTML(item.model)}" data-provider="${escapeHTML(item.provider)}" data-context="${item.context_length || ''}" data-max="${item.max_output_tokens || ''}">
+              <div class="search-item-name">${escapeHTML(item.model)}</div>
+              <div class="search-item-meta">${escapeHTML(item.family || '')} | 上下文: ${item.context_length || '-'} | 输出: ${item.max_output_tokens || '-'} | 工具: ${item.supports_tools ? '是' : '否'} | 视觉: ${item.supports_vision ? '是' : '否'}</div>
+            </div>
+          `).join('');
+        }
+        resultsEl.classList.remove('hidden');
+      } catch (e) {
+        console.debug('模型搜索失败', e);
+      }
+    }, 250));
+    $('modelSearchResults').addEventListener('click', (e) => {
+      const item = e.target.closest('.search-item');
+      if (!item) return;
+      $('mName').value = item.dataset.model || '';
+      $('mProvider').value = item.dataset.provider || '';
+      if (item.dataset.context) $('mCtx').value = item.dataset.context;
+      if (item.dataset.max) $('mMax').value = item.dataset.max;
+      $('mSearch').value = '';
+      $('modelSearchResults').classList.add('hidden');
+      applyModelMetadataToForm();
+    });
     // 保存模型
     $('btnSaveModel').addEventListener('click', async () => {
       const providerId = $('mProvider').value.trim();
