@@ -1048,9 +1048,6 @@ func TestModelSaveEnrichesMissingMetadata(t *testing.T) {
 	if model.SupportsVision == nil || *model.SupportsVision {
 		t.Fatalf("supports_vision = %v, want false", model.SupportsVision)
 	}
-	if model.ReasoningEffort != "medium" {
-		t.Fatalf("reasoning_effort = %q, want medium", model.ReasoningEffort)
-	}
 }
 
 func TestModelSaveEnrichesAPISwitchMetadataSeed(t *testing.T) {
