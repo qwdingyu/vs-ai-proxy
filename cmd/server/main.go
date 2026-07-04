@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -242,9 +243,9 @@ func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *p
 		return
 	}
 
-	var lastMod time.Time
-	if info, err := os.Stat(path); err == nil {
-		lastMod = info.ModTime()
+	lastMod, lastHash, err := configFileFingerprint(path)
+	if err != nil {
+		logger.Warn("初始化配置文件监控失败: %v", err)
 	}
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -255,16 +256,14 @@ func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *p
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			info, err := os.Stat(path)
+			mod, hash, err := configFileFingerprint(path)
 			if err != nil {
 				logger.Warn("检查配置文件变更失败: %v", err)
 				continue
 			}
-			mod := info.ModTime()
-			if !mod.After(lastMod) {
+			if !mod.After(lastMod) && hash == lastHash {
 				continue
 			}
-			lastMod = mod
 
 			oldPort := configMgr.Get().Port
 			cfg, err := configMgr.Reload()
@@ -272,6 +271,8 @@ func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *p
 				logger.Warn("热加载配置失败: %v", err)
 				continue
 			}
+			lastMod = mod
+			lastHash = hash
 			proxySrv.Reconfigure(cfg)
 			if cfg.Port != oldPort {
 				logger.Warn("配置文件端口已变更为 %d；当前监听端口仍为 %d，端口变更需要重启进程", cfg.Port, oldPort)
@@ -279,4 +280,17 @@ func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *p
 			logger.Info("已热加载配置文件: %s (providers=%d models=%d)", path, len(cfg.Providers), len(cfg.Models))
 		}
 	}
+}
+
+func configFileFingerprint(path string) (time.Time, string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	sum := sha256.Sum256(data)
+	return info.ModTime(), fmt.Sprintf("%x", sum), nil
 }

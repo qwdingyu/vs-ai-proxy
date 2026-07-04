@@ -139,6 +139,100 @@ func TestWatchConfigLoopReloadsProxyConfigFromDisk(t *testing.T) {
 	t.Fatalf("proxy default model = %q, want after-hot-reload", cfg.DefaultModel)
 }
 
+func TestWatchConfigLoopReloadsWhenContentChangesButMTimeDoesNot(t *testing.T) {
+	t.Setenv("PORT", "")
+	t.Setenv("PROXY_PORT", "")
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	initial := config.DefaultConfig()
+	initial.Port = 12345
+	initial.DefaultModel = "before-same-mtime"
+	initial.Providers = []config.ProviderConfig{config.DefaultUseAIProvider()}
+	writeConfigFile(t, path, initial)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	originalMod := info.ModTime()
+
+	configMgr, err := config.NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	proxySrv := proxy.NewServer(configMgr.Get(), configMgr, store.New(10), log.New(nil, log.LevelError, false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchConfigLoop(ctx, configMgr, proxySrv, log.New(nil, log.LevelError, false))
+
+	time.Sleep(50 * time.Millisecond)
+	next := config.DefaultConfig()
+	next.Port = 12345
+	next.DefaultModel = "after-same-mtime"
+	next.Providers = []config.ProviderConfig{config.DefaultUseAIProvider()}
+	writeConfigFile(t, path, next)
+	if err := os.Chtimes(path, originalMod, originalMod); err != nil {
+		t.Fatalf("Chtimes() error = %v", err)
+	}
+
+	waitForProxyDefaultModel(t, proxySrv, "after-same-mtime")
+}
+
+func TestWatchConfigLoopRetriesAfterInvalidConfigIsFixed(t *testing.T) {
+	t.Setenv("PORT", "")
+	t.Setenv("PROXY_PORT", "")
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	initial := config.DefaultConfig()
+	initial.Port = 12345
+	initial.DefaultModel = "before-invalid"
+	initial.Providers = []config.ProviderConfig{config.DefaultUseAIProvider()}
+	writeConfigFile(t, path, initial)
+
+	configMgr, err := config.NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	proxySrv := proxy.NewServer(configMgr.Get(), configMgr, store.New(10), log.New(nil, log.LevelError, false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchConfigLoop(ctx, configMgr, proxySrv, log.New(nil, log.LevelError, false))
+
+	time.Sleep(50 * time.Millisecond)
+	if err := os.WriteFile(path, []byte(`{"default_model":`), 0o644); err != nil {
+		t.Fatalf("WriteFile(invalid) error = %v", err)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	cfg, _, _ := proxySrv.SnapshotComponents()
+	if cfg.DefaultModel != "before-invalid" {
+		t.Fatalf("proxy default model after invalid config = %q, want before-invalid", cfg.DefaultModel)
+	}
+
+	next := config.DefaultConfig()
+	next.Port = 12345
+	next.DefaultModel = "after-invalid-fixed"
+	next.Providers = []config.ProviderConfig{config.DefaultUseAIProvider()}
+	writeConfigFile(t, path, next)
+
+	waitForProxyDefaultModel(t, proxySrv, "after-invalid-fixed")
+}
+
+func waitForProxyDefaultModel(t *testing.T, proxySrv *proxy.Server, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		cfg, _, _ := proxySrv.SnapshotComponents()
+		if cfg.DefaultModel == want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cfg, _, _ := proxySrv.SnapshotComponents()
+	t.Fatalf("proxy default model = %q, want %q", cfg.DefaultModel, want)
+}
+
 func writeConfigFile(t *testing.T, path string, cfg *config.AppConfig) {
 	t.Helper()
 	data, err := json.MarshalIndent(cfg, "", "  ")
