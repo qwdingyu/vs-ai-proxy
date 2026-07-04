@@ -42,6 +42,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -49,12 +51,13 @@ jobs:
           cache: true
 
       - name: 跨平台编译 + 打包
-        run: |
-          make release
-          make install
+        run: make release
+
+      - name: 生成 Release 说明
+        run: .bin/release-notes.sh "${GITHUB_REF_NAME}" > release-notes.md
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: release-notes.md

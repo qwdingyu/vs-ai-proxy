@@ -790,12 +790,12 @@ func validateAppConfig(cfg *config.AppConfig) configValidationResult {
 		result.addError("config_nil", "config", "配置不能为空")
 		return result
 	}
+	normalized := config.CloneAppConfig(cfg)
+	config.NormalizeForRuntime(normalized)
 	if err := validateProviderCollection(cfg.Providers); err != nil {
 		result.addError("provider_invalid", "providers", err.Error())
 		return result
 	}
-	normalized := config.CloneAppConfig(cfg)
-	config.EnsureBuiltInProviders(normalized)
 	validateModelCollection(normalized.Models, normalized.Providers, &result)
 	return result
 }

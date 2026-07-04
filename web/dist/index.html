@@ -1036,7 +1036,7 @@
       const item = e.target.closest('.search-item');
       if (!item) return;
       $('mName').value = item.dataset.model || '';
-      $('mProvider').value = item.dataset.provider || '';
+      // 不自动填充 provider_id；内置元数据的 provider 可能只是厂商标识，与用户配置中的 provider.id 不一定一致
       if (item.dataset.context) $('mCtx').value = item.dataset.context;
       if (item.dataset.max) $('mMax').value = item.dataset.max;
       $('mSearch').value = '';
@@ -1055,6 +1055,18 @@
         enabled: $('mEnabled').checked
       };
       if (!payload.name) return alert('名称不能为空');
+      if (payload.provider_id) {
+        const cfg = currentConfig || await fetchJSON('/config');
+        const validProviderIDs = new Set((cfg.providers || []).map((p) => (p.id || p.name || '').toLowerCase()).filter(Boolean));
+        if (!validProviderIDs.has(payload.provider_id.toLowerCase())) {
+          if (!window.confirm(`Provider ID "${payload.provider_id}" 不存在，是否清空后按优先级自动路由？`)) {
+            return;
+          }
+          $('mProvider').value = '';
+          payload.provider_id = '';
+          payload.provider = '';
+        }
+      }
       const res = await fetchJSON('/models');
       const models = res.models || [];
       const next = editingModelName

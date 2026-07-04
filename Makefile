@@ -4,6 +4,7 @@
 #   make build-all     构建所有平台
 #   make install       构建所有平台便携包（可执行文件）
 #   make release       构建并打包所有平台（压缩包）
+#   make release-notes 生成当前 tag 的 GitHub Release 正文
 #   make clean         清理构建产物
 
 APP_NAME     := vs-ai-proxy
@@ -32,7 +33,7 @@ PLATFORM_ALIAS := \
 	windows/amd64:windows-x64
 
 # ─── 默认目标 ──────────────────────────────────────────
-.PHONY: all build build-all install release clean
+.PHONY: all build build-all install release release-notes clean
 
 all: build
 
@@ -74,11 +75,15 @@ install: build-all
 	@ls -lh $(OUTPUT_DIR)
 
 # ─── 构建并打包 ────────────────────────────────────────
-release: build-all
+release:
 	@echo "📦 打包压缩包..."
 	@bash .bin/release-all.sh
 	@echo "✅ 发布包已生成: $(OUTPUT_DIR)/"
 	@ls -lh $(OUTPUT_DIR)
+
+# ─── 生成规范 Release 说明 ─────────────────────────────
+release-notes:
+	@bash .bin/release-notes.sh
 
 # ─── 清理 ──────────────────────────────────────────────
 clean:

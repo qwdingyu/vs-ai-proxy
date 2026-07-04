@@ -28,7 +28,7 @@ declare -A ALIASES=(
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-echo "🔨 构建 $APP_NAME v$VERSION 所有平台..."
+echo "🔨 构建 $APP_NAME ${VERSION} 所有平台..."
 for plat in "${PLATFORMS[@]}"; do
   GOOS="${plat%%/*}"
   GOARCH="${plat##*/}"

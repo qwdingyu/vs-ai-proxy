@@ -330,7 +330,7 @@ func TestConfigSaveRejectsDuplicateProviderIDs(t *testing.T) {
 	}
 }
 
-func TestConfigValidateReportsInvalidModelProvider(t *testing.T) {
+func TestConfigValidateClearsModelNamespaceProviderBinding(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 
 	payload := config.AppConfig{
@@ -344,8 +344,40 @@ func TestConfigValidateReportsInvalidModelProvider(t *testing.T) {
 		}},
 		Models: []config.ModelConfig{{
 			Name:       "z-ai/glm-5.2",
-			ProviderID: "z-ai/glm-5.2",
-			Provider:   "z-ai/glm-5.2",
+			ProviderID: "z-ai",
+			Provider:   "z-ai",
+			Enabled:    true,
+		}},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config/validate", mustJSONBody(t, payload))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config/validate status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"valid":true`)) {
+		t.Fatalf("model namespace provider binding should be treated as automatic routing: %s", rec.Body.String())
+	}
+}
+
+func TestConfigValidateReportsUnknownModelProvider(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	payload := config.AppConfig{
+		Port: 12345,
+		Providers: []config.ProviderConfig{{
+			ID:      "usecpa",
+			Name:    "UseCPA",
+			Type:    "openai",
+			BaseURL: "https://example.invalid/v1",
+			Enabled: true,
+		}},
+		Models: []config.ModelConfig{{
+			Name:       "z-ai/glm-5.2",
+			ProviderID: "missing-provider",
+			Provider:   "missing-provider",
 			Enabled:    true,
 		}},
 	}
@@ -394,6 +426,54 @@ func TestConfigSaveRejectsInvalidModelProvider(t *testing.T) {
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"model_provider_not_found"`)) {
 		t.Fatalf("response should include structured validation issue: %s", rec.Body.String())
+	}
+}
+
+func TestConfigSaveMigratesUserPayloadWithModelNamespaceProviderBinding(t *testing.T) {
+	apiSrv, proxySrv := newAPITestHarness(t)
+
+	payload := config.AppConfig{
+		Port:         12345,
+		DefaultModel: "deepseek-v4-flash",
+		Providers: []config.ProviderConfig{
+			{ID: "useai", Name: "UseAI", DisplayName: "UseAI", APIKey: "sk-test", BaseURL: "https://api.eforge.xyz/v1", Type: "openai", Enabled: true, Priority: 0},
+			{ID: "deepseek", Name: "deepseek", DisplayName: "deepseek", APIKey: "sk-test", BaseURL: "https://api.deepseek.com", Type: "openai", Enabled: true, Priority: 1},
+			{ID: "ollama", Name: "ollama", DisplayName: "ollama", BaseURL: "http://localhost:11434", Type: "ollama", Enabled: true, Priority: 2},
+			{ID: "usecpa", Name: "UseCpa", DisplayName: "UseCpa", APIKey: "api123", BaseURL: "https://cpa.eforge.xyz/v1", Type: "openai", Enabled: true, Priority: 10},
+		},
+		Models: []config.ModelConfig{
+			{Name: "deepseek/deepseek-v4-pro", ProviderID: "deepseek", Provider: "deepseek", Enabled: true},
+			{Name: "llama-3.3-70b", ProviderID: "ollama", Provider: "ollama", Enabled: true},
+			{Name: "deepseek/deepseek-v4-flash", ProviderID: "deepseek", Provider: "deepseek", Enabled: true},
+			{Name: "z-ai/glm-5.2", ProviderID: "z-ai", Provider: "z-ai", Enabled: true},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/config", mustJSONBody(t, payload))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/config status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cfg, registry, _ := proxySrv.SnapshotComponents()
+	found := false
+	for _, model := range cfg.Models {
+		if model.Name != "z-ai/glm-5.2" {
+			continue
+		}
+		found = true
+		if model.ProviderID != "" || model.Provider != "" {
+			t.Fatalf("z-ai/glm-5.2 provider binding = %q/%q, want empty automatic routing", model.ProviderID, model.Provider)
+		}
+	}
+	if !found {
+		t.Fatalf("saved config missing z-ai/glm-5.2: %#v", cfg.Models)
+	}
+	candidates := registry.ResolveCandidates("z-ai/glm-5.2")
+	if len(candidates) == 0 {
+		t.Fatalf("z-ai/glm-5.2 should resolve through automatic provider fallback")
 	}
 }
 

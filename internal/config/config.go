@@ -209,6 +209,54 @@ func NormalizeModel(m ModelConfig) ModelConfig {
 	return m
 }
 
+func NormalizeForRuntime(cfg *AppConfig) {
+	if cfg == nil {
+		return
+	}
+	EnsureBuiltInProviders(cfg)
+	NormalizeModelProviderBindings(cfg.Models, cfg.Providers)
+}
+
+func NormalizeModelProviderBindings(models []ModelConfig, providers []ProviderConfig) {
+	providerRefs := providerReferenceSet(providers)
+	for i := range models {
+		model := NormalizeModel(models[i])
+		providerID := strings.TrimSpace(model.ProviderID)
+		if providerID != "" {
+			_, providerExists := providerRefs[strings.ToLower(providerID)]
+			if !providerExists && isModelNamespaceProviderBinding(model.Name, providerID) {
+				model.ProviderID = ""
+				model.Provider = ""
+			}
+		}
+		models[i] = model
+	}
+}
+
+func providerReferenceSet(providers []ProviderConfig) map[string]struct{} {
+	refs := map[string]struct{}{}
+	for _, p := range providers {
+		p = NormalizeProvider(p)
+		for _, value := range []string{ProviderKey(p), p.Name, p.DisplayName} {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				refs[strings.ToLower(value)] = struct{}{}
+			}
+		}
+	}
+	return refs
+}
+
+func isModelNamespaceProviderBinding(modelName, providerID string) bool {
+	modelName = strings.TrimSpace(modelName)
+	providerID = strings.TrimSpace(providerID)
+	if modelName == "" || providerID == "" {
+		return false
+	}
+	slash := strings.Index(modelName, "/")
+	return slash > 0 && strings.EqualFold(modelName[:slash], providerID)
+}
+
 func ProviderKey(p ProviderConfig) string {
 	p = NormalizeProvider(p)
 	return p.ID
@@ -299,7 +347,7 @@ func NewManager(configPath string) (*Manager, error) {
 		}
 	}
 
-	EnsureBuiltInProviders(cfg)
+	NormalizeForRuntime(cfg)
 	applyEnvOverrides(cfg)
 	m.config = CloneAppConfig(cfg)
 	return m, nil
@@ -319,7 +367,7 @@ func (m *Manager) ConfigPath() string {
 
 // Save 保存配置
 func (m *Manager) Save(cfg *AppConfig) error {
-	EnsureBuiltInProviders(cfg)
+	NormalizeForRuntime(cfg)
 	next := CloneAppConfig(cfg)
 	if err := m.save(next); err != nil {
 		return err
@@ -336,7 +384,7 @@ func (m *Manager) Reload() (*AppConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	EnsureBuiltInProviders(cfg)
+	NormalizeForRuntime(cfg)
 	applyEnvOverrides(cfg)
 	next := CloneAppConfig(cfg)
 	m.mu.Lock()

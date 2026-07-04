@@ -187,6 +187,86 @@ func TestManagerReloadUpdatesConfigFromDisk(t *testing.T) {
 	}
 }
 
+func TestManagerReloadMigratesModelNamespaceProviderBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	next := DefaultConfig()
+	next.Providers = []ProviderConfig{{
+		ID:       "usecpa",
+		Name:     "UseCpa",
+		Type:     "openai",
+		BaseURL:  "https://cpa.eforge.xyz/v1",
+		Enabled:  true,
+		Priority: 10,
+	}}
+	next.Models = []ModelConfig{{
+		Name:       "z-ai/glm-5.2",
+		ProviderID: "z-ai",
+		Provider:   "z-ai",
+		Enabled:    true,
+	}}
+	data, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reloaded, err := mgr.Reload()
+	if err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if len(reloaded.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(reloaded.Models))
+	}
+	if reloaded.Models[0].ProviderID != "" || reloaded.Models[0].Provider != "" {
+		t.Fatalf("model provider binding = %q/%q, want empty automatic routing", reloaded.Models[0].ProviderID, reloaded.Models[0].Provider)
+	}
+}
+
+func TestNewManagerMigratesModelNamespaceProviderBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := DefaultConfig()
+	cfg.Providers = []ProviderConfig{{
+		ID:       "usecpa",
+		Name:     "UseCpa",
+		Type:     "openai",
+		BaseURL:  "https://cpa.eforge.xyz/v1",
+		Enabled:  true,
+		Priority: 10,
+	}}
+	cfg.Models = []ModelConfig{{
+		Name:       "z-ai/glm-5.2",
+		ProviderID: "z-ai",
+		Provider:   "z-ai",
+		Enabled:    true,
+	}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	loaded := mgr.Get()
+	if len(loaded.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(loaded.Models))
+	}
+	if loaded.Models[0].ProviderID != "" || loaded.Models[0].Provider != "" {
+		t.Fatalf("model provider binding = %q/%q, want empty automatic routing", loaded.Models[0].ProviderID, loaded.Models[0].Provider)
+	}
+}
+
 func TestManagerSaveWritesValidConfigAndCleansTempFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
