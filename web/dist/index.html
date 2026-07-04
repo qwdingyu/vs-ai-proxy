@@ -24,9 +24,12 @@
     .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
     .brand-title { font-size: 16px; font-weight: 800; }
     .brand-version { color: var(--muted); font-size: 11px; font-weight: 500; }
-    .nav { display: flex; gap: 10px; }
-    .nav-item { color: var(--text); text-decoration: none; padding: 6px 10px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
-    .nav-item:hover { border-color: var(--border); }
+    .nav { display: flex; gap: 6px; padding: 3px; border: 1px solid rgba(48,54,61,0.7); border-radius: 10px; background: rgba(1,4,9,0.28); }
+    .nav-item { position: relative; color: var(--muted); text-decoration: none; padding: 7px 11px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; transition: color .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease; }
+    .nav-item:hover { color: var(--text); border-color: rgba(88,166,255,0.22); background: rgba(88,166,255,0.06); }
+    .nav-item:focus-visible { outline: 2px solid rgba(88,166,255,0.65); outline-offset: 2px; }
+    .nav-item.active, .nav-item[aria-current="page"] { color: #f0f6fc; border-color: rgba(88,166,255,0.36); background: linear-gradient(180deg, rgba(88,166,255,0.18), rgba(88,166,255,0.08)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 8px 22px rgba(0,0,0,0.18); }
+    .nav-item.active::after, .nav-item[aria-current="page"]::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 3px; height: 2px; border-radius: 999px; background: linear-gradient(90deg, var(--accent), #3fb950); }
     .main { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
@@ -537,6 +540,16 @@
       return value || 'dashboard';
     };
 
+    const setActiveNav = (page) => {
+      document.querySelectorAll('.nav-item[href^="#"]').forEach((el) => {
+        const target = (el.hash || '#/').replace('#/', '') || 'dashboard';
+        const isActive = target === page;
+        el.classList.toggle('active', isActive);
+        if (isActive) el.setAttribute('aria-current', 'page');
+        else el.removeAttribute('aria-current');
+      });
+    };
+
     const formatModelRoute = (log) => {
       const model = log.model || '';
       const upstream = log.upstream || '';
@@ -588,6 +601,7 @@
 
     // 页面切换：根据前端 hash 路由显示对应面板
     const showPage = (page) => {
+      setActiveNav(page);
       ['dashboard', 'config', 'providers', 'models', 'test', 'monitor', 'logs', 'faq', 'contact'].forEach((name) => {
         const el = $('page-' + name);
         if (!el) return;
