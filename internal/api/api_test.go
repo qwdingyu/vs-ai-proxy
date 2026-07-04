@@ -993,11 +993,24 @@ func TestModelEndpointsRoundTrip(t *testing.T) {
 
 func TestModelSaveEnrichesMissingMetadata(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
+	addProviderRec := httptest.NewRecorder()
+	addProviderReq := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, config.ProviderConfig{
+		ID:      "deepseek",
+		Name:    "deepseek",
+		Type:    "openai",
+		APIKey:  "sk-test",
+		BaseURL: "https://api.deepseek.com",
+		Enabled: true,
+	}))
+	apiSrv.engine.ServeHTTP(addProviderRec, addProviderReq)
+	if addProviderRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers status = %d, want %d; body=%s", addProviderRec.Code, http.StatusOK, addProviderRec.Body.String())
+	}
 
 	models := []config.ModelConfig{{
 		Name:       "deepseek-v4-flash",
-		ProviderID: config.UseAIProviderID,
-		Provider:   config.UseAIProviderID,
+		ProviderID: "deepseek",
+		Provider:   "deepseek",
 		Enabled:    true,
 	}}
 
@@ -1090,7 +1103,7 @@ func TestModelMetadataEndpointReturnsCatalogDefaults(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models/metadata?name=deepseek-v4-flash&provider_id=useai", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/models/metadata?name=deepseek-v4-flash&provider_id=deepseek", nil)
 	apiSrv.engine.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
