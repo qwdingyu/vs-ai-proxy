@@ -25,11 +25,12 @@
     .brand-title { font-size: 16px; font-weight: 800; }
     .brand-version { color: var(--muted); font-size: 11px; font-weight: 500; }
     .nav { display: flex; gap: 6px; padding: 3px; border: 1px solid rgba(48,54,61,0.7); border-radius: 10px; background: rgba(1,4,9,0.28); }
-    .nav-item { position: relative; color: var(--muted); text-decoration: none; padding: 7px 11px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; transition: color .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease; }
+    .nav-item { position: relative; color: var(--muted); text-decoration: none; padding: 7px 11px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; transition: color .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
     .nav-item:hover { color: var(--text); border-color: rgba(88,166,255,0.22); background: rgba(88,166,255,0.06); }
     .nav-item:focus-visible { outline: 2px solid rgba(88,166,255,0.65); outline-offset: 2px; }
-    .nav-item.active, .nav-item[aria-current="page"] { color: #f0f6fc; border-color: rgba(88,166,255,0.36); background: linear-gradient(180deg, rgba(88,166,255,0.18), rgba(88,166,255,0.08)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 8px 22px rgba(0,0,0,0.18); }
-    .nav-item.active::after, .nav-item[aria-current="page"]::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 3px; height: 2px; border-radius: 999px; background: linear-gradient(90deg, var(--accent), #3fb950); }
+    .nav-item.active, .nav-item[aria-current="page"] { color: #f0f6fc; border-color: rgba(88,166,255,0.58); background: linear-gradient(180deg, rgba(88,166,255,0.28), rgba(88,166,255,0.12)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.12), 0 10px 24px rgba(0,0,0,0.22), 0 0 0 1px rgba(88,166,255,0.08); transform: translateY(-1px); }
+    .nav-item.active::before, .nav-item[aria-current="page"]::before { content: ""; position: absolute; left: 7px; top: 50%; width: 5px; height: 5px; border-radius: 999px; transform: translateY(-50%); background: #3fb950; box-shadow: 0 0 10px rgba(63,185,80,0.75); }
+    .nav-item.active::after, .nav-item[aria-current="page"]::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 2px; height: 2px; border-radius: 999px; background: linear-gradient(90deg, var(--accent), #3fb950); }
     .main { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
@@ -98,14 +99,14 @@
         <span class="brand-text"><span class="brand-title">VS AI Proxy</span><span class="brand-version" id="appVersion">版本加载中</span></span>
       </a></h1>
       <nav class="nav">
-        <a class="nav-item" href="#/config">配置</a>
-        <a class="nav-item" href="#/providers">提供商</a>
-        <a class="nav-item" href="#/models">模型</a>
-        <a class="nav-item" href="#/test">测试</a>
-        <a class="nav-item" href="#/monitor">监控</a>
-        <a class="nav-item" href="#/logs">日志</a>
-        <a class="nav-item" href="#/faq">FAQ</a>
-        <a class="nav-item" href="#/contact">联系我们</a>
+        <a class="nav-item" href="#/config" data-page="config">配置</a>
+        <a class="nav-item" href="#/providers" data-page="providers">提供商</a>
+        <a class="nav-item" href="#/models" data-page="models">模型</a>
+        <a class="nav-item" href="#/test" data-page="test">测试</a>
+        <a class="nav-item" href="#/monitor" data-page="monitor">监控</a>
+        <a class="nav-item" href="#/logs" data-page="logs">日志</a>
+        <a class="nav-item" href="#/faq" data-page="faq">FAQ</a>
+        <a class="nav-item" href="#/contact" data-page="contact">联系我们</a>
         <a class="nav-item" href="/admin/logout">退出</a>
       </nav>
     </header>
@@ -541,9 +542,10 @@
     };
 
     const setActiveNav = (page) => {
+      const currentPage = page || normalizePage();
       document.querySelectorAll('.nav-item[href^="#"]').forEach((el) => {
-        const target = (el.hash || '#/').replace('#/', '') || 'dashboard';
-        const isActive = target === page;
+        const target = el.dataset.page || el.getAttribute('href').replace(/^#\/?/, '') || 'dashboard';
+        const isActive = target === currentPage;
         el.classList.toggle('active', isActive);
         if (isActive) el.setAttribute('aria-current', 'page');
         else el.removeAttribute('aria-current');
@@ -915,8 +917,9 @@
       el.addEventListener('click', (e) => {
         e.preventDefault();
         // 读取链接的 hash 值作为页面标识，例如 "#/providers" -> "providers"
-        const page = (el.hash || '#/').replace('#/', '');
+        const page = el.dataset.page || el.getAttribute('href').replace(/^#\/?/, '');
         window.location.hash = '#/' + page;
+        setActiveNav(page || 'dashboard');
       });
     });
 
