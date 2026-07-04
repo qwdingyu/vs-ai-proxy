@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,61 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/internal/proxy"
 	"github.com/dingyuwang/vs-ai-proxy/internal/store"
 )
+
+func TestHandleCommandLinePrintsVersion(t *testing.T) {
+	oldVersion := version
+	version = "0.2.13"
+	t.Cleanup(func() { version = oldVersion })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	handled, exitCode := handleCommandLine([]string{"--version"}, &stdout, &stderr)
+
+	if !handled {
+		t.Fatalf("handled = false, want true")
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0; stderr=%s", exitCode, stderr.String())
+	}
+	if stdout.String() != "0.2.13\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestHandleCommandLineRejectsUnknownArgument(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	handled, exitCode := handleCommandLine([]string{"--unknown"}, &stdout, &stderr)
+
+	if !handled {
+		t.Fatalf("handled = false, want true")
+	}
+	if exitCode != 2 {
+		t.Fatalf("exitCode = %d, want 2", exitCode)
+	}
+}
+
+func TestRecoverableUpdateCheckErrorDoesNotFailCommand(t *testing.T) {
+	if !isRecoverableUpdateCheckError(errors.New("GitHub API 匿名访问已触发限流；请设置 GITHUB_TOKEN")) {
+		t.Fatalf("rate limit with token hint should be recoverable")
+	}
+	if isRecoverableUpdateCheckError(errors.New("network unreachable")) {
+		t.Fatalf("unrelated errors should not be recoverable")
+	}
+}
+
+func TestRestartArgsWithoutSelfUpdate(t *testing.T) {
+	args := restartArgsWithoutSelfUpdate([]string{"--self-update", "--version", "--check-update", "--update", "--update-dir", "/tmp/update", "--config", "x", "--update-dir=/tmp/other"})
+	want := []string{"--config", "x"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args = %#v, want %#v", args, want)
+		}
+	}
+}
 
 func TestLoadEnvFile(t *testing.T) {
 	dir := t.TempDir()

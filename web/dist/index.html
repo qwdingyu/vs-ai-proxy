@@ -59,6 +59,10 @@
     .search-item:hover { background: #161b22; }
     .search-item-name { font-weight: 600; color: var(--text); margin-bottom: 4px; }
     .search-item-meta { font-size: 12px; color: var(--muted); line-height: 1.4; }
+    .contact-card { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.6fr); gap: 16px; align-items: stretch; }
+    .contact-hero { background: linear-gradient(135deg, rgba(35,134,54,0.18), rgba(88,166,255,0.14)); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+    .qq-number { font-size: 34px; font-weight: 800; letter-spacing: 1px; color: #f0f6fc; margin: 10px 0; }
+    .contact-list { margin: 12px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.8; }
   </style>
 </head>
 <body>
@@ -72,6 +76,7 @@
         <a class="nav-item" href="#/test">测试</a>
         <a class="nav-item" href="#/monitor">监控</a>
         <a class="nav-item" href="#/logs">日志</a>
+        <a class="nav-item" href="#/contact">联系我们</a>
         <a class="nav-item" href="/admin/logout">退出</a>
       </nav>
     </header>
@@ -337,6 +342,29 @@
           </tbody>
         </table>
       </section>
+
+      <section id="page-contact" class="panel hidden">
+        <h2>联系我们</h2>
+        <div class="contact-card">
+          <div class="contact-hero">
+            <div class="label">官方交流群</div>
+            <div class="qq-number">390485182</div>
+            <p>欢迎加入 VS AI Proxy QQ 群，一起交流 Visual Studio / Copilot BYOM、多 provider 路由、模型配置和部署经验。</p>
+            <p class="hint">加入群后可第一时间获取版本更新、踩坑记录和配置建议；群内也会不定期组织免费大模型体验活动。</p>
+            <div class="actions" style="justify-content:flex-start;">
+              <button class="btn primary" id="btnCopyQQ">复制 QQ 群号</button>
+            </div>
+          </div>
+          <div class="panel" style="margin:0;">
+            <div class="label">适合加入的人</div>
+            <ul class="contact-list">
+              <li>正在接入 Visual Studio / Copilot BYOM 的开发者</li>
+              <li>需要配置 DeepSeek、Ollama、OpenAI-compatible provider 的用户</li>
+              <li>想交流低成本大模型使用和代理路由实践的团队</li>
+            </ul>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -483,7 +511,7 @@
 
     // 页面切换：根据前端 hash 路由显示对应面板
     const showPage = (page) => {
-      ['dashboard', 'config', 'providers', 'models', 'test', 'monitor', 'logs'].forEach((name) => {
+      ['dashboard', 'config', 'providers', 'models', 'test', 'monitor', 'logs', 'contact'].forEach((name) => {
         const el = $('page-' + name);
         if (!el) return;
         if (name === page) el.classList.remove('hidden');
@@ -793,6 +821,15 @@
       await fetchJSON('/logs', { method: 'DELETE' });
       logCurrentPage = 1;
       loadLogs();
+    });
+    $('btnCopyQQ').addEventListener('click', async () => {
+      const group = '390485182';
+      try {
+        await navigator.clipboard.writeText(group);
+        setTestResult('已复制 QQ 群号', `QQ群：${group}`);
+      } catch (e) {
+        window.prompt('复制 QQ 群号', group);
+      }
     });
 
     $('btnReloadConfig').addEventListener('click', loadConfig);

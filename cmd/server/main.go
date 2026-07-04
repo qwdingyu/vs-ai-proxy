@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/internal/log"
 	"github.com/dingyuwang/vs-ai-proxy/internal/proxy"
 	"github.com/dingyuwang/vs-ai-proxy/internal/store"
+	"github.com/dingyuwang/vs-ai-proxy/internal/update"
 	"github.com/dingyuwang/vs-ai-proxy/web"
 )
 
@@ -30,6 +33,10 @@ var version = "dev"
 // 负责组装配置、日志、存储、代理服务与 API 服务，
 // 并监听系统退出信号完成优雅停止。
 func main() {
+	if handled, exitCode := handleCommandLine(os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(exitCode)
+	}
+
 	// 创建控制台日志器
 	logger := log.NewConsole()
 
@@ -105,6 +112,144 @@ func main() {
 		logger.Warn("保存请求日志失败: %v", err)
 	}
 	logger.Info("服务已停止")
+}
+
+func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
+	flags := flag.NewFlagSet("vs-ai-proxy", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	showVersion := flags.Bool("version", false, "print version and exit")
+	checkUpdate := flags.Bool("check-update", false, "check GitHub Releases for a newer version")
+	doUpdate := flags.Bool("update", false, "check for a newer version and download the matching release asset")
+	doSelfUpdate := flags.Bool("self-update", false, "download, install, and restart into the latest release")
+	updateDir := flags.String("update-dir", "", "directory for downloaded updates; default is <config-dir>/updates")
+	if err := flags.Parse(args); err != nil {
+		return true, 2
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintf(stderr, "未知参数: %s\n", strings.Join(flags.Args(), " "))
+		return true, 2
+	}
+	if *showVersion && !*checkUpdate && !*doUpdate && !*doSelfUpdate {
+		fmt.Fprintln(stdout, version)
+		return true, 0
+	}
+	if *checkUpdate || *doUpdate || *doSelfUpdate {
+		dir := strings.TrimSpace(*updateDir)
+		if dir == "" {
+			dir = filepath.Join(config.DefaultConfigDir(), "updates")
+		}
+		opts := update.Options{CurrentVersion: version, TargetDir: dir}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if *doSelfUpdate {
+			result, err := update.SelfUpdate(ctx, opts)
+			if err != nil {
+				fmt.Fprintf(stderr, "自更新失败: %v\n", err)
+				return true, 1
+			}
+			if !result.UpdateAvailable {
+				fmt.Fprintf(stdout, "当前已是最新版本: %s\n", result.CurrentVersion)
+				return true, 0
+			}
+			fmt.Fprintf(stdout, "已安装新版本: %s\n", result.LatestTag)
+			fmt.Fprintf(stdout, "备份文件: %s\n", result.BackupPath)
+			restartArgs := restartArgsWithoutSelfUpdate(os.Args[1:])
+			if result.NeedsExternalApply {
+				if err := update.LaunchWindowsSelfUpdate(result, restartArgs); err != nil {
+					fmt.Fprintf(stderr, "启动 Windows 延迟替换失败: %v\n", err)
+					return true, 1
+				}
+				fmt.Fprintln(stdout, "已启动后台替换脚本，当前进程退出后会完成替换并重启。")
+				return true, 0
+			}
+			if err := update.LaunchReplacement(result.ExecutablePath, restartArgs); err != nil {
+				fmt.Fprintf(stderr, "新版已安装，但自动重启失败: %v\n", err)
+				return true, 1
+			}
+			fmt.Fprintln(stdout, "已启动新版进程，当前进程即将退出。")
+			return true, 0
+		}
+		if *doUpdate {
+			result, err := update.Download(ctx, opts)
+			if err != nil {
+				fmt.Fprintf(stderr, "更新失败: %v\n", err)
+				return true, 1
+			}
+			printDownloadResult(stdout, result)
+			return true, 0
+		}
+		result, err := update.Check(ctx, opts)
+		if err != nil {
+			if isRecoverableUpdateCheckError(err) {
+				fmt.Fprintf(stdout, "暂时无法检查更新: %v\n", err)
+				return true, 0
+			}
+			fmt.Fprintf(stderr, "检查更新失败: %v\n", err)
+			return true, 1
+		}
+		printCheckResult(stdout, result)
+		return true, 0
+	}
+	return false, 0
+}
+
+func restartArgsWithoutSelfUpdate(args []string) []string {
+	out := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--self-update" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--self-update=") {
+			continue
+		}
+		if arg == "--version" || arg == "--check-update" || arg == "--update" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--version=") || strings.HasPrefix(arg, "--check-update=") || strings.HasPrefix(arg, "--update=") {
+			continue
+		}
+		if arg == "--update-dir" && index+1 < len(args) {
+			index++
+			continue
+		}
+		if strings.HasPrefix(arg, "--update-dir=") {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+func isRecoverableUpdateCheckError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "GITHUB_TOKEN") || strings.Contains(message, "rate limit")
+}
+
+func printCheckResult(w io.Writer, result update.CheckResult) {
+	if !result.UpdateAvailable {
+		fmt.Fprintf(w, "当前已是最新版本: %s\n", result.CurrentVersion)
+		return
+	}
+	fmt.Fprintf(w, "发现新版本: %s -> %s\n", result.CurrentVersion, result.LatestTag)
+	fmt.Fprintf(w, "Release: %s\n", result.ReleaseURL)
+	fmt.Fprintf(w, "匹配资产: %s\n", result.AssetName)
+	fmt.Fprintln(w, "运行 --update 可自动下载更新包。")
+}
+
+func printDownloadResult(w io.Writer, result update.DownloadResult) {
+	if !result.UpdateAvailable {
+		fmt.Fprintf(w, "当前已是最新版本: %s\n", result.CurrentVersion)
+		return
+	}
+	fmt.Fprintf(w, "已下载新版本: %s\n", result.LatestTag)
+	fmt.Fprintf(w, "更新包: %s\n", result.ArchivePath)
+	fmt.Fprintf(w, "SHA256: %s\n", result.SHA256)
+	fmt.Fprintf(w, "已解压二进制: %s\n", result.BinaryPath)
+	fmt.Fprintln(w, "为避免破坏正在运行的进程，程序不会自动替换当前可执行文件。请停止服务后手动替换并重启。")
 }
 
 func loadDotEnv(logger *log.Logger) {
