@@ -4,6 +4,9 @@
 /server
 /dist/
 
+# 本地文档与排障记录（可能包含敏感信息）
+/docs/
+
 # 本地配置与运行时数据
 /.env
 /.vs-ai-proxy/
