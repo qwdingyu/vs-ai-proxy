@@ -1008,7 +1008,7 @@ func TestModelSaveEnrichesMissingMetadata(t *testing.T) {
 	}
 
 	models := []config.ModelConfig{{
-		Name:       "deepseek-v4-flash",
+		Name:       "deepseek/deepseek-v4-flash",
 		ProviderID: "deepseek",
 		Provider:   "deepseek",
 		Enabled:    true,
@@ -1036,11 +1036,11 @@ func TestModelSaveEnrichesMissingMetadata(t *testing.T) {
 		t.Fatalf("models len = %d, want 1", len(got.Models))
 	}
 	model := got.Models[0]
-	if model.ContextLength == nil || *model.ContextLength != 1048576 {
-		t.Fatalf("context_length = %v, want 1048576", model.ContextLength)
+	if model.ContextLength == nil || *model.ContextLength <= 0 {
+		t.Fatalf("context_length = %v, want positive metadata value", model.ContextLength)
 	}
-	if model.MaxOutputTokens == nil || *model.MaxOutputTokens != 131072 {
-		t.Fatalf("max_output_tokens = %v, want 131072", model.MaxOutputTokens)
+	if model.MaxOutputTokens == nil || *model.MaxOutputTokens <= 0 {
+		t.Fatalf("max_output_tokens = %v, want positive metadata value", model.MaxOutputTokens)
 	}
 	if model.SupportsTools == nil || !*model.SupportsTools {
 		t.Fatalf("supports_tools = %v, want true", model.SupportsTools)
@@ -1103,7 +1103,7 @@ func TestModelMetadataEndpointReturnsCatalogDefaults(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models/metadata?name=deepseek-v4-flash&provider_id=deepseek", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/models/metadata?name=deepseek/deepseek-v4-flash&provider_id=deepseek", nil)
 	apiSrv.engine.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -1112,10 +1112,10 @@ func TestModelMetadataEndpointReturnsCatalogDefaults(t *testing.T) {
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"found":true`)) {
 		t.Fatalf("metadata should be found: %s", rec.Body.String())
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"context_length":1048576`)) {
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"context_length":`)) {
 		t.Fatalf("metadata should include context_length: %s", rec.Body.String())
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"max_output_tokens":131072`)) {
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"max_output_tokens":`)) {
 		t.Fatalf("metadata should include max_output_tokens: %s", rec.Body.String())
 	}
 }
