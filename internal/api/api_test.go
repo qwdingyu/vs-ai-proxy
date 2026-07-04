@@ -176,6 +176,24 @@ func TestProviderHealthEndpointIncludesRegisteredProvidersWithoutTraffic(t *test
 	}
 }
 
+func TestVersionEndpointReturnsBuildVersion(t *testing.T) {
+	proxy.SetBuildVersion("dev")
+	t.Cleanup(func() { proxy.SetBuildVersion("dev") })
+	proxy.SetBuildVersion("v9.9.9-test")
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/version status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"version":"v9.9.9-test"`)) {
+		t.Fatalf("version response = %s", rec.Body.String())
+	}
+}
+
 func TestAdminManagementAPIRoutesWorkAndAreNotCached(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 
@@ -285,6 +303,31 @@ func TestAdminRouteRequiresLoginWhenConfigured(t *testing.T) {
 	}
 	if !cleared {
 		t.Fatalf("logout did not clear %s cookie: %v", adminSessionCookieName, logout.Result().Cookies())
+	}
+}
+
+func TestAdminStaticFAQImagesAreServed(t *testing.T) {
+	apiSrv, _ := newAPITestHarnessWithStaticFS(t, fstest.MapFS{
+		"index.html":                    {Data: []byte("admin-app")},
+		"assets/images/vs-config-1.png": {Data: []byte("png-1")},
+		"assets/images/vs-config-2.png": {Data: []byte("png-2")},
+		"assets/images/vs-config-3.png": {Data: []byte("png-3")},
+	})
+
+	for _, path := range []string{
+		"/admin/assets/images/vs-config-1.png",
+		"/admin/assets/images/vs-config-2.png",
+		"/admin/assets/images/vs-config-3.png",
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		apiSrv.engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d; body=%s", path, rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if !strings.HasPrefix(rec.Header().Get("Content-Type"), "image/png") {
+			t.Fatalf("GET %s Content-Type = %q, want image/png", path, rec.Header().Get("Content-Type"))
+		}
 	}
 }
 

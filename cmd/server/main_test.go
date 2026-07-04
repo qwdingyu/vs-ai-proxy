@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/internal/log"
 	"github.com/dingyuwang/vs-ai-proxy/internal/proxy"
 	"github.com/dingyuwang/vs-ai-proxy/internal/store"
+	"github.com/dingyuwang/vs-ai-proxy/internal/update"
 )
 
 func TestHandleCommandLinePrintsVersion(t *testing.T) {
@@ -35,6 +38,19 @@ func TestHandleCommandLinePrintsVersion(t *testing.T) {
 	}
 	if stdout.String() != "0.2.13\n" {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestResolveBuildVersionUsesInjectedVersion(t *testing.T) {
+	if got := resolveBuildVersion("v0.2.16"); got != "v0.2.16" {
+		t.Fatalf("resolveBuildVersion() = %q, want v0.2.16", got)
+	}
+}
+
+func TestResolveBuildVersionUsesEnvFallback(t *testing.T) {
+	t.Setenv("VS_AI_PROXY_VERSION", "v9.9.9-env")
+	if got := resolveBuildVersion("dev"); got != "v9.9.9-env" {
+		t.Fatalf("resolveBuildVersion() = %q, want v9.9.9-env", got)
 	}
 }
 
@@ -70,6 +86,98 @@ func TestRestartArgsWithoutSelfUpdate(t *testing.T) {
 		if args[i] != want[i] {
 			t.Fatalf("args = %#v, want %#v", args, want)
 		}
+	}
+}
+
+func TestAutoSelfUpdateOnStartupLaunchesWindowsApply(t *testing.T) {
+	oldVersion := version
+	oldSelfUpdate := selfUpdateFn
+	oldLaunchWindows := launchWindowsSelfUpdateFn
+	t.Cleanup(func() {
+		version = oldVersion
+		selfUpdateFn = oldSelfUpdate
+		launchWindowsSelfUpdateFn = oldLaunchWindows
+	})
+
+	version = "v0.2.14"
+	selfUpdateFn = func(_ context.Context, opts update.Options) (update.SelfUpdateResult, error) {
+		if opts.CurrentVersion != "v0.2.14" {
+			t.Fatalf("CurrentVersion = %q, want v0.2.14", opts.CurrentVersion)
+		}
+		return update.SelfUpdateResult{
+			DownloadResult: update.DownloadResult{CheckResult: update.CheckResult{
+				CurrentVersion:  "v0.2.14",
+				LatestTag:       "v0.2.15",
+				UpdateAvailable: true,
+			}},
+			ExecutablePath:     `C:\\apps\\vs-ai-proxy.exe`,
+			BackupPath:         `C:\\apps\\vs-ai-proxy.exe.bak`,
+			NeedsExternalApply: true,
+		}, nil
+	}
+	var launched bool
+	launchWindowsSelfUpdateFn = func(result update.SelfUpdateResult, args []string) error {
+		launched = true
+		if result.LatestTag != "v0.2.15" {
+			t.Fatalf("LatestTag = %q, want v0.2.15", result.LatestTag)
+		}
+		want := []string{"--config", "prod.toml"}
+		if len(args) != len(want) || args[0] != want[0] || args[1] != want[1] {
+			t.Fatalf("args = %#v, want %#v", args, want)
+		}
+		return nil
+	}
+
+	var logs bytes.Buffer
+	logger := log.New(&logs, log.LevelInfo, false)
+	if !autoSelfUpdateOnStartup(logger, []string{"--self-update", "--config", "prod.toml"}) {
+		t.Fatalf("autoSelfUpdateOnStartup() = false, want true")
+	}
+	if !launched {
+		t.Fatalf("LaunchWindowsSelfUpdate was not called")
+	}
+}
+
+func TestAutoSelfUpdateOnStartupContinuesWhenCheckFails(t *testing.T) {
+	oldVersion := version
+	oldSelfUpdate := selfUpdateFn
+	t.Cleanup(func() {
+		version = oldVersion
+		selfUpdateFn = oldSelfUpdate
+	})
+
+	version = "0.2.14"
+	selfUpdateFn = func(context.Context, update.Options) (update.SelfUpdateResult, error) {
+		return update.SelfUpdateResult{}, errors.New("network unavailable")
+	}
+
+	var logs bytes.Buffer
+	logger := log.New(&logs, log.LevelInfo, false)
+	if autoSelfUpdateOnStartup(logger, nil) {
+		t.Fatalf("autoSelfUpdateOnStartup() = true, want false")
+	}
+	if !strings.Contains(logs.String(), "继续启动当前版本") {
+		t.Fatalf("logs = %q, want continue message", logs.String())
+	}
+}
+
+func TestAutoSelfUpdateOnStartupSkipsDevVersion(t *testing.T) {
+	oldVersion := version
+	oldSelfUpdate := selfUpdateFn
+	t.Cleanup(func() {
+		version = oldVersion
+		selfUpdateFn = oldSelfUpdate
+	})
+
+	version = "dev"
+	selfUpdateFn = func(context.Context, update.Options) (update.SelfUpdateResult, error) {
+		t.Fatalf("selfUpdateFn should not be called for dev version")
+		return update.SelfUpdateResult{}, nil
+	}
+
+	logger := log.New(io.Discard, log.LevelInfo, false)
+	if autoSelfUpdateOnStartup(logger, nil) {
+		t.Fatalf("autoSelfUpdateOnStartup() = true, want false")
 	}
 }
 

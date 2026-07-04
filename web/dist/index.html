@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>VS AI Proxy</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='10' y1='8' x2='54' y2='56'%3E%3Cstop stop-color='%2358a6ff'/%3E%3Cstop offset='1' stop-color='%233fb950'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='%230f1115'/%3E%3Cpath d='M14 19l12 27 6-14 6 14 12-27h-8l-5 13-5-13h-8l-5 13-5-13z' fill='url(%23g)'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%23f0f6fc'/%3E%3C/svg%3E" />
   <style>
     :root {
       --bg: #0f1115;
@@ -16,9 +17,13 @@
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
     .page { min-height: 100vh; }
-    .header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: rgba(15,17,21,0.9); backdrop-filter: blur(6px); }
+    .header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: rgba(15,17,21,0.9); backdrop-filter: blur(6px); z-index: 10; }
     .header h1 { font-size: 16px; margin: 0; }
-    .brand { color: var(--text); text-decoration: none; cursor: pointer; }
+    .brand { color: var(--text); text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; }
+    .brand-logo { width: 32px; height: 32px; flex: 0 0 auto; }
+    .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+    .brand-title { font-size: 16px; font-weight: 800; }
+    .brand-version { color: var(--muted); font-size: 11px; font-weight: 500; }
     .nav { display: flex; gap: 10px; }
     .nav-item { color: var(--text); text-decoration: none; padding: 6px 10px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
     .nav-item:hover { border-color: var(--border); }
@@ -49,6 +54,11 @@
     .hidden { display: none; }
     .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .hero-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.8fr); gap: 14px; align-items: stretch; margin-bottom: 16px; }
+    .hero-card { background: linear-gradient(135deg, rgba(88,166,255,0.18), rgba(63,185,80,0.12)); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+    .hero-card h2 { margin-top: 0; }
+    .feature-list { margin: 10px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.75; }
+    .quick-card { background: #0f1115; border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
     .stack { display: flex; flex-direction: column; gap: 12px; }
     .pre { white-space: pre-wrap; word-break: break-word; background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 280px; overflow: auto; }
     .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #0f1115; font-size: 12px; }
@@ -63,12 +73,27 @@
     .contact-hero { background: linear-gradient(135deg, rgba(35,134,54,0.18), rgba(88,166,255,0.14)); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
     .qq-number { font-size: 34px; font-weight: 800; letter-spacing: 1px; color: #f0f6fc; margin: 10px 0; }
     .contact-list { margin: 12px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.8; }
+    .faq-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+    .guide-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .guide-img { width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #0f1115; }
+    .faq-list details { background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 10px; }
+    .faq-list summary { cursor: pointer; font-weight: 700; }
+    .faq-list p { color: var(--muted); line-height: 1.7; }
+    @media (max-width: 900px) { .header { align-items: flex-start; flex-direction: column; } .nav { flex-wrap: wrap; } .stats, .grid-2, .grid-3, .hero-grid, .contact-card, .guide-steps { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="page">
     <header class="header">
-      <h1><a class="brand" href="#/">VS AI Proxy</a></h1>
+      <h1><a class="brand" href="#/" aria-label="VS AI Proxy 首页">
+        <svg class="brand-logo" viewBox="0 0 64 64" role="img" aria-label="VS AI Proxy logo">
+          <defs><linearGradient id="logoGradient" x1="10" y1="8" x2="54" y2="56"><stop stop-color="#58a6ff"/><stop offset="1" stop-color="#3fb950"/></linearGradient></defs>
+          <rect width="64" height="64" rx="16" fill="#0f1115" stroke="#30363d"/>
+          <path d="M14 19l12 27 6-14 6 14 12-27h-8l-5 13-5-13h-8l-5 13-5-13z" fill="url(#logoGradient)"/>
+          <circle cx="32" cy="32" r="5" fill="#f0f6fc"/>
+        </svg>
+        <span class="brand-text"><span class="brand-title">VS AI Proxy</span><span class="brand-version" id="appVersion">版本加载中</span></span>
+      </a></h1>
       <nav class="nav">
         <a class="nav-item" href="#/config">配置</a>
         <a class="nav-item" href="#/providers">提供商</a>
@@ -76,6 +101,7 @@
         <a class="nav-item" href="#/test">测试</a>
         <a class="nav-item" href="#/monitor">监控</a>
         <a class="nav-item" href="#/logs">日志</a>
+        <a class="nav-item" href="#/faq">FAQ</a>
         <a class="nav-item" href="#/contact">联系我们</a>
         <a class="nav-item" href="/admin/logout">退出</a>
       </nav>
@@ -83,6 +109,24 @@
 
     <main class="main">
       <section id="page-dashboard" class="panel">
+        <div class="hero-grid">
+          <div class="hero-card">
+            <h2>让 Visual Studio / Copilot 快速接入你的模型</h2>
+            <p class="hint">VS AI Proxy 是一个轻量代理面板，用来统一管理 OpenAI-compatible、DeepSeek、Ollama 等 provider，并兼容 Visual Studio / Copilot 的模型发现和聊天接口。</p>
+            <ul class="feature-list">
+              <li>一个端口同时提供代理接口和 Web 管理面板。</li>
+              <li>支持多 provider、多模型、优先级路由和连接测试。</li>
+              <li>提供请求统计、日志排障和正式版本自动更新。</li>
+            </ul>
+          </div>
+          <div class="quick-card">
+            <div class="label">官方交流群</div>
+            <div class="qq-number">390485182</div>
+            <p class="hint">加入 QQ 群获取配置帮助、版本更新提醒和不定期免费大模型活动。</p>
+            <button class="btn primary" id="btnCopyQQHome">复制 QQ 群号</button>
+          </div>
+        </div>
+
         <h2>快速状态</h2>
         <div class="stats">
           <div class="stat">
@@ -365,6 +409,39 @@
           </div>
         </div>
       </section>
+
+      <section id="page-faq" class="panel hidden">
+        <h2>FAQ 与操作说明</h2>
+        <div class="faq-layout">
+          <div class="panel" style="margin:0;">
+            <h3>Visual Studio / Copilot 配置步骤</h3>
+            <p class="hint">在 Visual Studio 中把 BYOM / Copilot 相关地址指向 VS AI Proxy；不同 VS 版本入口可能略有差异，以截图中的配置项为准。</p>
+            <div class="guide-steps">
+              <div>
+                <img class="guide-img" src="/admin/assets/images/vs-config-1.png" alt="Visual Studio 配置入口截图 1" />
+                <p class="hint">1. 打开 Visual Studio 的 Copilot / BYOM 相关设置。</p>
+              </div>
+              <div>
+                <img class="guide-img" src="/admin/assets/images/vs-config-2.png" alt="Visual Studio 配置入口截图 2" />
+                <p class="hint">2. 填写本机代理地址，例如 `http://127.0.0.1:12345`。</p>
+              </div>
+              <div>
+                <img class="guide-img" src="/admin/assets/images/vs-config-3.png" alt="Visual Studio 配置入口截图 3" />
+                <p class="hint">3. 保存后回到本页面用“测试”页确认 provider 和模型可用。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="faq-list">
+            <details open><summary>启动后应该打开哪个页面？</summary><p>默认管理面板是 `http://127.0.0.1:12345/admin`。如果修改了端口，请使用配置中的实际端口。</p></details>
+            <details><summary>为什么 Windows 双击看起来没反应？</summary><p>这是控制台程序，不是桌面 GUI。建议从 PowerShell 启动查看日志，或启动后直接打开管理面板地址。</p></details>
+            <details><summary>如何确认当前运行版本？</summary><p>页面左上角会显示当前版本；命令行也可以运行 `vs-ai-proxy --version`。</p></details>
+            <details><summary>配置保存时提示 provider_id 不存在怎么办？</summary><p>模型绑定的 `provider_id` 必须等于某个 `providers[].id`。如果希望自动按优先级路由，可以留空。</p></details>
+            <details><summary>没有配置 GITHUB_TOKEN 会影响使用吗？</summary><p>不会影响代理功能。只有 GitHub 匿名 API 被限流时，版本检查可能提示稍后重试或配置 token。</p></details>
+            <details><summary>如何获得帮助？</summary><p>加入 QQ 群 `390485182`，可交流 Visual Studio / Copilot BYOM、provider 配置、部署和模型路由问题。</p></details>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -511,7 +588,7 @@
 
     // 页面切换：根据前端 hash 路由显示对应面板
     const showPage = (page) => {
-      ['dashboard', 'config', 'providers', 'models', 'test', 'monitor', 'logs', 'contact'].forEach((name) => {
+      ['dashboard', 'config', 'providers', 'models', 'test', 'monitor', 'logs', 'faq', 'contact'].forEach((name) => {
         const el = $('page-' + name);
         if (!el) return;
         if (name === page) el.classList.remove('hidden');
@@ -524,6 +601,25 @@
       if (page === 'test') loadTestLab();
       if (page === 'monitor') loadMonitor();
       if (page === 'logs') loadLogs();
+    };
+
+    const loadVersion = async () => {
+      try {
+        const info = await fetchJSON('/version');
+        $('appVersion').textContent = info.version ? `当前版本 ${info.version}` : '当前版本未知';
+      } catch (e) {
+        $('appVersion').textContent = '版本获取失败';
+      }
+    };
+
+    const copyQQGroup = async () => {
+      const group = '390485182';
+      try {
+        await navigator.clipboard.writeText(group);
+        setTestResult('已复制 QQ 群号', `QQ群：${group}`);
+      } catch (e) {
+        window.prompt('复制 QQ 群号', group);
+      }
     };
 
     // 加载仪表盘统计数据与最近日志
@@ -822,15 +918,8 @@
       logCurrentPage = 1;
       loadLogs();
     });
-    $('btnCopyQQ').addEventListener('click', async () => {
-      const group = '390485182';
-      try {
-        await navigator.clipboard.writeText(group);
-        setTestResult('已复制 QQ 群号', `QQ群：${group}`);
-      } catch (e) {
-        window.prompt('复制 QQ 群号', group);
-      }
-    });
+    $('btnCopyQQ').addEventListener('click', copyQQGroup);
+    $('btnCopyQQHome').addEventListener('click', copyQQGroup);
 
     $('btnReloadConfig').addEventListener('click', loadConfig);
     $('btnSaveConfig').addEventListener('click', async () => {
@@ -1181,6 +1270,7 @@
 
     // 初始页面加载时读取当前 hash 并渲染对应面板
     document.addEventListener('DOMContentLoaded', () => {
+      loadVersion();
       showPage(normalizePage());
     });
   </script>

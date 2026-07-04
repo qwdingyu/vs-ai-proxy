@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -29,10 +30,20 @@ import (
 
 var version = "dev"
 
+var (
+	selfUpdateFn              = update.SelfUpdate
+	launchReplacementFn       = update.LaunchReplacement
+	launchWindowsSelfUpdateFn = update.LaunchWindowsSelfUpdate
+)
+
+const startupUpdateTimeout = 10 * time.Second
+
 // main 进程入口
 // 负责组装配置、日志、存储、代理服务与 API 服务，
 // 并监听系统退出信号完成优雅停止。
 func main() {
+	version = resolveBuildVersion(version)
+
 	if handled, exitCode := handleCommandLine(os.Args[1:], os.Stdout, os.Stderr); handled {
 		os.Exit(exitCode)
 	}
@@ -41,6 +52,9 @@ func main() {
 	logger := log.NewConsole()
 
 	loadDotEnv(logger)
+	if autoSelfUpdateOnStartup(logger, os.Args[1:]) {
+		os.Exit(0)
+	}
 
 	// 初始化配置管理器；优先使用 CONFIG_PATH 环境变量指定的配置文件
 	configPath := os.Getenv("CONFIG_PATH")
@@ -112,6 +126,111 @@ func main() {
 		logger.Warn("保存请求日志失败: %v", err)
 	}
 	logger.Info("服务已停止")
+}
+
+func resolveBuildVersion(value string) string {
+	value = strings.TrimSpace(value)
+	if value != "" && value != "dev" {
+		return value
+	}
+	if envVersion := strings.TrimSpace(os.Getenv("VS_AI_PROXY_VERSION")); envVersion != "" {
+		return envVersion
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Version != "" && info.Main.Version != "(devel)" {
+			return info.Main.Version
+		}
+		var revision string
+		var modified bool
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = strings.TrimSpace(setting.Value)
+			case "vcs.modified":
+				modified = setting.Value == "true"
+			}
+		}
+		if revision != "" {
+			if len(revision) > 12 {
+				revision = revision[:12]
+			}
+			if modified {
+				return revision + "-dirty"
+			}
+			return revision
+		}
+	}
+	return "dev"
+}
+
+func autoSelfUpdateOnStartup(logger *log.Logger, args []string) bool {
+	if !autoUpdateEnabled() {
+		logger.Info("启动自动更新已关闭")
+		return false
+	}
+	if !isReleaseVersion(version) {
+		return false
+	}
+
+	dir := filepath.Join(config.DefaultConfigDir(), "updates")
+	opts := update.Options{CurrentVersion: version, TargetDir: dir}
+	ctx, cancel := context.WithTimeout(context.Background(), startupUpdateTimeout)
+	defer cancel()
+
+	result, err := selfUpdateFn(ctx, opts)
+	if err != nil {
+		logger.Warn("启动自动更新检查失败，继续启动当前版本: %v", err)
+		return false
+	}
+	if !result.UpdateAvailable {
+		logger.Info("当前已是最新版本: %s", result.CurrentVersion)
+		return false
+	}
+
+	logger.Info("发现并安装新版本: %s -> %s", result.CurrentVersion, result.LatestTag)
+	logger.Info("旧版本备份文件: %s", result.BackupPath)
+	restartArgs := restartArgsWithoutSelfUpdate(args)
+	if result.NeedsExternalApply {
+		if err := launchWindowsSelfUpdateFn(result, restartArgs); err != nil {
+			logger.Warn("启动 Windows 延迟替换失败，继续启动当前版本: %v", err)
+			return false
+		}
+		logger.Info("已启动后台替换脚本，当前进程退出后会完成替换并重启。")
+		return true
+	}
+	if err := launchReplacementFn(result.ExecutablePath, restartArgs); err != nil {
+		logger.Warn("新版已安装，但自动重启失败，继续启动当前版本: %v", err)
+		return false
+	}
+	logger.Info("已启动新版进程，当前进程即将退出。")
+	return true
+}
+
+func autoUpdateEnabled() bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("VS_AI_PROXY_AUTO_UPDATE")))
+	return value != "0" && value != "false" && value != "no" && value != "off"
+}
+
+func isReleaseVersion(value string) bool {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "v"))
+	if value == "" || value == "dev" || strings.Contains(value, "dirty") {
+		return false
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) < 3 {
+		return false
+	}
+	for _, part := range parts[:3] {
+		if part == "" {
+			return false
+		}
+		for _, char := range part {
+			if char < '0' || char > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {

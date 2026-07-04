@@ -60,7 +60,15 @@ http://127.0.0.1:12345/admin
 ./vs-ai-proxy --update --update-dir /tmp/vs-ai-proxy-update
 ```
 
-说明：`--update` 只下载并解压更新包；`--self-update` 会下载、校验、备份当前二进制、替换为新版，并自动切换到新版进程。macOS/Linux 使用原地进程切换，Windows 使用延迟替换脚本。若替换失败，会尝试回滚到备份文件。
+说明：正式版本普通启动时会先自动检查更新；如果发现 GitHub Release 中存在更新版本，会下载、校验、备份当前二进制、替换为新版，并自动切换到新版进程。macOS/Linux 使用原地进程切换，Windows 使用延迟替换脚本。若检查或替换失败，程序会记录警告并继续启动当前版本，避免因为 GitHub 网络或权限问题阻断服务。
+
+如需关闭启动自动更新，可设置：
+
+```bash
+VS_AI_PROXY_AUTO_UPDATE=0 ./vs-ai-proxy
+```
+
+`--update` 只下载并解压更新包；`--self-update` 会立即执行同样的全自动安装和重启流程，适合在命令行中主动触发升级。
 
 如果没有配置 `GITHUB_TOKEN`，程序仍可检查更新；只有遇到 GitHub 匿名 API 限流时，才会提示稍后重试或设置 token。可选配置：
 
@@ -117,7 +125,16 @@ http://127.0.0.1:12345
 
 ```bash
 go test ./...
-go build -ldflags='-s -w -X main.version=dev' -o vs-ai-proxy ./cmd/server
+make build
+./vs-ai-proxy --version
+```
+
+不建议直接运行裸 `go build ./cmd/server` 作为发布构建；请通过 `make build` 或 release workflow 注入版本号，避免 Web 页面和 `--version` 显示为开发兜底版本。
+
+Docker 构建时同样建议传入版本号：
+
+```bash
+docker build --build-arg VERSION="$(git describe --tags --always --dirty)" -t vs-ai-proxy:local .
 ```
 
 跨平台 Release 包由 GitHub Actions 构建。维护者发布时使用：

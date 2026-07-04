@@ -39,13 +39,13 @@ all: build
 
 # ─── 构建当前平台 ──────────────────────────────────────
 build:
-	@echo "🔨 构建 $(APP_NAME) v$(VERSION) 当前平台..."
+	@echo "🔨 构建 $(APP_NAME) $(VERSION) 当前平台..."
 	go build -ldflags="$(LDFLAGS)" -o $(APP_NAME)$(suffix $(shell go env GOOS))$(if $(filter windows,$(shell go env GOOS)),.exe,) $(MAIN_PATH)
 	@echo "✅ 构建完成: $(APP_NAME)$(if $(filter windows,$(shell go env GOOS)),.exe,)"
 
 # ─── 构建所有平台 ──────────────────────────────────────
 build-all:
-	@echo "🔨 构建 $(APP_NAME) v$(VERSION) 所有平台..."
+	@echo "🔨 构建 $(APP_NAME) $(VERSION) 所有平台..."
 	@mkdir -p $(OUTPUT_DIR)
 	@for plat in $(PLATFORMS); do \
 		GOOS=$$(echo $$plat | cut -d/ -f1); \

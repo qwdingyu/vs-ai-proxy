@@ -281,6 +281,7 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 	group := s.engine.Group(prefix)
 
 	// 配置相关
+	group.GET("/version", s.getVersion)
 	group.GET("/config", s.getConfig)
 	group.POST("/config/validate", s.validateConfig)
 	group.PUT("/config", s.saveConfig)
@@ -309,6 +310,10 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 
 	// 统计相关
 	group.GET("/statistics", s.getStatistics)
+}
+
+func (s *Server) getVersion(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"version": s.proxy.Version()})
 }
 
 // getConfig 获取当前配置快照

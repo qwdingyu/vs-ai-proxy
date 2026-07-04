@@ -30,12 +30,45 @@ jobs:
         run: go vet ./...
 
       - name: 编译（当前平台）
-        run: go build ./cmd/server
+        run: make build
+
+      - name: 校验构建版本
+        run: |
+          version="$(./vs-ai-proxy --version)"
+          echo "built version: ${version}"
+          test -n "${version}"
+          test "${version}" != "dev"
+
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 关键包测试
+        shell: bash
+        run: go test ./cmd/server ./internal/update ./internal/api -count=1
+
+      - name: Windows 构建版本校验
+        shell: bash
+        run: |
+          version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+          go build -ldflags="-s -w -X main.version=${version}" -o vs-ai-proxy.exe ./cmd/server
+          built="$(./vs-ai-proxy.exe --version)"
+          echo "built version: ${built}"
+          test "${built}" = "${version}"
+          test "${built}" != "dev"
 
   # ─── 全平台构建 + 发布 ─────────────────────
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: check
+    needs: [check, windows-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write  # 允许创建 Release
