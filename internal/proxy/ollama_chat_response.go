@@ -61,6 +61,12 @@ func buildOllamaChatResponse(model string, resp *provider.ChatResponse) map[stri
 		}
 		if len(src.ToolCalls) > 0 {
 			message["tool_calls"] = src.ToolCalls
+		} else if src.FunctionCall != nil {
+			message["tool_calls"] = []map[string]any{{
+				"id":       "function_call",
+				"type":     "function",
+				"function": src.FunctionCall,
+			}}
 		}
 	}
 

@@ -20,7 +20,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		items = append(items, buildOpenAIModelItem(entry, cfg))
+		items = append(items, buildOpenAIModelItem(entry, catalog, cfg))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -30,23 +30,34 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func buildOpenAIModelItem(entry provider.CatalogEntry, cfg *config.AppConfig) map[string]any {
+func buildOpenAIModelItem(entry provider.CatalogEntry, catalog *provider.ModelCatalog, cfg *config.AppConfig) map[string]any {
 	upstream := strings.TrimSpace(entry.UpstreamModel)
 	if upstream == "" {
 		upstream = strings.TrimSpace(entry.Model)
 	}
 	providerName := strings.TrimSpace(entry.Provider)
 	identity := provider.NewModelIdentityWithDisplay(upstream, providerName, providerDisplayNameFromConfig(cfg, providerName))
+	meta := modelCapabilityMeta(cfg, catalog, upstream, entry.Model, providerName)
 
 	return map[string]any{
-		"id":             entry.Model,
-		"object":         "model",
-		"created":        1700000000,
-		"owned_by":       coalesceString(providerName, "unknown"),
-		"display_name":   identity.Display,
-		"upstream_model": identity.Upstream,
-		"canonical":      identity.Qualified,
-		"aliases":        identity.Aliases,
+		"id":                  entry.Model,
+		"object":              "model",
+		"created":             1700000000,
+		"owned_by":            coalesceString(providerName, "unknown"),
+		"display_name":        identity.Display,
+		"upstream_model":      identity.Upstream,
+		"canonical":           identity.Qualified,
+		"aliases":             identity.Aliases,
+		"capabilities":        meta.capabilities(),
+		"context_length":      meta.contextLength,
+		"max_output_tokens":   meta.maxOutputTokens,
+		"input_token_limit":   meta.contextLength,
+		"output_token_limit":  meta.maxOutputTokens,
+		"supports_tools":      meta.supportsTools,
+		"supports_tool_calls": meta.supportsTools,
+		"supports_vision":     meta.supportsVision,
+		"supports_images":     meta.supportsVision,
+		"model_info":          meta.modelInfo(identity.Basename),
 	}
 }
 
@@ -118,52 +129,7 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 	providerName := strings.TrimSpace(entry.Provider)
 	identity := provider.NewModelIdentityWithDisplay(model, providerName, providerDisplayNameFromConfig(cfg, providerName))
 
-	ctxLength := defaultContextLength
-	maxOutput := defaultMaxOutputTokens
-	supportsTools := true
-	supportsVision := false
-	family := coalesceString(providerName, "api")
-	// 先应用 config.json 中用户维护的模型能力，随后再让内置/发现 profile 覆盖更精确的能力。
-	// 这样 SenseNova 这类自定义 OpenAI-compatible provider 也能在 /api/tags 中展示 1M 上下文。
-	if modelCfg, ok := findModelConfig(cfg, model, model, providerName); ok {
-		if modelCfg.ContextLength != nil && *modelCfg.ContextLength > 0 {
-			ctxLength = *modelCfg.ContextLength
-		}
-		if modelCfg.MaxOutputTokens != nil && *modelCfg.MaxOutputTokens > 0 {
-			maxOutput = *modelCfg.MaxOutputTokens
-		}
-		if modelCfg.SupportsTools != nil {
-			supportsTools = *modelCfg.SupportsTools
-		}
-		if modelCfg.SupportsVision != nil {
-			supportsVision = *modelCfg.SupportsVision
-		}
-	}
-	if catalog != nil {
-		if profile, ok := catalog.Profile(model, providerName); ok {
-			if profile.ContextLength != nil && *profile.ContextLength > 0 {
-				ctxLength = *profile.ContextLength
-			}
-			if profile.MaxOutputTokens != nil && *profile.MaxOutputTokens > 0 {
-				maxOutput = *profile.MaxOutputTokens
-			}
-			if profile.SupportsTools != nil {
-				supportsTools = *profile.SupportsTools
-			}
-			if profile.SupportsVision != nil {
-				supportsVision = *profile.SupportsVision
-			}
-			family = coalesceString(profile.Family, family)
-		}
-	}
-
-	capabilities := []string{"completion"}
-	if supportsTools {
-		capabilities = append(capabilities, "tools")
-	}
-	if supportsVision {
-		capabilities = append(capabilities, "vision")
-	}
+	meta := modelCapabilityMeta(cfg, catalog, model, model, providerName)
 
 	// Visual Studio Copilot / BYOM 适配：
 	// name 是用户可见名称，不带 Ollama 本地模型习惯的 :latest，降低 VS 用户认知负担；
@@ -179,36 +145,112 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 		"details": map[string]any{
 			"parent_model":       "",
 			"format":             "api",
-			"family":             family,
-			"families":           []string{family},
+			"family":             meta.family,
+			"families":           []string{meta.family},
 			"parameter_size":     "api",
 			"quantization_level": "none",
 		},
-		"capabilities": capabilities,
+		"capabilities": meta.capabilities(),
 		// Visual Studio Copilot 适配：
 		// VS 模型发现会读取 token limit、tools、vision 等能力元数据来决定 UI 展示与请求能力。
 		// 这些字段不是上游 Ollama 原生必需项，但对 Copilot BYOM 体验很关键。
-		"context_length":      ctxLength,
-		"max_output_tokens":   maxOutput,
-		"input_token_limit":   ctxLength,
-		"output_token_limit":  maxOutput,
-		"supports_tools":      supportsTools,
-		"supports_tool_calls": supportsTools,
-		"supports_vision":     supportsVision,
-		"supports_images":     supportsVision,
-		"model_info": map[string]any{
-			"general.architecture":   family,
-			"general.basename":       identity.Basename,
-			"general.context_length": ctxLength,
-			"context_length":         ctxLength,
-			"max_output_tokens":      maxOutput,
-			"input_token_limit":      ctxLength,
-			"output_token_limit":     maxOutput,
-			"supports_tools":         supportsTools,
-			"supports_tool_calls":    supportsTools,
-			"supports_vision":        supportsVision,
-			"supports_images":        supportsVision,
-		},
+		"context_length":      meta.contextLength,
+		"max_output_tokens":   meta.maxOutputTokens,
+		"input_token_limit":   meta.contextLength,
+		"output_token_limit":  meta.maxOutputTokens,
+		"supports_tools":      meta.supportsTools,
+		"supports_tool_calls": meta.supportsTools,
+		"supports_vision":     meta.supportsVision,
+		"supports_images":     meta.supportsVision,
+		"model_info":          meta.modelInfo(identity.Basename),
+	}
+}
+
+type modelCapabilities struct {
+	contextLength   int
+	maxOutputTokens int
+	supportsTools   bool
+	supportsVision  bool
+	family          string
+}
+
+func modelCapabilityMeta(
+	cfg *config.AppConfig,
+	catalog *provider.ModelCatalog,
+	model string,
+	alias string,
+	providerName string,
+) modelCapabilities {
+	meta := modelCapabilities{
+		contextLength:   defaultContextLength,
+		maxOutputTokens: defaultMaxOutputTokens,
+		supportsTools:   true,
+		supportsVision:  false,
+		family:          coalesceString(providerName, "api"),
+	}
+
+	modelCfg, hasModelCfg := findModelConfig(cfg, model, alias, providerName)
+	if hasModelCfg {
+		if modelCfg.ContextLength != nil && *modelCfg.ContextLength > 0 {
+			meta.contextLength = *modelCfg.ContextLength
+		}
+		if modelCfg.MaxOutputTokens != nil && *modelCfg.MaxOutputTokens > 0 {
+			meta.maxOutputTokens = *modelCfg.MaxOutputTokens
+		}
+		if modelCfg.SupportsTools != nil {
+			meta.supportsTools = *modelCfg.SupportsTools
+		}
+		if modelCfg.SupportsVision != nil {
+			meta.supportsVision = *modelCfg.SupportsVision
+		}
+		meta.family = coalesceString(modelCfg.ProviderID, modelCfg.Provider, meta.family)
+	}
+	if catalog != nil {
+		if profile, ok := catalog.Profile(model, providerName); ok {
+			if (modelCfg.ContextLength == nil || *modelCfg.ContextLength <= 0) && profile.ContextLength != nil && *profile.ContextLength > 0 {
+				meta.contextLength = *profile.ContextLength
+			}
+			if (modelCfg.MaxOutputTokens == nil || *modelCfg.MaxOutputTokens <= 0) && profile.MaxOutputTokens != nil && *profile.MaxOutputTokens > 0 {
+				meta.maxOutputTokens = *profile.MaxOutputTokens
+			}
+			if (!hasModelCfg || modelCfg.SupportsTools == nil) && profile.SupportsTools != nil {
+				meta.supportsTools = *profile.SupportsTools
+			}
+			if (!hasModelCfg || modelCfg.SupportsVision == nil) && profile.SupportsVision != nil {
+				meta.supportsVision = *profile.SupportsVision
+			}
+			if !hasModelCfg || (strings.TrimSpace(modelCfg.ProviderID) == "" && strings.TrimSpace(modelCfg.Provider) == "") {
+				meta.family = coalesceString(profile.Family, meta.family)
+			}
+		}
+	}
+	return meta
+}
+
+func (m modelCapabilities) capabilities() []string {
+	capabilities := []string{"completion"}
+	if m.supportsTools {
+		capabilities = append(capabilities, "tools")
+	}
+	if m.supportsVision {
+		capabilities = append(capabilities, "vision")
+	}
+	return capabilities
+}
+
+func (m modelCapabilities) modelInfo(basename string) map[string]any {
+	return map[string]any{
+		"general.architecture":   m.family,
+		"general.basename":       basename,
+		"general.context_length": m.contextLength,
+		"context_length":         m.contextLength,
+		"max_output_tokens":      m.maxOutputTokens,
+		"input_token_limit":      m.contextLength,
+		"output_token_limit":     m.maxOutputTokens,
+		"supports_tools":         m.supportsTools,
+		"supports_tool_calls":    m.supportsTools,
+		"supports_vision":        m.supportsVision,
+		"supports_images":        m.supportsVision,
 	}
 }
 

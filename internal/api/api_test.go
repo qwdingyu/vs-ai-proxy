@@ -1219,6 +1219,9 @@ func TestManagementTestEndpoints(t *testing.T) {
 	if chatRec.Code != http.StatusOK || !bytes.Contains(chatRec.Body.Bytes(), []byte(`"success":true`)) {
 		t.Fatalf("test chat failed: status=%d body=%s", chatRec.Code, chatRec.Body.String())
 	}
+	if !bytes.Contains(chatRec.Body.Bytes(), []byte(`"provider_id":"openai"`)) || !bytes.Contains(chatRec.Body.Bytes(), []byte(`"model":"model-a"`)) {
+		t.Fatalf("test chat should include request context: %s", chatRec.Body.String())
+	}
 }
 
 func TestManagementTestChatHandlesEmptyChoices(t *testing.T) {
@@ -1254,6 +1257,45 @@ func TestManagementTestChatHandlesEmptyChoices(t *testing.T) {
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"success":false`)) {
 		t.Fatalf("empty choices should be a failed test result, got: %s", rec.Body.String())
+	}
+}
+
+func TestManagementTestChatRejectsModelBoundToDifferentProvider(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	cfg := apiSrv.configMgr.Get()
+	zhipuProvider := config.ProviderConfig{ID: "zhipu", Name: "zhipu", Type: "openai", BaseURL: upstream.URL, Enabled: true}
+	cfg.Providers = []config.ProviderConfig{zhipuProvider}
+	cfg.Models = []config.ModelConfig{{Name: "z-ai/glm-5.2", ProviderID: "usecpa", Provider: "usecpa", Enabled: true}}
+	if err := apiSrv.configMgr.Save(cfg); err != nil {
+		t.Fatalf("Save config: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": zhipuProvider,
+		"message":  "hello",
+		"model":    "z-ai/glm-5.2",
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"success":false`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`未绑定到当前提供商`)) {
+		t.Fatalf("wrong provider model should fail with friendly error: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"provider_id":"zhipu"`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"model":"z-ai/glm-5.2"`)) {
+		t.Fatalf("wrong provider response should include request context: %s", rec.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
 	}
 }
 

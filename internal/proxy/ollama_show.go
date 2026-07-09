@@ -22,39 +22,22 @@ func (s *Server) buildOllamaShowBody(
 	providerName := s.resolveProviderName(registry, model)
 	modelCfg, _ := findModelConfig(cfg, model, model, providerName)
 
-	ctxLength := intValue(modelCfg.ContextLength, defaultContextLength)
-	maxOutput := intValue(modelCfg.MaxOutputTokens, defaultMaxOutputTokens)
-	supportsTools := boolValue(modelCfg.SupportsTools, true)
-	supportsVision := boolValue(modelCfg.SupportsVision, false)
-	family := coalesceString(providerName, modelCfg.ProviderID, modelCfg.Provider, "api")
+	meta := modelCapabilityMeta(cfg, catalog, model, model, providerName)
 	exec := executionMapFromModelConfig(modelCfg)
 
 	if catalog != nil {
 		if profile, ok := catalog.Profile(model, providerName); ok {
-			if profile.ContextLength != nil && *profile.ContextLength > 0 {
-				ctxLength = *profile.ContextLength
-			}
-			if profile.MaxOutputTokens != nil && *profile.MaxOutputTokens > 0 {
-				maxOutput = *profile.MaxOutputTokens
-			}
-			if profile.SupportsTools != nil {
-				supportsTools = *profile.SupportsTools
-			}
-			if profile.SupportsVision != nil {
-				supportsVision = *profile.SupportsVision
-			}
-			family = coalesceString(profile.Family, family)
 			mergeProfileExecution(exec, profile)
 		}
 	}
 
 	return converter.BuildOllamaShowResponse(
 		model,
-		ctxLength,
-		maxOutput,
-		family,
-		supportsTools,
-		supportsVision,
+		meta.contextLength,
+		meta.maxOutputTokens,
+		meta.family,
+		meta.supportsTools,
+		meta.supportsVision,
 		exec,
 	)
 }
@@ -95,18 +78,4 @@ func mergeProfileExecution(exec map[string]any, profile provider.ModelProfile) {
 	if profile.TimeoutSeconds != nil {
 		exec["timeout_seconds"] = *profile.TimeoutSeconds
 	}
-}
-
-func intValue(value *int, fallback int) int {
-	if value == nil || *value <= 0 {
-		return fallback
-	}
-	return *value
-}
-
-func boolValue(value *bool, fallback bool) bool {
-	if value == nil {
-		return fallback
-	}
-	return *value
 }

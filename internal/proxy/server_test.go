@@ -176,6 +176,51 @@ func TestStreamOpenAIToOllamaWritesNDJSON(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamPayloadConvertsLegacyFunctionCall(t *testing.T) {
+	chunk, err := parseOpenAIStreamPayload(`{"choices":[{"delta":{"function_call":{"name":"powershell","arguments":"{\"command\":\"pwd\"}"}},"finish_reason":null}]}`)
+	if err != nil {
+		t.Fatalf("parseOpenAIStreamPayload returned error: %v", err)
+	}
+	if len(chunk.ToolCalls) != 1 {
+		t.Fatalf("tool calls len = %d, want 1", len(chunk.ToolCalls))
+	}
+	call, _ := chunk.ToolCalls[0].(map[string]any)
+	fn, _ := call["function"].(map[string]any)
+	if fn["name"] != "powershell" {
+		t.Fatalf("function call not converted: %#v", chunk.ToolCalls)
+	}
+}
+
+func TestStreamOpenAIToOllamaPreservesToolCallArgumentChunks(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
+	rec := httptest.NewRecorder()
+
+	err := server.streamOpenAIToOllama(rec, req, prov, &provider.ChatRequest{Model: "gpt-test"}, rec)
+	if err != nil {
+		t.Fatalf("streamOpenAIToOllama returned error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"tool_calls"`) {
+		t.Fatalf("tool call chunks missing from Ollama stream: %s", body)
+	}
+	if !strings.Contains(body, `"arguments":"{\"path\":"`) || !strings.Contains(body, `"arguments":"\"a.txt\"}"`) {
+		t.Fatalf("tool call argument chunks were not preserved: %s", body)
+	}
+	if !strings.Contains(body, `"done_reason":"tool_calls"`) {
+		t.Fatalf("tool_calls finish reason missing: %s", body)
+	}
+}
+
 func TestStreamOllamaPassthroughWritesNDJSON(t *testing.T) {
 	stream := `{"model":"llama","message":{"role":"assistant","content":"hi"},"done":false}` + "\n"
 	server := &Server{}

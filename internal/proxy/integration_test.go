@@ -324,12 +324,22 @@ func TestCatalogEndpointsRebuildAfterRegistryModelDiscovery(t *testing.T) {
 func TestOpenAIModelsExposeIdentityMetadata(t *testing.T) {
 	prov := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "ok"}, "")
 	server := newOpenServer(prov)
+	supportsTools := true
+	supportsVision := false
 	server.config.Providers = []config.ProviderConfig{{
 		ID:          "usecpa",
 		Name:        "UseCpa",
 		DisplayName: "UseCpa Paid",
 		Type:        "openai",
 		Enabled:     true,
+	}}
+	server.config.Models = []config.ModelConfig{{
+		Name:           "z-ai/glm-5.2",
+		ProviderID:     "usecpa",
+		Provider:       "usecpa",
+		SupportsTools:  &supportsTools,
+		SupportsVision: &supportsVision,
+		Enabled:        true,
 	}}
 	handler := withMux(server, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/models", server.handleListModels)
@@ -359,6 +369,78 @@ func TestOpenAIModelsExposeIdentityMetadata(t *testing.T) {
 	}
 	if item["canonical"] != "z-ai/glm-5.2@usecpa" {
 		t.Fatalf("canonical = %v, want z-ai/glm-5.2@usecpa", item["canonical"])
+	}
+	if item["supports_tools"] != true || item["supports_tool_calls"] != true {
+		t.Fatalf("tool support metadata missing: %#v", item)
+	}
+	capabilities, _ := item["capabilities"].([]any)
+	if !containsAnyString(capabilities, "tools") {
+		t.Fatalf("capabilities = %#v, want tools", capabilities)
+	}
+	modelInfo, _ := item["model_info"].(map[string]any)
+	if modelInfo["supports_tools"] != true || modelInfo["supports_tool_calls"] != true {
+		t.Fatalf("model_info tool support metadata missing: %#v", modelInfo)
+	}
+}
+
+func TestOpenAIChatForwardsToolRequestFields(t *testing.T) {
+	prov := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "ok"}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"z-ai/glm-5.2",
+		"messages":[{"role":"user","content":"create a file"}],
+		"tools":[{"type":"function","strict":true,"function":{"name":"create_file","description":"Create file","parameters":{"type":"object"}}}],
+		"tool_choice":"auto",
+		"parallel_tool_calls":true
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if prov.lastReq == nil || len(prov.lastReq.Tools) != 1 {
+		t.Fatalf("tools were not forwarded: %#v", prov.lastReq)
+	}
+	if _, ok := prov.lastReq.Extra["tool_choice"]; !ok {
+		t.Fatalf("tool_choice was not preserved: %#v", prov.lastReq.Extra)
+	}
+	if _, ok := prov.lastReq.Extra["parallel_tool_calls"]; !ok {
+		t.Fatalf("parallel_tool_calls was not preserved: %#v", prov.lastReq.Extra)
+	}
+}
+
+func TestOllamaChatForwardsToolSchemaExtensionsToOpenAIProvider(t *testing.T) {
+	prov := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "ok"}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/chat", server.handleOllamaChat)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{
+		"model":"z-ai/glm-5.2",
+		"messages":[{"role":"user","content":"create a file"}],
+		"tools":[{"type":"function","strict":true,"function":{"name":"create_file","description":"Create file","parameters":{"type":"object"},"x-provider":"keep"}}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if prov.lastReq == nil || len(prov.lastReq.Tools) != 1 {
+		t.Fatalf("tools were not forwarded: %#v", prov.lastReq)
+	}
+	if _, ok := prov.lastReq.Tools[0].Extra["strict"]; !ok {
+		t.Fatalf("tool strict extension was not preserved: %#v", prov.lastReq.Tools[0])
+	}
+	if _, ok := prov.lastReq.Tools[0].Function.Extra["x-provider"]; !ok {
+		t.Fatalf("function extension was not preserved: %#v", prov.lastReq.Tools[0].Function)
 	}
 }
 
@@ -1025,6 +1107,103 @@ func TestOllamaShowReturnsModelCapabilities(t *testing.T) {
 	}
 	if params["timeout_seconds"] != float64(timeout) {
 		t.Fatalf("recommended timeout_seconds = %v, want %d", params["timeout_seconds"], timeout)
+	}
+}
+
+func TestModelDiscoveryDoesNotAdvertiseDisabledTools(t *testing.T) {
+	supportsTools := false
+	cfg := &config.AppConfig{
+		DefaultModel: "plain-model",
+		Models: []config.ModelConfig{{
+			Name:          "plain-model",
+			Provider:      "openai",
+			SupportsTools: &supportsTools,
+			Enabled:       true,
+		}},
+	}
+	prov := newFakeProvider("openai", true, []string{"plain-model"}, &fakeChatResponse{Model: "plain-model", Content: "ok"}, "")
+	server := newOpenServer(prov)
+	server.config = cfg
+	server.registry = provider.NewRegistry(cfg.DefaultModel, 0)
+	server.registry.Add(&provider.ProviderEntry{Provider: prov, Models: []string{"plain-model"}})
+	server.catalog = provider.NewModelCatalog(server.registry, "", 0)
+
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/models", server.handleListModels)
+		mux.HandleFunc("/api/tags", server.handleOllamaTags)
+		mux.HandleFunc("/api/show", server.handleOllamaShow)
+	})
+
+	openAIRec := httptest.NewRecorder()
+	handler.ServeHTTP(openAIRec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if openAIRec.Code != http.StatusOK {
+		t.Fatalf("/v1/models status = %d; body=%s", openAIRec.Code, openAIRec.Body.String())
+	}
+	var openAIModels map[string]any
+	if err := json.Unmarshal(openAIRec.Body.Bytes(), &openAIModels); err != nil {
+		t.Fatalf("decode /v1/models: %v", err)
+	}
+	data := openAIModels["data"].([]any)
+	assertNoToolCapability(t, data[0].(map[string]any))
+
+	tagsRec := httptest.NewRecorder()
+	handler.ServeHTTP(tagsRec, httptest.NewRequest(http.MethodGet, "/api/tags", nil))
+	if tagsRec.Code != http.StatusOK {
+		t.Fatalf("/api/tags status = %d; body=%s", tagsRec.Code, tagsRec.Body.String())
+	}
+	var tags map[string]any
+	if err := json.Unmarshal(tagsRec.Body.Bytes(), &tags); err != nil {
+		t.Fatalf("decode /api/tags: %v", err)
+	}
+	models := tags["models"].([]any)
+	assertNoToolCapability(t, models[0].(map[string]any))
+
+	showRec := httptest.NewRecorder()
+	handler.ServeHTTP(showRec, httptest.NewRequest(http.MethodGet, "/api/show?model=plain-model", nil))
+	if showRec.Code != http.StatusOK {
+		t.Fatalf("/api/show status = %d; body=%s", showRec.Code, showRec.Body.String())
+	}
+	var show map[string]any
+	if err := json.Unmarshal(showRec.Body.Bytes(), &show); err != nil {
+		t.Fatalf("decode /api/show: %v", err)
+	}
+	assertNoToolCapability(t, show)
+}
+
+func TestModelDiscoveryUserConfigOverridesCatalogToolCapability(t *testing.T) {
+	supportsTools := false
+	prov := newFakeProvider("deepseek", true, []string{"deepseek-v4-pro"}, &fakeChatResponse{Model: "deepseek-v4-pro", Content: "ok"}, "")
+	server := newOpenServer(prov)
+	server.config.Models = []config.ModelConfig{{
+		Name:          "deepseek-v4-pro",
+		Provider:      "deepseek",
+		SupportsTools: &supportsTools,
+		Enabled:       true,
+	}}
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/models", server.handleListModels)
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /v1/models: %v", err)
+	}
+	data := body["data"].([]any)
+	assertNoToolCapability(t, data[0].(map[string]any))
+}
+
+func assertNoToolCapability(t *testing.T, item map[string]any) {
+	t.Helper()
+	if item["supports_tools"] != false || item["supports_tool_calls"] != false {
+		t.Fatalf("tool support should be false: %#v", item)
+	}
+	if containsAnyString(item["capabilities"].([]any), "tools") {
+		t.Fatalf("capabilities should not include tools: %#v", item["capabilities"])
 	}
 }
 

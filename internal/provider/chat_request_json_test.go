@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -208,5 +209,87 @@ func TestToolCallPreservesUnknownNestedFields(t *testing.T) {
 	fn := call["function"].(map[string]any)
 	if _, ok := fn["provider_state"]; !ok {
 		t.Fatalf("function provider_state extension was not preserved: %s", string(out))
+	}
+}
+
+func TestFunctionCallAcceptsObjectArguments(t *testing.T) {
+	var msg Message
+	if err := json.Unmarshal([]byte(`{
+		"role":"assistant",
+		"content":"",
+		"tool_calls":[{
+			"id":"call_1",
+			"type":"function",
+			"function":{"name":"create_file","arguments":{"path":"a.txt","content":"ok"}}
+		}]
+	}`), &msg); err != nil {
+		t.Fatalf("unmarshal message with object arguments: %v", err)
+	}
+
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("tool calls len = %d, want 1", len(msg.ToolCalls))
+	}
+	var arguments map[string]string
+	if err := json.Unmarshal([]byte(msg.ToolCalls[0].Function.Arguments), &arguments); err != nil {
+		t.Fatalf("arguments should be JSON object string: %q", msg.ToolCalls[0].Function.Arguments)
+	}
+	if arguments["path"] != "a.txt" || arguments["content"] != "ok" {
+		t.Fatalf("arguments = %#v", arguments)
+	}
+}
+
+func TestChatRequestPreservesLegacyFunctionFields(t *testing.T) {
+	var req ChatRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-test",
+		"messages":[{"role":"user","content":"run powershell"}],
+		"functions":[{"name":"powershell","description":"Run PowerShell","parameters":{"type":"object"}}],
+		"function_call":"auto"
+	}`), &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	out, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatalf("decode marshalled request: %v", err)
+	}
+	if _, ok := raw["functions"]; !ok {
+		t.Fatalf("legacy functions were not preserved: %s", string(out))
+	}
+	if raw["function_call"] != "auto" {
+		t.Fatalf("function_call = %#v, want auto", raw["function_call"])
+	}
+}
+
+func TestMessagePreservesLegacyFunctionCall(t *testing.T) {
+	var msg Message
+	if err := json.Unmarshal([]byte(`{
+		"role":"assistant",
+		"content":"",
+		"function_call":{"name":"powershell","arguments":{"command":"Get-ChildItem"}}
+	}`), &msg); err != nil {
+		t.Fatalf("unmarshal message: %v", err)
+	}
+	if msg.FunctionCall == nil || msg.FunctionCall.Name != "powershell" {
+		t.Fatalf("function_call not parsed: %#v", msg.FunctionCall)
+	}
+	var arguments map[string]string
+	if err := json.Unmarshal([]byte(msg.FunctionCall.Arguments), &arguments); err != nil {
+		t.Fatalf("function_call arguments should be JSON object string: %q", msg.FunctionCall.Arguments)
+	}
+	if arguments["command"] != "Get-ChildItem" {
+		t.Fatalf("arguments = %#v", arguments)
+	}
+
+	out, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal message: %v", err)
+	}
+	if !strings.Contains(string(out), `"function_call"`) {
+		t.Fatalf("function_call was not preserved: %s", string(out))
 	}
 }

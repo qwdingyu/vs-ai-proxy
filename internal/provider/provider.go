@@ -32,13 +32,14 @@ type ChatRequest struct {
 
 // Message 消息
 type Message struct {
-	Role       string                     `json:"role"`
-	Content    string                     `json:"content"`
-	ContentRaw json.RawMessage            `json:"-"`
-	ToolCalls  []ToolCall                 `json:"tool_calls,omitempty"`
-	ToolCallID string                     `json:"tool_call_id,omitempty"`
-	Reasoning  string                     `json:"reasoning_content,omitempty"`
-	Extra      map[string]json.RawMessage `json:"-"`
+	Role         string                     `json:"role"`
+	Content      string                     `json:"content"`
+	ContentRaw   json.RawMessage            `json:"-"`
+	ToolCalls    []ToolCall                 `json:"tool_calls,omitempty"`
+	ToolCallID   string                     `json:"tool_call_id,omitempty"`
+	FunctionCall *FunctionCall              `json:"function_call,omitempty"`
+	Reasoning    string                     `json:"reasoning_content,omitempty"`
+	Extra        map[string]json.RawMessage `json:"-"`
 }
 
 // ToolCall 工具调用

@@ -106,6 +106,11 @@ func OpenAI2OllamaChatRequest(body []byte) ([]byte, error) {
 	} else if hasOptions(src) {
 		dst["options"] = buildOptions(src)
 	}
+	if v, ok := src["tools"]; ok && v != nil {
+		dst["tools"] = v
+	} else if functions, ok := src["functions"]; ok && functions != nil {
+		dst["tools"] = toolsFromLegacyFunctions(functions)
+	}
 
 	out, err := json.Marshal(dst)
 	if err != nil {
@@ -155,7 +160,10 @@ func OllamaChatResponse2OpenAI(body []byte, requestModel string) ([]byte, error)
 
 // BuildOllamaShowResponse 构建 /api/show 的 Ollama 展示响应。
 func BuildOllamaShowResponse(model string, ctxLength, maxOutput int, family string, supportsTools, supportsVision bool, exec map[string]any) ([]byte, error) {
-	capabilities := []string{"completion", "tools"}
+	capabilities := []string{"completion"}
+	if supportsTools {
+		capabilities = append(capabilities, "tools")
+	}
 	if supportsVision {
 		capabilities = append(capabilities, "vision")
 	}
@@ -271,6 +279,25 @@ func copyIfPresent(dst map[string]any, src map[string]any, key string) {
 	}
 }
 
+func toolsFromLegacyFunctions(functions any) []map[string]any {
+	items, ok := functions.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		fn, ok := item.(map[string]any)
+		if !ok || fn == nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"type":     "function",
+			"function": fn,
+		})
+	}
+	return out
+}
+
 func normalizeMessages(messages []any) []map[string]any {
 	out := make([]map[string]any, 0, len(messages))
 	for _, item := range messages {
@@ -279,12 +306,15 @@ func normalizeMessages(messages []any) []map[string]any {
 			continue
 		}
 
-		msg := map[string]any{
-			"role":    coalesceString(getString(m, "role")),
-			"content": coalesceString(getString(m, "content")),
+		msg := make(map[string]any, len(m))
+		for key, value := range m {
+			if value != nil {
+				msg[key] = value
+			}
 		}
-		if tc, ok := m["tool_calls"]; ok && tc != nil {
-			msg["tool_calls"] = tc
+		msg["role"] = coalesceString(getString(m, "role"))
+		if _, exists := msg["content"]; !exists {
+			msg["content"] = ""
 		}
 		out = append(out, msg)
 	}

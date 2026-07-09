@@ -228,8 +228,8 @@
             <label>类型
               <select id="pType">
                 <option value="openai">OpenAI</option>
-                <option value="ollama">Ollama</option>
-                <option value="custom">Custom</option>
+                <!-- <option value="ollama">Ollama</option> -->
+                <!-- <option value="custom">Custom</option> -->
               </select>
             </label>
             <label>Base URL <input id="pBase" /></label>
@@ -289,7 +289,7 @@
         <div class="grid-2">
           <div class="stack">
             <label>提供商 <select id="testProvider"></select></label>
-            <label>模型 <input id="testModel" placeholder="留空则使用默认模型" /></label>
+            <label>模型 <select id="testModel"></select></label>
             <label>测试消息 <textarea id="testMessage" placeholder="输入一段测试对话"></textarea></label>
             <div class="actions">
               <button class="btn" id="btnTestConnection">测试连接</button>
@@ -746,13 +746,12 @@
 
     const loadTestLab = async () => {
       try {
-        const [providersRes, configRes, modelsRes] = await Promise.all([
+        const [providersRes, configRes] = await Promise.all([
           fetchJSON('/providers'),
-          fetchJSON('/config'),
-          fetchJSON('/models')
+          fetchJSON('/config')
         ]);
         currentProviders = sortedProvidersForDisplay(providersRes.providers || []);
-        currentModels = modelsRes.models || [];
+        currentModels = [];
         currentConfig = configRes;
 
         const select = $('testProvider');
@@ -761,7 +760,7 @@
         } else {
           select.innerHTML = currentProviders.map((p) => `<option value="${providerKey(p)}">${providerLabel(p)} (${p.type})</option>`).join('');
         }
-        $('testModel').value = configRes.default_model || (currentModels[0] ? currentModels[0].name : '');
+        await refreshTestModelOptions(configRes.default_model || '');
         if (!$('testMessage').value) {
           $('testMessage').value = 'Hello, world.';
         }
@@ -770,9 +769,68 @@
       }
     };
 
+    const refreshTestModelOptions = async (preferredModel = '') => {
+      const modelSelect = $('testModel');
+      const providerId = $('testProvider').value;
+      const provider = currentProviders.find((p) => providerKey(p) === providerId);
+      if (!provider) {
+        modelSelect.innerHTML = '<option value="">暂无提供商</option>';
+        modelSelect.disabled = true;
+        return;
+      }
+
+      modelSelect.disabled = true;
+      modelSelect.innerHTML = '<option value="">正在读取官方模型列表...</option>';
+
+      let models = [];
+      try {
+        const res = await fetchJSON('/test/connection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider })
+        });
+        if (!res.success) {
+          modelSelect.innerHTML = '<option value="">读取模型失败，请先测试连接</option>';
+          setTestResult('模型列表读取失败', formatTestResult(res));
+          return;
+        }
+        models = (res.models || []).map((name) => String(name || '').trim()).filter(Boolean);
+        currentModels = models.map((name) => ({ name, provider_id: providerId, provider: providerId, enabled: true }));
+      } catch (e) {
+        modelSelect.innerHTML = '<option value="">读取模型失败，请先测试连接</option>';
+        setTestResult('模型列表读取失败', String(e.message || e));
+        return;
+      }
+
+      if (!models.length) {
+        modelSelect.innerHTML = '<option value="">官方模型列表为空</option>';
+        modelSelect.disabled = true;
+        return;
+      }
+      modelSelect.disabled = false;
+      modelSelect.innerHTML = models.map((name) => `<option value="${escapeHTML(name)}">${escapeHTML(name)}</option>`).join('');
+      const names = new Set(models);
+      const fallback = models[0] || '';
+      modelSelect.value = names.has(preferredModel) ? preferredModel : fallback;
+    };
+
     const setTestResult = (status, output) => {
       $('testStatus').textContent = status;
       $('testOutput').textContent = output;
+    };
+
+    const formatTestResult = (result) => {
+      const request = result && result.request ? result.request : null;
+      const lines = [];
+      if (request) {
+        lines.push('请求上下文:');
+        lines.push(`- Provider: ${request.provider_id || '-'} (${request.provider_type || '-'})`);
+        lines.push(`- Base URL: ${request.base_url || '-'}`);
+        if (request.model) lines.push(`- Model: ${request.model}`);
+        lines.push('');
+      }
+      lines.push(JSON.stringify(result, null, 2));
+      return lines.join('\n');
     };
 
     const applyModelMetadataToForm = async () => {
@@ -990,7 +1048,7 @@
         id,
         name,
         display_name: $('pDisplay').value.trim() || name,
-        type: $('pType').value,
+        type: $('pType').value || 'openai',
         base_url: $('pBase').value.trim(),
         api_key: $('pKey').value.trim(),
         priority: Number($('pPriority').value || 0),
@@ -1021,7 +1079,7 @@
         if (result.corrected_base_url && result.corrected_base_url !== provider.base_url) {
           if (window.confirm(summary + '\n\n是否将建议 Base URL 填入表单？')) {
             $('pBase').value = result.corrected_base_url;
-            if (result.detected_type) $('pType').value = result.detected_type;
+            if (result.detected_type === 'openai') $('pType').value = result.detected_type;
           }
           return;
         }
@@ -1070,7 +1128,7 @@
       try {
         if (!payload.id) return alert('ID 不能为空');
         if (!payload.name) return alert('名称不能为空');
-        if (!['openai', 'ollama', 'custom'].includes(payload.type)) return alert('类型必须是 openai、ollama 或 custom。');
+        if (payload.type !== 'openai') return alert('类型必须是 openai。');
         if (!payload.base_url) return alert('Base URL 不能为空。');
         if (currentProviders.some((p) => providerKey(p).toLowerCase() === payload.id.toLowerCase() && providerKey(p) !== editingProviderName)) {
           return alert('Provider ID 已存在，请换一个 ID。');
@@ -1099,10 +1157,14 @@
       }
       try {
         const res = await fetchJSON('/test/connection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider }) });
-        setTestResult(res.success ? '连接成功' : '连接失败', JSON.stringify(res, null, 2));
+        setTestResult(res.success ? '连接成功' : '连接失败', formatTestResult(res));
       } catch (e) {
         setTestResult('连接测试失败', String(e.message || e));
       }
+    });
+
+    $('testProvider').addEventListener('change', async () => {
+      await refreshTestModelOptions(currentConfig.default_model || '');
     });
 
     $('btnTestChat').addEventListener('click', async () => {
@@ -1126,7 +1188,7 @@
             model: $('testModel').value.trim()
           })
         });
-        setTestResult(res.success ? '对话成功' : '对话失败', JSON.stringify(res, null, 2));
+        setTestResult(res.success ? '对话成功' : '对话失败', formatTestResult(res));
       } catch (e) {
         setTestResult('对话测试失败', String(e.message || e));
       }

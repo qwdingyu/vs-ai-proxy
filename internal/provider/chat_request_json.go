@@ -20,6 +20,7 @@ var messageKnownFields = map[string]struct{}{
 	"content":           {},
 	"tool_calls":        {},
 	"tool_call_id":      {},
+	"function_call":     {},
 	"reasoning_content": {},
 }
 
@@ -111,11 +112,12 @@ func (r ChatRequest) MarshalJSON() ([]byte, error) {
 
 func (m *Message) UnmarshalJSON(data []byte) error {
 	var msg struct {
-		Role       string          `json:"role"`
-		Content    json.RawMessage `json:"content"`
-		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
-		ToolCallID string          `json:"tool_call_id,omitempty"`
-		Reasoning  string          `json:"reasoning_content,omitempty"`
+		Role         string          `json:"role"`
+		Content      json.RawMessage `json:"content"`
+		ToolCalls    []ToolCall      `json:"tool_calls,omitempty"`
+		ToolCallID   string          `json:"tool_call_id,omitempty"`
+		FunctionCall *FunctionCall   `json:"function_call,omitempty"`
+		Reasoning    string          `json:"reasoning_content,omitempty"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return err
@@ -130,10 +132,11 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	}
 
 	*m = Message{
-		Role:       msg.Role,
-		ToolCalls:  msg.ToolCalls,
-		ToolCallID: msg.ToolCallID,
-		Reasoning:  msg.Reasoning,
+		Role:         msg.Role,
+		ToolCalls:    msg.ToolCalls,
+		ToolCallID:   msg.ToolCallID,
+		FunctionCall: msg.FunctionCall,
+		Reasoning:    msg.Reasoning,
 	}
 	if len(msg.Content) > 0 {
 		var content string
@@ -197,8 +200,10 @@ func (t ToolCall) MarshalJSON() ([]byte, error) {
 }
 
 func (f *FunctionCall) UnmarshalJSON(data []byte) error {
-	type alias functionCallAlias
-	var value alias
+	var value struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
@@ -208,7 +213,15 @@ func (f *FunctionCall) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	*f = FunctionCall(value)
+	*f = FunctionCall{Name: value.Name}
+	if len(value.Arguments) > 0 && string(value.Arguments) != "null" {
+		var arguments string
+		if err := json.Unmarshal(value.Arguments, &arguments); err == nil {
+			f.Arguments = arguments
+		} else {
+			f.Arguments = string(value.Arguments)
+		}
+	}
 	f.Extra = raw
 	return nil
 }

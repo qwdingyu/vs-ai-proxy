@@ -1049,6 +1049,15 @@ func parseOpenAIStreamPayload(payload string) (openAIStreamChunk, error) {
 	if toolCalls, ok := delta["tool_calls"].([]any); ok {
 		out.ToolCalls = toolCalls
 	}
+	if len(out.ToolCalls) == 0 {
+		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
+			out.ToolCalls = []any{map[string]any{
+				"id":       "function_call",
+				"type":     "function",
+				"function": functionCall,
+			}}
+		}
+	}
 	return out, nil
 }
 
@@ -1199,20 +1208,16 @@ func intPtr(i int) *int {
 func buildTools(raw []any) []provider.Tool {
 	out := make([]provider.Tool, 0, len(raw))
 	for _, item := range raw {
-		m, ok := item.(map[string]any)
-		if !ok {
+		data, err := json.Marshal(item)
+		if err != nil {
 			continue
 		}
-		funcRaw, _ := m["function"].(map[string]any)
-		tool := provider.Tool{
-			Type: stringValue(m, "type", "function"),
+		var tool provider.Tool
+		if err := json.Unmarshal(data, &tool); err != nil {
+			continue
 		}
-		if funcRaw != nil {
-			tool.Function = provider.ToolFunc{
-				Name:        stringValue(funcRaw, "name", ""),
-				Description: stringValue(funcRaw, "description", ""),
-				Parameters:  funcRaw["parameters"],
-			}
+		if strings.TrimSpace(tool.Type) == "" {
+			tool.Type = "function"
 		}
 		out = append(out, tool)
 	}

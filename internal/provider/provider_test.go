@@ -71,6 +71,128 @@ func TestOpenAIProviderUsesCapabilityPaths(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderChatRawPreservesToolFields(t *testing.T) {
+	var captured map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	var req ChatRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"glm-5.2",
+		"messages":[{"role":"user","content":"create a file"}],
+		"tools":[{"type":"function","strict":true,"function":{"name":"create_file","description":"Create file","parameters":{"type":"object"},"x-provider":"keep"}}],
+		"tool_choice":"auto",
+		"parallel_tool_calls":true
+	}`), &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	if _, err := prov.ChatRaw(context.Background(), &req); err != nil {
+		t.Fatalf("ChatRaw returned error: %v", err)
+	}
+
+	tools, _ := captured["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools missing from upstream request: %#v", captured)
+	}
+	tool := tools[0].(map[string]any)
+	if tool["strict"] != true {
+		t.Fatalf("tool strict missing: %#v", tool)
+	}
+	fn := tool["function"].(map[string]any)
+	if fn["x-provider"] != "keep" {
+		t.Fatalf("function extension missing: %#v", fn)
+	}
+	if captured["tool_choice"] != "auto" || captured["parallel_tool_calls"] != true {
+		t.Fatalf("tool selection fields missing: %#v", captured)
+	}
+}
+
+func TestOpenAIProviderChatRawPreservesCommonToolMatrix(t *testing.T) {
+	var captured map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	toolNames := []string{"create_file", "powershell", "run_in_terminal", "apply_patch", "read_file"}
+	tools := make([]map[string]any, 0, len(toolNames))
+	for _, name := range toolNames {
+		tools = append(tools, map[string]any{
+			"type":   "function",
+			"strict": true,
+			"function": map[string]any{
+				"name":        name,
+				"description": "Tool " + name,
+				"parameters": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]any{
+						"input": map[string]any{"type": "string"},
+					},
+				},
+			},
+		})
+	}
+
+	req := ChatRequest{
+		Model:    "glm-5.2",
+		Messages: []Message{{Role: "user", Content: "use tools"}},
+		Extra: map[string]json.RawMessage{
+			"tool_choice": []byte(`"auto"`),
+		},
+	}
+	data, err := json.Marshal(tools)
+	if err != nil {
+		t.Fatalf("marshal tools: %v", err)
+	}
+	if err := json.Unmarshal(data, &req.Tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	if _, err := prov.ChatRaw(context.Background(), &req); err != nil {
+		t.Fatalf("ChatRaw returned error: %v", err)
+	}
+
+	capturedTools, _ := captured["tools"].([]any)
+	if len(capturedTools) != len(toolNames) {
+		t.Fatalf("tools len = %d, want %d; body=%#v", len(capturedTools), len(toolNames), captured)
+	}
+	seen := map[string]bool{}
+	for _, raw := range capturedTools {
+		tool := raw.(map[string]any)
+		if tool["strict"] != true {
+			t.Fatalf("strict flag lost for tool: %#v", tool)
+		}
+		fn := tool["function"].(map[string]any)
+		seen[fn["name"].(string)] = true
+		params := fn["parameters"].(map[string]any)
+		if params["additionalProperties"] != false {
+			t.Fatalf("schema additionalProperties lost: %#v", params)
+		}
+	}
+	for _, name := range toolNames {
+		if !seen[name] {
+			t.Fatalf("tool %q missing from upstream request: %#v", name, capturedTools)
+		}
+	}
+}
+
 func TestInferCapabilityNameSupportsProviderInstances(t *testing.T) {
 	tests := []struct {
 		name         string

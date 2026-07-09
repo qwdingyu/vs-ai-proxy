@@ -326,6 +326,33 @@ func TestRegistryRejectsAmbiguousNamespacedBasename(t *testing.T) {
 	}
 }
 
+func TestRegistryPrefersDirectOfficialGLMOverNamespacedBasename(t *testing.T) {
+	registry := NewRegistry("glm-5.2", time.Minute)
+	zhipu := &fakeProvider{name: "zhipu", enabled: true, models: []string{"glm-5.2"}}
+	usecpa := &fakeProvider{name: "usecpa", enabled: true, models: []string{"z-ai/glm-5.2"}}
+
+	registry.Add(&ProviderEntry{Provider: zhipu, Models: zhipu.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 2})
+	registry.SetModels("zhipu", zhipu.models)
+	registry.SetModels("usecpa", usecpa.models)
+
+	candidates := registry.ResolveCandidates("glm-5.2")
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].Provider.Provider.Name() != "zhipu" {
+		t.Fatalf("provider = %q, want zhipu", candidates[0].Provider.Provider.Name())
+	}
+	if candidates[0].ModelID != "glm-5.2" {
+		t.Fatalf("model id = %q, want glm-5.2", candidates[0].ModelID)
+	}
+
+	namespaced := registry.ResolveCandidates("z-ai/glm-5.2")
+	if len(namespaced) != 1 || namespaced[0].Provider.Provider.Name() != "usecpa" || namespaced[0].ModelID != "z-ai/glm-5.2" {
+		t.Fatalf("namespaced model should route to usecpa upstream z-ai/glm-5.2: %#v", namespaced)
+	}
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {

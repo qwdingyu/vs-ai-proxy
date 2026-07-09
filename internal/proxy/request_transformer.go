@@ -229,6 +229,11 @@ func cloneChatRequest(req *provider.ChatRequest) *provider.ChatRequest {
 			out.Messages[i].ToolCalls[j].Extra = cloneRawMessages(req.Messages[i].ToolCalls[j].Extra)
 			out.Messages[i].ToolCalls[j].Function.Extra = cloneRawMessages(req.Messages[i].ToolCalls[j].Function.Extra)
 		}
+		if req.Messages[i].FunctionCall != nil {
+			functionCall := *req.Messages[i].FunctionCall
+			functionCall.Extra = cloneRawMessages(req.Messages[i].FunctionCall.Extra)
+			out.Messages[i].FunctionCall = &functionCall
+		}
 		out.Messages[i].Extra = cloneRawMessages(req.Messages[i].Extra)
 	}
 	out.Tools = append([]provider.Tool(nil), req.Tools...)

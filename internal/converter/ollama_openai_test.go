@@ -49,3 +49,110 @@ func TestOllamaChatResponse2OpenAIReadsNestedMessageAndThinking(t *testing.T) {
 		t.Fatalf("reasoning_content = %#v, want reason", message["reasoning_content"])
 	}
 }
+
+func TestOllamaChatResponse2OpenAIReadsToolCalls(t *testing.T) {
+	out, err := OllamaChatResponse2OpenAI([]byte(`{
+		"model":"llama",
+		"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},
+		"done":true,
+		"done_reason":"tool_calls"
+	}`), "llama")
+	if err != nil {
+		t.Fatalf("OllamaChatResponse2OpenAI returned error: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	choice := resp["choices"].([]any)[0].(map[string]any)
+	if choice["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %#v, want tool_calls", choice["finish_reason"])
+	}
+	message := choice["message"].(map[string]any)
+	calls, _ := message["tool_calls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("tool calls missing: %s", string(out))
+	}
+}
+
+func TestOpenAI2OllamaChatRequestPreservesToolsAndToolMessages(t *testing.T) {
+	out, err := OpenAI2OllamaChatRequest([]byte(`{
+		"model":"glm-5.2",
+		"messages":[
+			{"role":"user","content":"create a file"},
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"create_file","arguments":"{\"path\":\"a.txt\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok","name":"create_file"}
+		],
+		"tools":[{"type":"function","strict":true,"function":{"name":"create_file","description":"Create file","parameters":{"type":"object"}}}],
+		"tool_choice":"auto",
+		"parallel_tool_calls":true
+	}`))
+	if err != nil {
+		t.Fatalf("OpenAI2OllamaChatRequest returned error: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode converted request: %v", err)
+	}
+	tools, _ := got["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools not preserved: %s", string(out))
+	}
+	tool := tools[0].(map[string]any)
+	if tool["strict"] != true {
+		t.Fatalf("tool strict flag not preserved: %s", string(out))
+	}
+	messages := got["messages"].([]any)
+	toolMessage := messages[2].(map[string]any)
+	if toolMessage["tool_call_id"] != "call_1" || toolMessage["name"] != "create_file" {
+		t.Fatalf("tool result message metadata not preserved: %s", string(out))
+	}
+}
+
+func TestOpenAI2OllamaChatRequestPreservesLegacyFunctions(t *testing.T) {
+	out, err := OpenAI2OllamaChatRequest([]byte(`{
+		"model":"gpt-test",
+		"messages":[{"role":"user","content":"run powershell"}],
+		"functions":[{"name":"powershell","description":"Run PowerShell","parameters":{"type":"object"}}],
+		"function_call":"auto"
+	}`))
+	if err != nil {
+		t.Fatalf("OpenAI2OllamaChatRequest returned error: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode converted request: %v", err)
+	}
+	tools, _ := got["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("legacy functions should be converted to tools: %s", string(out))
+	}
+	tool := tools[0].(map[string]any)
+	fn := tool["function"].(map[string]any)
+	if tool["type"] != "function" || fn["name"] != "powershell" {
+		t.Fatalf("unexpected converted tool: %#v", tool)
+	}
+}
+
+func TestOpenAI2OllamaChatRequestPreservesNonStringContent(t *testing.T) {
+	out, err := OpenAI2OllamaChatRequest([]byte(`{
+		"model":"vision-tool-model",
+		"messages":[{"role":"user","content":[{"type":"text","text":"inspect"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}]
+	}`))
+	if err != nil {
+		t.Fatalf("OpenAI2OllamaChatRequest returned error: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode converted request: %v", err)
+	}
+	messages := got["messages"].([]any)
+	message := messages[0].(map[string]any)
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 2 {
+		t.Fatalf("non-string content was not preserved: %s", string(out))
+	}
+}

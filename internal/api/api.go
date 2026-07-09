@@ -1175,7 +1175,11 @@ func (s *Server) testConnection(c *gin.Context) {
 
 	models, err := prov.ListModels(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+			"request": managementTestRequestContext(config.NormalizeProvider(req.Provider), ""),
+		})
 		return
 	}
 
@@ -1183,6 +1187,7 @@ func (s *Server) testConnection(c *gin.Context) {
 		"success": true,
 		"message": "连接成功",
 		"models":  models,
+		"request": managementTestRequestContext(config.NormalizeProvider(req.Provider), ""),
 	})
 }
 
@@ -1197,14 +1202,17 @@ func (s *Server) testChat(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	providerCfg := config.NormalizeProvider(req.Provider)
+	if message := s.validateManagementTestModel(providerCfg, req.Model); message != "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": message, "request": managementTestRequestContext(providerCfg, req.Model)})
+		return
+	}
 
 	var prov provider.Provider
-	if req.Provider.Type == "ollama" {
-		cfg := config.NormalizeProvider(req.Provider)
-		prov = provider.NewOllamaProviderWithCapability(config.ProviderKey(cfg), providerCapabilityNameFromConfig(cfg), cfg.BaseURL, true, 60*time.Second)
+	if providerCfg.Type == "ollama" {
+		prov = provider.NewOllamaProviderWithCapability(config.ProviderKey(providerCfg), providerCapabilityNameFromConfig(providerCfg), providerCfg.BaseURL, true, 60*time.Second)
 	} else {
-		cfg := config.NormalizeProvider(req.Provider)
-		prov = provider.NewOpenAIProviderWithCapability(config.ProviderKey(cfg), providerCapabilityNameFromConfig(cfg), cfg.APIKey, cfg.BaseURL, true, 60*time.Second)
+		prov = provider.NewOpenAIProviderWithCapability(config.ProviderKey(providerCfg), providerCapabilityNameFromConfig(providerCfg), providerCfg.APIKey, providerCfg.BaseURL, true, 60*time.Second)
 	}
 
 	chatReq := &provider.ChatRequest{
@@ -1215,18 +1223,59 @@ func (s *Server) testChat(c *gin.Context) {
 
 	resp, err := prov.Chat(c.Request.Context(), chatReq)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "error": err.Error()})
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": err.Error(), "request": managementTestRequestContext(providerCfg, req.Model)})
 		return
 	}
 	if len(resp.Choices) == 0 {
-		c.JSON(http.StatusOK, gin.H{"success": false, "error": "上游响应没有 choices"})
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": "上游响应没有 choices", "request": managementTestRequestContext(providerCfg, req.Model)})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"content": resp.Choices[0].Message.Content,
+		"request": managementTestRequestContext(providerCfg, req.Model),
 	})
+}
+
+func managementTestRequestContext(providerCfg config.ProviderConfig, model string) gin.H {
+	return gin.H{
+		"provider_id":   config.ProviderKey(providerCfg),
+		"provider_name": strings.TrimSpace(providerCfg.Name),
+		"provider_type": strings.TrimSpace(providerCfg.Type),
+		"base_url":      strings.TrimSpace(providerCfg.BaseURL),
+		"model":         strings.TrimSpace(model),
+	}
+}
+
+func (s *Server) validateManagementTestModel(providerCfg config.ProviderConfig, model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" || s == nil || s.configMgr == nil {
+		return ""
+	}
+	providerID := strings.TrimSpace(config.ProviderKey(providerCfg))
+	if providerID == "" {
+		return ""
+	}
+	models := s.configMgr.Get().Models
+	matchedModel := false
+	for _, item := range models {
+		if !item.Enabled || !strings.EqualFold(strings.TrimSpace(item.Name), model) {
+			continue
+		}
+		matchedModel = true
+		boundProvider := strings.TrimSpace(item.ProviderID)
+		if boundProvider == "" {
+			boundProvider = strings.TrimSpace(item.Provider)
+		}
+		if strings.EqualFold(boundProvider, providerID) {
+			return ""
+		}
+	}
+	if matchedModel {
+		return fmt.Sprintf("模型 %q 未绑定到当前提供商 %q，请在测试页选择该提供商已导入的模型。", model, providerID)
+	}
+	return ""
 }
 
 // getLogs 获取日志

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"testing"
 
@@ -203,6 +204,32 @@ func TestInjectCachedReasoningByToolCallKey(t *testing.T) {
 
 	if req.Messages[0].Reasoning != "tool reasoning" {
 		t.Fatalf("reasoning = %q, want tool reasoning", req.Messages[0].Reasoning)
+	}
+}
+
+func TestCloneChatRequestDeepCopiesLegacyFunctionCall(t *testing.T) {
+	req := &provider.ChatRequest{
+		Messages: []provider.Message{{
+			Role: "assistant",
+			FunctionCall: &provider.FunctionCall{
+				Name:      "powershell",
+				Arguments: `{"command":"pwd"}`,
+				Extra: map[string]json.RawMessage{
+					"provider_state": []byte(`{"chunk":1}`),
+				},
+			},
+		}},
+	}
+
+	clone := cloneChatRequest(req)
+	req.Messages[0].FunctionCall.Name = "mutated"
+	req.Messages[0].FunctionCall.Extra["provider_state"] = []byte(`{"chunk":2}`)
+
+	if clone.Messages[0].FunctionCall == nil || clone.Messages[0].FunctionCall.Name != "powershell" {
+		t.Fatalf("function_call was not deep-copied: %#v", clone.Messages[0].FunctionCall)
+	}
+	if string(clone.Messages[0].FunctionCall.Extra["provider_state"]) != `{"chunk":1}` {
+		t.Fatalf("function_call extra was not deep-copied: %s", clone.Messages[0].FunctionCall.Extra["provider_state"])
 	}
 }
 
