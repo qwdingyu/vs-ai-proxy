@@ -414,6 +414,43 @@ func TestOpenAIChatForwardsToolRequestFields(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatConvertsNonStreamSSEBodyToJSON(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
+	prov.rawBody = []byte(strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "data:") {
+		t.Fatalf("non-stream response leaked SSE body: %s", rec.Body.String())
+	}
+	var body provider.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response should be JSON chat response: %v; body=%s", err, rec.Body.String())
+	}
+	if len(body.Choices) != 1 || body.Choices[0].Message.Content != "Hello!" {
+		t.Fatalf("unexpected response: %s", rec.Body.String())
+	}
+}
+
 func TestOllamaChatForwardsToolSchemaExtensionsToOpenAIProvider(t *testing.T) {
 	prov := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "ok"}, "")
 	server := newOpenServer(prov)

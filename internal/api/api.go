@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1203,8 +1205,8 @@ func (s *Server) testChat(c *gin.Context) {
 		return
 	}
 	providerCfg := config.NormalizeProvider(req.Provider)
-	if message := s.validateManagementTestModel(providerCfg, req.Model); message != "" {
-		c.JSON(http.StatusOK, gin.H{"success": false, "error": message, "request": managementTestRequestContext(providerCfg, req.Model)})
+	if strings.TrimSpace(req.Model) == "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": "请选择当前提供商官方返回的模型后再测试。", "request": managementTestRequestContext(providerCfg, req.Model)})
 		return
 	}
 
@@ -1215,6 +1217,11 @@ func (s *Server) testChat(c *gin.Context) {
 		prov = provider.NewOpenAIProviderWithCapability(config.ProviderKey(providerCfg), providerCapabilityNameFromConfig(providerCfg), providerCfg.APIKey, providerCfg.BaseURL, true, 60*time.Second)
 	}
 
+	if message := s.validateManagementTestModel(c.Request.Context(), prov, providerCfg, req.Model); message != "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": message, "request": managementTestRequestContext(providerCfg, req.Model)})
+		return
+	}
+
 	chatReq := &provider.ChatRequest{
 		Model:    req.Model,
 		Messages: []provider.Message{{Role: "user", Content: req.Message}},
@@ -1223,7 +1230,21 @@ func (s *Server) testChat(c *gin.Context) {
 
 	resp, err := prov.Chat(c.Request.Context(), chatReq)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "error": err.Error(), "request": managementTestRequestContext(providerCfg, req.Model)})
+		// 管理测试页的目标是帮助用户判断“当前 provider + 当前模型是否实际可对话”。
+		// 某些上游非流式链路不稳定但流式可用，因此这里自动做一次流式兜底，
+		// 并通过 fallback_mode/warning 明确告知用户：模型可用，但非流式链路存在异常。
+		content, fallbackErr := managementTestChatStreamFallback(c.Request.Context(), prov, chatReq)
+		if fallbackErr == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success":       true,
+				"content":       content,
+				"fallback_mode": "stream",
+				"warning":       fmt.Sprintf("非流式测试失败，已自动使用流式测试兜底: %v", err),
+				"request":       managementTestRequestContext(providerCfg, req.Model),
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": fmt.Sprintf("非流式测试失败: %v；流式兜底也失败: %v", err, fallbackErr), "request": managementTestRequestContext(providerCfg, req.Model)})
 		return
 	}
 	if len(resp.Choices) == 0 {
@@ -1238,6 +1259,68 @@ func (s *Server) testChat(c *gin.Context) {
 	})
 }
 
+func managementTestChatStreamFallback(ctx context.Context, prov provider.Provider, chatReq *provider.ChatRequest) (string, error) {
+	if prov == nil || chatReq == nil {
+		return "", fmt.Errorf("provider 或请求为空")
+	}
+	streamReq := *chatReq
+	streamReq.Stream = true
+	stream, err := prov.ChatStream(ctx, &streamReq)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var content strings.Builder
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(line[5:])
+		if payload == "[DONE]" {
+			break
+		}
+		chunkContent, err := managementOpenAIStreamChunkContent(payload)
+		if err != nil {
+			continue
+		}
+		content.WriteString(chunkContent)
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(content.String()) == "" {
+		return "", fmt.Errorf("流式响应没有返回文本内容")
+	}
+	return content.String(), nil
+}
+
+func managementOpenAIStreamChunkContent(payload string) (string, error) {
+	var root struct {
+		Choices []struct {
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(payload), &root); err != nil {
+		return "", err
+	}
+	if len(root.Choices) == 0 {
+		return "", nil
+	}
+	if root.Choices[0].Delta.Content != "" {
+		return root.Choices[0].Delta.Content, nil
+	}
+	return root.Choices[0].Message.Content, nil
+}
+
 func managementTestRequestContext(providerCfg config.ProviderConfig, model string) gin.H {
 	return gin.H{
 		"provider_id":   config.ProviderKey(providerCfg),
@@ -1248,7 +1331,7 @@ func managementTestRequestContext(providerCfg config.ProviderConfig, model strin
 	}
 }
 
-func (s *Server) validateManagementTestModel(providerCfg config.ProviderConfig, model string) string {
+func (s *Server) validateManagementTestModel(ctx context.Context, prov provider.Provider, providerCfg config.ProviderConfig, model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" || s == nil || s.configMgr == nil {
 		return ""
@@ -1272,10 +1355,27 @@ func (s *Server) validateManagementTestModel(providerCfg config.ProviderConfig, 
 			return ""
 		}
 	}
-	if matchedModel {
+	if matchedModel && !managementProviderHasModel(ctx, prov, model) {
 		return fmt.Sprintf("模型 %q 未绑定到当前提供商 %q，请在测试页选择该提供商已导入的模型。", model, providerID)
 	}
 	return ""
+}
+
+func managementProviderHasModel(ctx context.Context, prov provider.Provider, model string) bool {
+	model = strings.TrimSpace(model)
+	if prov == nil || model == "" {
+		return false
+	}
+	models, err := prov.ListModels(ctx)
+	if err != nil {
+		return false
+	}
+	for _, item := range models {
+		if strings.EqualFold(strings.TrimSpace(item), model) {
+			return true
+		}
+	}
+	return false
 }
 
 // getLogs 获取日志

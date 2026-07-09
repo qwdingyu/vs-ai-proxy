@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -143,6 +144,19 @@ type OpenAIProvider struct {
 	Timeout        time.Duration
 }
 
+type providerHTTPError struct {
+	StatusCode int
+	Body       []byte
+	Message    string
+}
+
+func (e *providerHTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
 // NewOpenAIProvider 创建 OpenAI 提供商
 func NewOpenAIProvider(name, apiKey, baseURL string, enabled bool, timeout time.Duration) *OpenAIProvider {
 	return NewOpenAIProviderWithCapability(name, "", apiKey, baseURL, enabled, timeout)
@@ -178,10 +192,86 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	}
 	var chatResp ChatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		// New API / 部分 OpenAI-compatible 网关存在一个协议坑：
+		// 客户端明确 stream=false 时，上游仍可能以 text/event-stream 返回 data: chunk。
+		// 这里把可聚合的 SSE 转为普通 ChatResponse，避免下游非流式 JSON 解析失败。
+		if sseResp, sseErr := parseOpenAIChatSSEAsResponse(respBody, req.Model); sseErr == nil {
+			return sseResp, nil
+		}
+		return nil, fmt.Errorf("解析响应失败: %w; body_preview=%q", err, responseBodyPreview(respBody))
 	}
 
 	return &chatResp, nil
+}
+
+func parseOpenAIChatSSEAsResponse(body []byte, model string) (*ChatResponse, error) {
+	if !bytes.Contains(body, []byte("data:")) {
+		return nil, fmt.Errorf("响应不是 SSE")
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var content strings.Builder
+	finishReason := "stop"
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(line[5:])
+		if payload == "[DONE]" {
+			break
+		}
+		chunkContent, chunkFinish, err := parseOpenAIChatSSEChunk(payload)
+		if err != nil {
+			continue
+		}
+		content.WriteString(chunkContent)
+		if chunkFinish != "" {
+			finishReason = chunkFinish
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(content.String()) == "" {
+		return nil, fmt.Errorf("SSE 响应没有文本内容")
+	}
+	return &ChatResponse{
+		ID:      fmt.Sprintf("chatcmpl-sse-%d", time.Now().Unix()),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []Choice{{
+			Index:        0,
+			Message:      Message{Role: "assistant", Content: content.String()},
+			FinishReason: finishReason,
+		}},
+	}, nil
+}
+
+func parseOpenAIChatSSEChunk(payload string) (string, string, error) {
+	var root struct {
+		Choices []struct {
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(payload), &root); err != nil {
+		return "", "", err
+	}
+	if len(root.Choices) == 0 {
+		return "", "", nil
+	}
+	choice := root.Choices[0]
+	if choice.Delta.Content != "" {
+		return choice.Delta.Content, choice.FinishReason, nil
+	}
+	return choice.Message.Content, choice.FinishReason, nil
 }
 
 func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte, error) {
@@ -191,6 +281,30 @@ func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
+	// New API 内部可能配置多个渠道，但实测单渠道 5xx/EOF 有时会直接透出。
+	// 代理侧只对瞬态错误做短重试，给上游网关重新选择渠道的机会；4xx 不重试，避免放大参数/鉴权错误。
+	var lastErr error
+	for attempt := 0; attempt < openAIProviderMaxAttempts; attempt++ {
+		respBody, err := p.doChatRaw(ctx, body)
+		if err == nil {
+			return respBody, nil
+		}
+		lastErr = err
+		if !shouldRetryOpenAIProviderError(err) || attempt == openAIProviderMaxAttempts-1 {
+			break
+		}
+		if delay := openAIProviderRetryDelay(attempt); delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return nil, lastErr
+}
+
+func (p *OpenAIProvider) doChatRaw(ctx context.Context, body []byte) ([]byte, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.chatURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
@@ -210,10 +324,45 @@ func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API 错误 %d: %s", resp.StatusCode, string(respBody))
+		return nil, &providerHTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       respBody,
+			Message:    fmt.Sprintf("API 错误 %d: %s", resp.StatusCode, responseBodyPreview(respBody)),
+		}
 	}
 
 	return respBody, nil
+}
+
+const openAIProviderMaxAttempts = 3
+
+func openAIProviderRetryDelay(attempt int) time.Duration {
+	return time.Duration(attempt+1) * 200 * time.Millisecond
+}
+
+func shouldRetryOpenAIProviderError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *providerHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= http.StatusInternalServerError
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "empty reply") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "eof") ||
+		strings.Contains(lower, "stream error") ||
+		strings.Contains(lower, "timeout")
+}
+
+func responseBodyPreview(body []byte) string {
+	const maxPreviewBytes = 300
+	preview := strings.TrimSpace(string(body))
+	if len(preview) > maxPreviewBytes {
+		preview = preview[:maxPreviewBytes] + "..."
+	}
+	return preview
 }
 
 func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.ReadCloser, error) {
@@ -223,6 +372,30 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
+	// 流式路径同样要短重试。管理测试页和 VS 流式下游都会走这里，
+	// 若首个 New API 渠道短暂 503，重试可避免用户看到一次性失败。
+	var lastErr error
+	for attempt := 0; attempt < openAIProviderMaxAttempts; attempt++ {
+		stream, err := p.doChatStream(ctx, body)
+		if err == nil {
+			return stream, nil
+		}
+		lastErr = err
+		if !shouldRetryOpenAIProviderError(err) || attempt == openAIProviderMaxAttempts-1 {
+			break
+		}
+		if delay := openAIProviderRetryDelay(attempt); delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return nil, lastErr
+}
+
+func (p *OpenAIProvider) doChatStream(ctx context.Context, body []byte) (io.ReadCloser, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.chatURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
@@ -236,8 +409,16 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		respBody, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API 错误 %d", resp.StatusCode)
+		if readErr != nil {
+			return nil, fmt.Errorf("API 错误 %d，且读取错误响应失败: %w", resp.StatusCode, readErr)
+		}
+		return nil, &providerHTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       respBody,
+			Message:    fmt.Sprintf("API 错误 %d: %s", resp.StatusCode, responseBodyPreview(respBody)),
+		}
 	}
 
 	return resp.Body, nil
@@ -262,7 +443,7 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("获取模型列表失败: %s", string(body))
+		return nil, fmt.Errorf("获取模型列表失败: %s", responseBodyPreview(body))
 	}
 
 	var result struct {
@@ -271,7 +452,7 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("解析模型列表失败: %w; body_preview=%q", err, responseBodyPreview(body))
 	}
 
 	models := make([]string, 0, len(result.Data))

@@ -1,9 +1,13 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
@@ -18,6 +22,55 @@ func (s *Server) cacheRawOpenAIChatResponse(body []byte) {
 		return
 	}
 	s.cacheChatResponse(&resp)
+}
+
+func openAIStreamBodyToChatResponse(body []byte, model string) ([]byte, error) {
+	if !bytes.Contains(body, []byte("data:")) {
+		return nil, fmt.Errorf("response is not an SSE body")
+	}
+	// 真实代理非流式路径会优先 raw 透传 OpenAI 响应，以保留 provider 扩展字段。
+	// 但 useai/gpt-5.5 这类上游可能在 stream=false 时返回 SSE；VS/普通 OpenAI 客户端
+	// 此时期待 JSON 而不是 data: 行，所以必须在写给下游前聚合成标准 chat.completion。
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var content strings.Builder
+	finishReason := "stop"
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(line[5:])
+		if payload == "[DONE]" {
+			break
+		}
+		chunk, err := parseOpenAIStreamPayload(payload)
+		if err != nil {
+			continue
+		}
+		content.WriteString(chunk.Content)
+		if chunk.FinishReason != "" {
+			finishReason = chunk.FinishReason
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(content.String()) == "" {
+		return nil, fmt.Errorf("SSE response has no text content")
+	}
+	resp := provider.ChatResponse{
+		ID:      fmt.Sprintf("chatcmpl-sse-%d", time.Now().Unix()),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []provider.Choice{{
+			Index:        0,
+			Message:      provider.Message{Role: "assistant", Content: content.String()},
+			FinishReason: visualStudioFinishReason(finishReason),
+		}},
+	}
+	return json.Marshal(resp)
 }
 
 func normalizeOpenAIChatResponseForVisualStudio(body []byte) []byte {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -190,6 +191,154 @@ func TestOpenAIProviderChatRawPreservesCommonToolMatrix(t *testing.T) {
 		if !seen[name] {
 			t.Fatalf("tool %q missing from upstream request: %#v", name, capturedTools)
 		}
+	}
+}
+
+func TestOpenAIProviderChatReportsNonJSONBodyPreview(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("downstream temporarily unavailable"))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.Chat(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatalf("Chat should fail for non-JSON response")
+	}
+	if !strings.Contains(err.Error(), "body_preview") || !strings.Contains(err.Error(), "downstream temporarily unavailable") {
+		t.Fatalf("error should include response preview, got: %v", err)
+	}
+}
+
+func TestOpenAIProviderChatAcceptsSSEBodyForNonStreamRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Stream {
+			t.Fatalf("request should be non-stream")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	resp, err := prov.Chat(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if len(resp.Choices) != 1 || resp.Choices[0].Message.Content != "Hello!" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+}
+
+func TestOpenAIProviderChatRawRetriesTransientServerErrors(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"Service temporarily unavailable"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	if _, err := prov.ChatRaw(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatalf("ChatRaw returned error after retry: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestOpenAIProviderChatRawDoesNotRetryClientErrors(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad request"}}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.ChatRaw(context.Background(), &ChatRequest{Model: "bad-model", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatalf("ChatRaw should fail for 400")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+
+func TestOpenAIProviderChatStreamRetriesTransientServerErrors(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"Service temporarily unavailable"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n"))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	stream, err := prov.ChatStream(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("ChatStream returned error after retry: %v", err)
+	}
+	stream.Close()
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestOpenAIProviderListModelsReportsNonJSONBodyPreview(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("downstream models endpoint unavailable"))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.ListModels(context.Background())
+	if err == nil {
+		t.Fatalf("ListModels should fail for non-JSON response")
+	}
+	if !strings.Contains(err.Error(), "body_preview") || !strings.Contains(err.Error(), "downstream models endpoint unavailable") {
+		t.Fatalf("error should include response preview, got: %v", err)
+	}
+}
+
+func TestOpenAIProviderChatStreamReportsErrorBodyPreview(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream gateway rejected stream"))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.ChatStream(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatalf("ChatStream should fail for non-OK response")
+	}
+	if !strings.Contains(err.Error(), "API 错误 502") || !strings.Contains(err.Error(), "upstream gateway rejected stream") {
+		t.Fatalf("error should include response preview, got: %v", err)
 	}
 }
 

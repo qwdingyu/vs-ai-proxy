@@ -1260,11 +1260,44 @@ func TestManagementTestChatHandlesEmptyChoices(t *testing.T) {
 	}
 }
 
-func TestManagementTestChatRejectsModelBoundToDifferentProvider(t *testing.T) {
+func TestManagementTestChatRejectsEmptyModel(t *testing.T) {
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls++
-		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	providerCfg := config.ProviderConfig{ID: "zhipu", Name: "zhipu", Type: "openai", BaseURL: upstream.URL, Enabled: true}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": providerCfg,
+		"message":  "hello",
+		"model":    "",
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"success":false`)) {
+		t.Fatalf("empty model should fail: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	}
+}
+
+func TestManagementTestChatRejectsModelBoundToDifferentProvider(t *testing.T) {
+	chatCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"glm-5.2"}]}`))
+		case "/v1/chat/completions":
+			chatCalls++
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer upstream.Close()
 
@@ -1294,8 +1327,90 @@ func TestManagementTestChatRejectsModelBoundToDifferentProvider(t *testing.T) {
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"provider_id":"zhipu"`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"model":"z-ai/glm-5.2"`)) {
 		t.Fatalf("wrong provider response should include request context: %s", rec.Body.String())
 	}
-	if upstreamCalls != 0 {
-		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	if chatCalls != 0 {
+		t.Fatalf("chat calls = %d, want 0", chatCalls)
+	}
+}
+
+func TestManagementTestChatAllowsLiveProviderModelDespiteStaleBinding(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-v4-flash"}]}`))
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	usecpaProvider := config.ProviderConfig{ID: "usecpa", Name: "UseCpa", Type: "openai", BaseURL: upstream.URL, Enabled: true}
+	cfg := apiSrv.configMgr.Get()
+	cfg.Providers = []config.ProviderConfig{usecpaProvider}
+	cfg.Models = []config.ModelConfig{{Name: "deepseek-v4-flash", ProviderID: "deepseek", Provider: "deepseek", Enabled: true}}
+	if err := apiSrv.configMgr.Save(cfg); err != nil {
+		t.Fatalf("Save config: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": usecpaProvider,
+		"message":  "hello",
+		"model":    "deepseek-v4-flash",
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"success":true`)) {
+		t.Fatalf("live provider model should not be blocked by stale config binding: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagementTestChatFallsBackToStreamWhenNonStreamFails(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.5"}]}`))
+		case "/v1/chat/completions":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode chat request: %v", err)
+			}
+			if body["stream"] == true {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(strings.Join([]string{
+					`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+					`data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}`,
+					`data: {"choices":[{"delta":{"content":"!"},"finish_reason":null}]}`,
+					`data: [DONE]`,
+					``,
+				}, "\n")))
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"message":"upstream error: do request failed","code":"do_request_failed"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	providerCfg := config.ProviderConfig{ID: "useai", Name: "UseAI", Type: "openai", BaseURL: upstream.URL + "/v1", Enabled: true}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": providerCfg,
+		"message":  "hi",
+		"model":    "gpt-5.5",
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"success":true`)) {
+		t.Fatalf("stream fallback should succeed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"fallback_mode":"stream"`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"content":"Hello!"`)) {
+		t.Fatalf("stream fallback details missing: %s", rec.Body.String())
 	}
 }
 

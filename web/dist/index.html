@@ -118,7 +118,7 @@
             <p class="hint">VS AI Proxy 是一个轻量代理面板，用来统一管理 OpenAI-compatible、DeepSeek、Ollama 等 provider，并兼容 Visual Studio / Copilot 的模型发现和聊天接口。</p>
             <ul class="feature-list">
               <li>一个端口同时提供代理接口和 Web 管理面板。</li>
-              <li>支持多 provider、多模型、优先级路由和连接测试。</li>
+              <li>支持多 provider、多模型、优先级路由和模型列表校验。</li>
               <li>提供请求统计、日志排障和正式版本自动更新。</li>
             </ul>
           </div>
@@ -237,7 +237,7 @@
             <label>优先级 <input type="number" id="pPriority" /></label>
             <label>启用 <input type="checkbox" id="pEnabled" checked /></label>
             <div class="actions">
-              <button class="btn" id="btnProbeProvider">探测</button>
+              <button class="btn" id="btnProbeProvider">探测模型</button>
               <button class="btn" id="btnCancelProvider">取消</button>
               <button class="btn primary" id="btnSaveProvider">保存</button>
             </div>
@@ -292,7 +292,7 @@
             <label>模型 <select id="testModel"></select></label>
             <label>测试消息 <textarea id="testMessage" placeholder="输入一段测试对话"></textarea></label>
             <div class="actions">
-              <button class="btn" id="btnTestConnection">测试连接</button>
+              <button class="btn" id="btnTestConnection">读取模型列表</button>
               <button class="btn primary" id="btnTestChat">测试对话</button>
             </div>
           </div>
@@ -300,11 +300,11 @@
             <div class="panel" style="margin:0;">
               <div class="label">测试结果</div>
               <div class="status-pill" id="testStatus">等待测试</div>
-              <div class="pre" id="testOutput">这里会显示连接测试或 chat 返回内容。</div>
+              <div class="pre" id="testOutput">这里会显示模型列表校验或 chat 返回内容。</div>
             </div>
             <div class="panel" style="margin:0;">
               <div class="label">提示</div>
-              <div class="hint">连接测试走 `/admin/api/test/connection`，聊天测试走 `/admin/api/test/chat`。这里是 UI 级闭环验证，不替代代理真实路由测试。</div>
+              <div class="hint">模型列表校验走 `/admin/api/test/connection`，用于读取所选 provider 官方 `/models` 返回；聊天测试走 `/admin/api/test/chat`，用于验证指定模型能否完成一次真实对话。</div>
             </div>
           </div>
         </div>
@@ -706,7 +706,7 @@
             <td>
               <button class="btn" data-action="edit-provider" data-name="${providerKey(item)}">编辑</button>
               ${isBuiltInUseAI(item) ? '' : `<button class="btn danger" data-action="delete-provider" data-name="${providerKey(item)}">删除</button>`}
-              <button class="btn" data-action="test-provider" data-name="${providerKey(item)}">测试</button>
+              <button class="btn" data-action="test-provider" data-name="${providerKey(item)}">校验模型列表</button>
             </td>
           </tr>
         `).join('');
@@ -770,6 +770,7 @@
     };
 
     const refreshTestModelOptions = async (preferredModel = '') => {
+      const seq = ++testModelLoadSeq;
       const modelSelect = $('testModel');
       const providerId = $('testProvider').value;
       const provider = currentProviders.find((p) => providerKey(p) === providerId);
@@ -789,15 +790,17 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ provider })
         });
+        if (seq !== testModelLoadSeq || $('testProvider').value !== providerId) return;
         if (!res.success) {
-          modelSelect.innerHTML = '<option value="">读取模型失败，请先测试连接</option>';
+          modelSelect.innerHTML = '<option value="">读取模型失败，请重新读取模型列表</option>';
           setTestResult('模型列表读取失败', formatTestResult(res));
           return;
         }
         models = (res.models || []).map((name) => String(name || '').trim()).filter(Boolean);
         currentModels = models.map((name) => ({ name, provider_id: providerId, provider: providerId, enabled: true }));
       } catch (e) {
-        modelSelect.innerHTML = '<option value="">读取模型失败，请先测试连接</option>';
+        if (seq !== testModelLoadSeq || $('testProvider').value !== providerId) return;
+        modelSelect.innerHTML = '<option value="">读取模型失败，请重新读取模型列表</option>';
         setTestResult('模型列表读取失败', String(e.message || e));
         return;
       }
@@ -817,6 +820,20 @@
     const setTestResult = (status, output) => {
       $('testStatus').textContent = status;
       $('testOutput').textContent = output;
+    };
+
+    const withButtonLoading = async (buttonId, loadingText, action) => {
+      const button = $(buttonId);
+      if (!button || button.disabled) return;
+      const previousText = button.textContent;
+      button.disabled = true;
+      button.textContent = loadingText;
+      try {
+        return await action();
+      } finally {
+        button.disabled = false;
+        button.textContent = previousText;
+      }
     };
 
     const formatTestResult = (result) => {
@@ -1019,6 +1036,7 @@
     // 提供商弹窗状态
     let editingProviderName = null;
     let editingModelName = null;
+    let testModelLoadSeq = 0;
 
     // 打开新增提供商弹窗
     $('btnAddProvider').addEventListener('click', () => {
@@ -1066,7 +1084,7 @@
           body: JSON.stringify({ provider })
         });
         if (!result.reachable) {
-          return alert('探测失败：' + result.message + '\n\n' + JSON.stringify(result.attempts || [], null, 2));
+          return alert('模型接口探测失败：无法从该 provider 的官方模型列表接口读取可用模型。\n\n' + result.message + '\n\n' + JSON.stringify(result.attempts || [], null, 2));
         }
         lastProviderProbe = {
           provider_id: provider.id,
@@ -1075,7 +1093,7 @@
           detected_type: result.detected_type,
           corrected_base_url: result.corrected_base_url
         };
-        const summary = `探测成功\n类型：${result.detected_type}\n建议 Base URL：${result.corrected_base_url}\n模型数：${result.models_count}\n示例：${(result.models_preview || []).join(', ')}`;
+        const summary = `模型接口探测成功\n含义：已验证 Base URL/API Key 可读取官方模型列表；这不等同于每个模型都能完成对话。\n类型：${result.detected_type}\n建议 Base URL：${result.corrected_base_url}\n模型数：${result.models_count}\n示例：${(result.models_preview || []).join(', ')}`;
         if (result.corrected_base_url && result.corrected_base_url !== provider.base_url) {
           if (window.confirm(summary + '\n\n是否将建议 Base URL 填入表单？')) {
             $('pBase').value = result.corrected_base_url;
@@ -1085,7 +1103,7 @@
         }
         alert(summary);
       } catch (e) {
-        alert('探测失败：' + String(e.message || e));
+        alert('模型接口探测失败：' + String(e.message || e));
       }
     });
 
@@ -1150,17 +1168,21 @@
     });
 
     $('btnTestConnection').addEventListener('click', async () => {
-      const provider = currentProviders.find((p) => providerKey(p) === $('testProvider').value);
-      if (!provider) {
-        setTestResult('无可用提供商', '请先在提供商页新增并启用至少一个 provider。');
-        return;
-      }
-      try {
-        const res = await fetchJSON('/test/connection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider }) });
-        setTestResult(res.success ? '连接成功' : '连接失败', formatTestResult(res));
-      } catch (e) {
-        setTestResult('连接测试失败', String(e.message || e));
-      }
+      await withButtonLoading('btnTestConnection', '测试中...', async () => {
+        const provider = currentProviders.find((p) => providerKey(p) === $('testProvider').value);
+        if (!provider) {
+          setTestResult('无可用提供商', '请先在提供商页新增并启用至少一个 provider。');
+          return;
+        }
+        setTestResult('模型列表读取中...', '正在读取当前提供商官方 /models 返回，请稍候。');
+        try {
+          const res = await fetchJSON('/test/connection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider }) });
+          setTestResult(res.success ? '模型列表读取成功' : '模型列表读取失败', formatTestResult(res));
+          if (res.success) await refreshTestModelOptions($('testModel').value.trim());
+        } catch (e) {
+          setTestResult('模型列表读取失败', String(e.message || e));
+        }
+      });
     });
 
     $('testProvider').addEventListener('change', async () => {
@@ -1168,30 +1190,38 @@
     });
 
     $('btnTestChat').addEventListener('click', async () => {
-      const provider = currentProviders.find((p) => providerKey(p) === $('testProvider').value);
-      if (!provider) {
-        setTestResult('无可用提供商', '请先在提供商页新增并启用至少一个 provider。');
-        return;
-      }
-      const message = $('testMessage').value.trim();
-      if (!message) {
-        setTestResult('消息为空', '请输入测试消息。');
-        return;
-      }
-      try {
-        const res = await fetchJSON('/test/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            provider,
-            message,
-            model: $('testModel').value.trim()
-          })
-        });
-        setTestResult(res.success ? '对话成功' : '对话失败', formatTestResult(res));
-      } catch (e) {
-        setTestResult('对话测试失败', String(e.message || e));
-      }
+      await withButtonLoading('btnTestChat', '对话中...', async () => {
+        const provider = currentProviders.find((p) => providerKey(p) === $('testProvider').value);
+        if (!provider) {
+          setTestResult('无可用提供商', '请先在提供商页新增并启用至少一个 provider。');
+          return;
+        }
+        const message = $('testMessage').value.trim();
+        if (!message) {
+          setTestResult('消息为空', '请输入测试消息。');
+          return;
+        }
+        const model = $('testModel').value.trim();
+        if (!model || $('testModel').disabled) {
+          setTestResult('模型未选择', '请先等待当前提供商的官方模型列表加载完成，并选择一个模型。');
+          return;
+        }
+        setTestResult('对话测试中...', `正在使用 ${providerKey(provider)} / ${model} 测试；请勿重复点击。`);
+        try {
+          const res = await fetchJSON('/test/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              provider,
+              message,
+              model
+            })
+          });
+          setTestResult(res.success ? '对话成功' : '对话失败', formatTestResult(res));
+        } catch (e) {
+          setTestResult('对话测试失败', String(e.message || e));
+        }
+      });
     });
 
     // 打开新增模型弹窗
@@ -1289,7 +1319,7 @@
       }
     });
 
-    // 表格内操作按钮统一处理：编辑、删除、测试
+      // 表格内操作按钮统一处理：编辑、删除、模型列表校验
     document.addEventListener('click', async (e) => {
       const btn = e.target.closest('button[data-action]');
       if (!btn) return;
@@ -1322,7 +1352,10 @@
         const item = (res.providers || []).find((x) => providerKey(x) === name || x.name === name);
         if (!item) return;
         const test = await fetchJSON('/test/connection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: item }) });
-        alert(test.success ? '连接成功' : '连接失败: ' + test.message);
+        const models = (test.models || []).slice(0, 10).join(', ');
+        alert(test.success
+          ? `模型列表校验成功：已从该 provider 官方 /models 接口读取到 ${test.models_count || (test.models || []).length || 0} 个模型。\n\n示例：${models || '-'}`
+          : `模型列表校验失败：无法从该 provider 官方 /models 接口读取可用模型。\n\n${test.message || test.error || '未知错误'}`);
       }
       if (action === 'delete-model') {
         const res = await fetchJSON('/models');

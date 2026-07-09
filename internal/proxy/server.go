@@ -534,6 +534,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				// Visual Studio Copilot 适配：
+				// 部分 OpenAI-compatible 上游即使 stream=false 也会返回 SSE data: chunk。
+				// 非流式下游期望 JSON，直接透传会导致解析失败，因此先尽力聚合为标准 chat.completion。
+				if converted, convErr := openAIStreamBodyToChatResponse(body, req.Model); convErr == nil {
+					body = converted
+				}
+				// Visual Studio Copilot 适配：
 				// raw OpenAI 响应直接透传能最大化保留上游扩展字段，但 VS 对
 				// finish_reason 比 Web/ curl 更严格，写回前需要做最小兼容归一化。
 				body = normalizeOpenAIChatResponseForVisualStudio(body)
