@@ -97,13 +97,18 @@ func ModelBasename(model string) string {
 }
 
 func DisplayNameModelSuffix(model string) string {
+	_, suffix := DisplayNameParts(model)
+	return suffix
+}
+
+func DisplayNameParts(model string) (string, string) {
 	clean := StripModelTag(strings.TrimSpace(model))
 	sep := " - "
 	idx := strings.LastIndex(clean, sep)
 	if idx < 0 || idx+len(sep) >= len(clean) {
-		return ""
+		return "", ""
 	}
-	return strings.TrimSpace(clean[idx+len(sep):])
+	return strings.TrimSpace(clean[:idx]), strings.TrimSpace(clean[idx+len(sep):])
 }
 
 func StripModelTag(model string) string {

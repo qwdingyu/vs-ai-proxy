@@ -589,7 +589,15 @@
       const code = escapeHTML(log.error_code || 'error');
       const message = escapeHTML(log.error_message || '请求失败');
       const hint = log.error_hint ? `&#10;建议: ${escapeHTML(log.error_hint)}` : '';
-      return `<span class="badge warn" title="${message}${hint}">${code}</span>`;
+      const requestSize = Number(log.request_bytes || 0) > 0 ? `&#10;请求体: ${formatBytes(log.request_bytes)}` : '';
+      return `<span class="badge warn" title="${message}${hint}${requestSize}">${code}</span>`;
+    };
+    const formatBytes = (bytes) => {
+      const n = Number(bytes || 0);
+      if (!Number.isFinite(n) || n <= 0) return '-';
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / 1024 / 1024).toFixed(2)} MB`;
     };
     const formatToolDiagnostics = (log) => {
       const parts = [];

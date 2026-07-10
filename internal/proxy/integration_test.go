@@ -1030,6 +1030,42 @@ func TestDoesNotCrossProviderFailoverWhenPrimaryProviderFails(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsDisplayNamePrefixPinsProvider(t *testing.T) {
+	useai := newFakeProvider("useai", true, []string{"step-3.7-flash"}, &fakeChatResponse{Model: "step-3.7-flash", Content: "useai"}, "")
+	usecpa := newFakeProvider("usecpa", true, []string{"step-3.7-flash"}, &fakeChatResponse{Model: "step-3.7-flash", Content: "usecpa"}, "")
+
+	server := newOpenServer()
+	registry := provider.NewRegistry("step-3.7-flash", 0)
+	registry.Add(&provider.ProviderEntry{Provider: useai, Models: useai.models, Priority: 1, Aliases: []string{"UseAI"}})
+	registry.Add(&provider.ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 2, Aliases: []string{"UseCpa"}})
+	registry.SetModels("useai", useai.models)
+	registry.SetModels("usecpa", usecpa.models)
+	server.registry = registry
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"UseCpa - step-3.7-flash:latest","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if useai.chatCalls != 0 || useai.rawCalls != 0 || useai.streamCalls != 0 {
+		t.Fatalf("useai must not receive UseCpa display model: chat=%d raw=%d stream=%d", useai.chatCalls, useai.rawCalls, useai.streamCalls)
+	}
+	if usecpa.chatCalls != 1 {
+		t.Fatalf("usecpa chat calls = %d, want 1", usecpa.chatCalls)
+	}
+	if !strings.Contains(rec.Body.String(), "usecpa") {
+		t.Fatalf("response should come from usecpa: %s", rec.Body.String())
+	}
+}
+
 func TestChatCompletionsPreservesOpenAIRawResponseFields(t *testing.T) {
 	raw := []byte(`{
 		"id":"chatcmpl-raw",

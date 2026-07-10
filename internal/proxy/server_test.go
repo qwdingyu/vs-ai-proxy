@@ -77,7 +77,8 @@ func TestLoggingMiddlewareCapturesProviderAndModelHeaders(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	body := `{"model":"useai-model"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -93,6 +94,9 @@ func TestLoggingMiddlewareCapturesProviderAndModelHeaders(t *testing.T) {
 	}
 	if logs[0].Upstream != "upstream-model" {
 		t.Fatalf("upstream = %q, want upstream-model", logs[0].Upstream)
+	}
+	if logs[0].RequestBytes != int64(len(body)) {
+		t.Fatalf("request bytes = %d, want %d", logs[0].RequestBytes, len(body))
 	}
 }
 

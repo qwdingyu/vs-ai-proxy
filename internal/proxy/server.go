@@ -125,6 +125,7 @@ func (s *Server) buildRegistry(cfg *config.AppConfig) *provider.Registry {
 			// 避免上游 /models 发现失败或尚未刷新时，Visual Studio 已保存的模型无法路由。
 			Models:   configuredModelsForProvider(cfg, p),
 			Priority: p.Priority,
+			Aliases:  []string{config.ProviderKey(p), p.Name, p.DisplayName},
 		})
 
 		s.logger.Info("已注册提供商: %s (%s)", config.ProviderKey(p), p.Type)
@@ -334,6 +335,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			Provider:      provider,
 			Model:         model,
 			Upstream:      upstream,
+			RequestBytes:  r.ContentLength,
 			StatusCode:    ww.statusCode,
 			ElapsedMs:     elapsed,
 			IsSuccess:     ww.statusCode < 400,

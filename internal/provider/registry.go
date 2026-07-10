@@ -14,6 +14,7 @@ type ProviderEntry struct {
 	Provider Provider
 	Models   []string
 	Priority int
+	Aliases  []string
 }
 
 // Candidate 故障转移候选
@@ -84,6 +85,7 @@ func (r *Registry) Add(entry *ProviderEntry) {
 	if entry.Models == nil {
 		entry.Models = []string{}
 	}
+	entry.Aliases = normalizeProviderAliases(append(entry.Aliases, name))
 
 	r.mu.Lock()
 	if _, exists := r.entries[name]; !exists {
@@ -102,6 +104,9 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 	defer r.mu.RUnlock()
 
 	if candidates := r.resolveProviderHintCandidatesLocked(model); len(candidates) > 0 {
+		return candidates
+	}
+	if candidates, matchedDisplayProvider := r.resolveDisplayNameCandidatesLocked(model); matchedDisplayProvider {
 		return candidates
 	}
 
@@ -132,6 +137,24 @@ func (r *Registry) ResolveCandidates(model string) []Candidate {
 	}
 
 	return r.rankCandidatesLocked(r.fallbackCandidatesLocked(resolved))
+}
+
+func (r *Registry) resolveDisplayNameCandidatesLocked(model string) ([]Candidate, bool) {
+	providerDisplay, displayModel := DisplayNameParts(model)
+	if providerDisplay == "" || displayModel == "" {
+		return nil, false
+	}
+	entry := r.entryByNameLocked(providerDisplay)
+	if entry == nil || entry.Provider == nil {
+		return nil, false
+	}
+	if !entry.Provider.IsEnabled() {
+		return nil, true
+	}
+	if candidate, ok := r.candidateForEntryModelLocked(entry, displayModel); ok {
+		return []Candidate{candidate}, true
+	}
+	return nil, true
 }
 
 // RecordCandidateSuccess 记录 provider 成功请求，用于同优先级内健康排序。
@@ -356,6 +379,35 @@ func (r *Registry) resolveProviderHintLocked(clean string) (*ProviderEntry, stri
 		}
 	}
 	return nil, "", false
+}
+
+func (r *Registry) candidateForEntryModelLocked(entry *ProviderEntry, requested string) (Candidate, bool) {
+	requested = StripModelTag(strings.TrimSpace(requested))
+	if entry == nil || entry.Provider == nil || requested == "" {
+		return Candidate{}, false
+	}
+	for _, model := range entry.Models {
+		upstream := strings.TrimSpace(model)
+		if upstream == "" {
+			continue
+		}
+		if strings.EqualFold(upstream, requested) || strings.EqualFold(ModelBasename(upstream), requested) {
+			return Candidate{Provider: entry, UpstreamID: upstream, ModelID: upstream, Priority: entry.Priority}, true
+		}
+	}
+	for model, owner := range r.modelToProvider {
+		if owner == nil || !sameProvider(owner, entry) {
+			continue
+		}
+		upstream := strings.TrimSpace(r.modelToUpstream[model])
+		if upstream == "" {
+			upstream = strings.TrimSpace(model)
+		}
+		if strings.EqualFold(model, requested) || strings.EqualFold(upstream, requested) || strings.EqualFold(ModelBasename(upstream), requested) {
+			return Candidate{Provider: entry, UpstreamID: upstream, ModelID: upstream, Priority: entry.Priority}, true
+		}
+	}
+	return Candidate{}, false
 }
 
 func (r *Registry) resolveCandidatesLocked(model string) []Candidate {
@@ -877,12 +929,39 @@ func (r *Registry) providerOrderLocked(entry *ProviderEntry) int {
 }
 
 func (r *Registry) entryByNameLocked(name string) *ProviderEntry {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
 	for key, entry := range r.entries {
 		if strings.EqualFold(key, name) {
 			return entry
 		}
+		for _, alias := range entry.Aliases {
+			if strings.EqualFold(alias, name) {
+				return entry
+			}
+		}
 	}
 	return nil
+}
+
+func normalizeProviderAliases(values []string) []string {
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func sameProvider(a, b *ProviderEntry) bool {

@@ -18,6 +18,7 @@ type RequestLog struct {
 	Provider      string    `json:"provider,omitempty"`
 	Model         string    `json:"model,omitempty"`
 	Upstream      string    `json:"upstream,omitempty"`
+	RequestBytes  int64     `json:"request_bytes,omitempty"`
 	StatusCode    int       `json:"status_code"`
 	ElapsedMs     float64   `json:"elapsed_ms"`
 	IsSuccess     bool      `json:"is_success"`

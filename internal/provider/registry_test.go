@@ -308,6 +308,46 @@ func TestRegistryResolvesVisualStudioDisplayBasenameToNamespacedUpstream(t *test
 	}
 }
 
+func TestRegistryDisplayNamePrefixPinsProviderWhenModelShared(t *testing.T) {
+	registry := NewRegistry("step-3.7-flash", time.Minute)
+	useai := &fakeProvider{name: "useai", enabled: true, models: []string{"step-3.7-flash"}}
+	usecpa := &fakeProvider{name: "usecpa", enabled: true, models: []string{"step-3.7-flash"}}
+
+	registry.Add(&ProviderEntry{Provider: useai, Models: useai.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 2, Aliases: []string{"UseCpa", "UseCpa Paid"}})
+	registry.SetModels("useai", useai.models)
+	registry.SetModels("usecpa", usecpa.models)
+
+	for _, requested := range []string{"UseCpa - step-3.7-flash:latest", "UseCpa Paid - step-3.7-flash:latest"} {
+		candidates := registry.ResolveCandidates(requested)
+		if len(candidates) != 1 {
+			t.Fatalf("%s candidates len = %d, want 1: %#v", requested, len(candidates), candidates)
+		}
+		if candidates[0].Provider.Provider.Name() != "usecpa" {
+			t.Fatalf("%s display provider prefix should pin usecpa, got %q", requested, candidates[0].Provider.Provider.Name())
+		}
+		if candidates[0].ModelID != "step-3.7-flash" {
+			t.Fatalf("%s model id = %q, want step-3.7-flash", requested, candidates[0].ModelID)
+		}
+	}
+}
+
+func TestRegistryDisplayNamePrefixDoesNotFallbackToAnotherProvider(t *testing.T) {
+	registry := NewRegistry("step-3.7-flash", time.Minute)
+	useai := &fakeProvider{name: "useai", enabled: true, models: []string{"step-3.7-flash"}}
+	usecpa := &fakeProvider{name: "usecpa", enabled: true, models: []string{"other-model"}}
+
+	registry.Add(&ProviderEntry{Provider: useai, Models: useai.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 2, Aliases: []string{"UseCpa"}})
+	registry.SetModels("useai", useai.models)
+	registry.SetModels("usecpa", usecpa.models)
+
+	candidates := registry.ResolveCandidates("UseCpa - step-3.7-flash:latest")
+	if len(candidates) != 0 {
+		t.Fatalf("display provider prefix must not fallback to useai when usecpa lacks model: %#v", candidates)
+	}
+}
+
 func TestRegistryDoesNotStripRealColonModelSuffix(t *testing.T) {
 	registry := NewRegistry("qwen3-coder:480b", time.Minute)
 	ollamaCloud := &fakeProvider{
