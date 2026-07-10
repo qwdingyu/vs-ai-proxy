@@ -86,7 +86,7 @@ http://127.0.0.1:12345/v1
 .\vs-ai-proxy.exe --version
 ```
 
-确认版本为 `v0.2.25` 或更新版本后，再重新启动 Visual Studio。
+确认版本为 `v0.2.28` 或更新版本后，再重新启动 Visual Studio。
 
 如需临时指定端口：
 
@@ -136,7 +136,7 @@ C:\Users\你的用户名\.config\vs-ai-proxy\config.json
 
 请确认所选模型和上游 provider 支持工具调用。不同上游对流式、非流式、`tool_calls` 的兼容程度不同，建议优先使用测试页和请求日志定位。
 
-如果在 Visual Studio Copilot 中看到 `Proxy blocked undeclared tool calls: <empty>`、`create_file` / `grep_search` / `powershell` 无法执行，或流式工具调用参数丢失，请先升级到 `v0.2.24` 或更新版本。`v0.2.24` 修复了 OpenAI 流式 `tool_calls` / legacy `function_call` 参数分片、非法工具拦截后的续片丢弃，以及 `finish_reason` 与实际剩余工具调用不一致的问题。
+如果在 Visual Studio Copilot 中看到 `create_file` / `grep_search` / `powershell` 无法执行、流式工具调用参数丢失，或日志出现 `Proxy blocked undeclared tool calls`，请先升级到 `v0.2.28` 或更新版本。`v0.2.28` 统一收紧了 OpenAI `tool_calls`、legacy `function_call`、流式工具分片和 DSML 方言的工具声明边界：只有当前请求显式声明的工具才会透传；未声明工具会被阻断，并同步修正 `finish_reason` / `done_reason`，避免客户端误进入工具执行状态。
 
 ## 加入 QQ 群
 

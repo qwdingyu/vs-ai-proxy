@@ -591,3 +591,69 @@ OpenAI SSE 转 Ollama NDJSON 路径也做了黑盒验证：
 ### 结论
 
 `v0.2.25` 发布资产本身已经通过黑盒验收。当前建议用户直接升级到 `v0.2.25`，不是只依赖源码测试或本地未打包版本判断。
+
+## 2026-07-10 追加：v0.2.27 / v0.2.28 全局工具边界收紧
+
+### 为什么不能继续局部打补丁
+
+VS Copilot 的真实请求可能同时覆盖以下形态：
+
+- 标准 OpenAI `tool_calls`
+- legacy `function_call`
+- 流式 `tool_calls` 参数分片
+- 流式 legacy `function_call` 参数分片
+- 多 `choice.index` 并发流
+- DSML 文本工具方言
+- OpenAI SSE 转 Ollama NDJSON 的 `/api/chat` 路径
+- 上游返回 raw JSON、typed `ChatResponse` 或 fallback 聚合结果
+
+如果只在某一个 handler、某一种模型名、某一种工具名上修复，会继续出现“测试页成功、VS 真实路径失败”或“某个模型正常、另一个模型工具全被拦”的问题。
+
+### 当前最终策略
+
+当前实现采用统一的安全边界：**响应里只有当前请求显式声明过的工具，才允许继续以可执行工具调用形式透传给下游。**
+
+允许工具来源只有两个：
+
+1. OpenAI `tools[].function.name`
+2. legacy `functions[].name`
+
+如果请求没有声明任何工具，则响应里的标准 `tool_calls`、legacy `function_call`、DSML 可执行转换结果都不得透传为可执行工具。
+
+### v0.2.27 修复点
+
+流式工具状态从只按 `tool.index` 记录，升级为按 `choice.index + tool.index` 记录。
+
+原因：OpenAI SSE 允许多个 choice 同时流式返回；不同 choice 可以同时出现 `tool_calls[0]`。如果只按工具 index 记录，choice 0 的合法工具状态可能污染 choice 1，导致未声明或非法工具被误放行，或合法工具参数续片被误拦截。
+
+### v0.2.28 修复点
+
+请求未声明工具时，不再把响应工具调用视为“无需过滤”。这包括：
+
+- raw OpenAI JSON 里的 `message.tool_calls`
+- raw OpenAI JSON 里的 `message.function_call`
+- typed `ChatResponse` 里的工具调用
+- OpenAI SSE 里的流式 `tool_calls`
+- OpenAI SSE 里的流式 legacy `function_call`
+- OpenAI SSE 转 Ollama NDJSON 路径
+
+用户可见的空工具名提示也从 `<empty>` 改为 `空工具名`，避免误以为代理内部异常。
+
+### 必须继续保持的发布门禁
+
+工具调用相关改动发布前，必须至少覆盖：
+
+```bash
+go test ./internal/proxy -count=1
+go test ./... -count=1
+go test -race ./internal/proxy -count=1
+git diff --check
+```
+
+同时需要确认 GitHub Release 中 Windows 包存在，并验证 `vs-ai-proxy.exe --version` 输出为当前 tag。
+
+### 当前推荐版本
+
+Windows + Visual Studio Copilot 用户当前建议升级到 `v0.2.28` 或更新版本。
+
+不要再推荐 `v0.2.24` / `v0.2.25` 作为最终修复版本；这些版本是修复链路中的阶段性版本，不包含后续“多 choice 状态隔离”和“请求无声明工具时阻断所有工具调用”的最终边界收紧。
