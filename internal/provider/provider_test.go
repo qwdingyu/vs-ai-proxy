@@ -119,6 +119,82 @@ func TestOpenAIProviderChatRawPreservesToolFields(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderChatRawConvertsMaxOutputTokensForChatCompletions(t *testing.T) {
+	var captured map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	var req ChatRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"create files"}],
+		"max_output_tokens":8192,
+		"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}],
+		"tool_choice":"auto"
+	}`), &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	if _, err := prov.ChatRaw(context.Background(), &req); err != nil {
+		t.Fatalf("ChatRaw returned error: %v", err)
+	}
+	if _, leaked := captured["max_output_tokens"]; leaked {
+		t.Fatalf("max_output_tokens must not be sent to /chat/completions: %#v", captured)
+	}
+	if captured["max_tokens"] != float64(8192) {
+		t.Fatalf("max_tokens = %#v, want 8192; body=%#v", captured["max_tokens"], captured)
+	}
+	if tools, _ := captured["tools"].([]any); len(tools) != 1 {
+		t.Fatalf("tools should remain declared after parameter normalization: %#v", captured)
+	}
+}
+
+func TestOpenAIProviderChatStreamConvertsMaxOutputTokensForChatCompletions(t *testing.T) {
+	var captured map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	var req ChatRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"create files"}],
+		"max_output_tokens":8192,
+		"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}],
+		"tool_choice":"auto"
+	}`), &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	stream, err := prov.ChatStream(context.Background(), &req)
+	if err != nil {
+		t.Fatalf("ChatStream returned error: %v", err)
+	}
+	_ = stream.Close()
+	if _, leaked := captured["max_output_tokens"]; leaked {
+		t.Fatalf("max_output_tokens must not be sent to streamed /chat/completions: %#v", captured)
+	}
+	if captured["max_tokens"] != float64(8192) || captured["stream"] != true {
+		t.Fatalf("stream request was not normalized correctly: %#v", captured)
+	}
+	if tools, _ := captured["tools"].([]any); len(tools) != 1 {
+		t.Fatalf("tools should remain declared after stream parameter normalization: %#v", captured)
+	}
+}
+
 func TestOpenAIProviderChatRawPreservesCommonToolMatrix(t *testing.T) {
 	var captured map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

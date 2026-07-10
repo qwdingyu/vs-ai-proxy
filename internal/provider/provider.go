@@ -279,7 +279,7 @@ func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 	defer cancel()
 
 	req.Stream = false
-	body, err := json.Marshal(req)
+	body, err := marshalOpenAIChatCompletionsRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
@@ -398,7 +398,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	ctx, cancel := providerOperationContext(ctx, p.Timeout)
 
 	req.Stream = true
-	body, err := json.Marshal(req)
+	body, err := marshalOpenAIChatCompletionsRequest(req)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
@@ -427,6 +427,28 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	}
 	cancel()
 	return nil, lastErr
+}
+
+func marshalOpenAIChatCompletionsRequest(req *ChatRequest) ([]byte, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeOpenAIChatCompletionsRequestBody(body)
+}
+
+func normalizeOpenAIChatCompletionsRequestBody(body []byte) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+	if maxOutput, ok := raw["max_output_tokens"]; ok {
+		if _, hasMaxTokens := raw["max_tokens"]; !hasMaxTokens {
+			raw["max_tokens"] = maxOutput
+		}
+		delete(raw, "max_output_tokens")
+	}
+	return json.Marshal(raw)
 }
 
 type cancelReadCloser struct {
