@@ -90,7 +90,7 @@ func (s *Server) applyExecutionDefaults(
 	}
 
 	modelCfg, ok := findModelConfig(cfg, requestedModel, req.Model, prov.Name())
-	caps := provider.GetCapabilities(prov.Name())
+	caps := provider.GetCapabilities(provider.CapabilityNameOf(prov))
 	if !ok {
 		s.applyGlobalDefaults(req)
 		if !caps.SupportsTopK {
@@ -159,7 +159,7 @@ func (s *Server) applyProfileDefaults(
 	if req == nil {
 		return
 	}
-	caps := provider.GetCapabilities(prov.Name())
+	caps := provider.GetCapabilities(provider.CapabilityNameOf(prov))
 	isNativeReasoner := caps.SupportsReasoningEffort && strings.TrimSpace(profile.ReasoningEffort) != ""
 
 	if profile.OverrideClientParams {

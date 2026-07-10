@@ -93,7 +93,7 @@ func main() {
 		Addr:         appAddr,
 		Handler:      newUnifiedHandler(apiSrv.Handler(), proxySrv.Handler()),
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout: 210 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

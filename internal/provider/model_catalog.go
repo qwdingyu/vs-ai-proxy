@@ -191,6 +191,54 @@ func (c *ModelCatalog) Profile(model, provider string) (ModelProfile, bool) {
 	return ModelProfile{}, false
 }
 
+// ProfileFromSelections 只从内置/用户 model-selection 中读取执行 profile，
+// 不要求对应 provider 已注册或启用，也不会写入路由映射。它用于自定义
+// OpenAI-compatible provider 复用通用模型族参数，例如 useai2/gpt-5.5
+// 继承 openai/gpt-5 的 timeout_seconds。
+func (c *ModelCatalog) ProfileFromSelections(model string, providers ...string) (ModelProfile, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	model = strings.TrimSpace(model)
+	if model == "" || len(providers) == 0 {
+		return ModelProfile{}, false
+	}
+	providerSet := map[string]struct{}{}
+	for _, provider := range providers {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider != "" {
+			providerSet[provider] = struct{}{}
+		}
+	}
+	if len(providerSet) == 0 {
+		return ModelProfile{}, false
+	}
+
+	bestScore := -1
+	var best ModelProfile
+	for _, sel := range c.configs {
+		if _, ok := providerSet[strings.ToLower(strings.TrimSpace(sel.Provider))]; !ok {
+			continue
+		}
+		for _, profile := range sel.Models {
+			if !profile.Enabled {
+				continue
+			}
+			if strings.TrimSpace(profile.Provider) == "" {
+				profile.Provider = sel.Provider
+			}
+			if score := ProfileNameMatchScore(model, profile.Model); betterProfileMatch(score, profile.MatchPriority, bestScore, best) {
+				bestScore = score
+				best = profile
+			}
+		}
+	}
+	if bestScore < 0 {
+		return ModelProfile{}, false
+	}
+	return best, true
+}
+
 // ProfileAny 返回跨 provider 的最佳模型 profile。
 // 管理端新增模型时 provider 可能是自定义聚合商，无法与内置 provider 名完全对应；
 // 这里只用模型名做元数据补齐，不参与真实请求路由。

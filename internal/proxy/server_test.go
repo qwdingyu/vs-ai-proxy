@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
 	"github.com/dingyuwang/vs-ai-proxy/internal/log"
@@ -173,8 +174,24 @@ func TestServerConfigDirFollowsConfigManagerPath(t *testing.T) {
 }
 
 func TestModelTimeoutSecondsUsesSafeDefaultBudget(t *testing.T) {
-	if got := modelTimeoutSeconds(&config.AppConfig{}, "gpt-test", "gpt-test", "useai", provider.ModelProfile{}, false); got != 60 {
-		t.Fatalf("default timeout = %d, want 60 seconds", got)
+	if got := modelTimeoutSeconds(&config.AppConfig{}, "gpt-test", "gpt-test", "useai", provider.ModelProfile{}, false); got != defaultModelTimeoutSeconds {
+		t.Fatalf("default timeout = %d, want %d seconds", got, defaultModelTimeoutSeconds)
+	}
+}
+
+func TestProfileForProviderFallsBackToCapabilityProfile(t *testing.T) {
+	registry := provider.NewRegistry("gpt-5.5", time.Minute)
+	prov := provider.NewOpenAIProviderWithCapability("useai2", "useai", "sk-test", "https://api.eforge.xyz/v1", true, time.Second)
+	registry.Add(&provider.ProviderEntry{Provider: prov, Models: []string{"gpt-5.5"}, Priority: 1})
+	registry.SetModels("useai2", []string{"gpt-5.5"})
+	catalog := provider.NewModelCatalog(registry, t.TempDir(), time.Minute)
+
+	profile, ok := profileForProvider(catalog, "gpt-5.5", prov)
+	if !ok {
+		t.Fatalf("expected gpt profile for useai2 capability fallback")
+	}
+	if profile.TimeoutSeconds == nil || *profile.TimeoutSeconds != 120 {
+		t.Fatalf("timeout_seconds = %v, want 120 from openai gpt-5 profile", profile.TimeoutSeconds)
 	}
 }
 

@@ -22,6 +22,8 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/internal/store"
 )
 
+const defaultModelTimeoutSeconds = 180
+
 // Server 代理服务器
 // 负责接收 Visual Studio / Ollama 客户端的兼容协议请求，
 // 按模型名称解析到对应 provider，并转发到上游 AI 服务。
@@ -240,7 +242,7 @@ func (s *Server) Start() error {
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		Handler:      s.loggingMiddleware(s.authMiddleware(mux)),
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout: time.Duration(defaultModelTimeoutSeconds+30) * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -517,7 +519,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		var profile provider.ModelProfile
 		hasProfile := false
 		if catalog != nil {
-			if p, ok := catalog.Profile(modelName, prov.Name()); ok {
+			if p, ok := profileForProvider(catalog, modelName, prov); ok {
 				profile = p
 				hasProfile = true
 				s.applyProfileDefaults(req, profile, prov)
@@ -761,7 +763,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 		var profile provider.ModelProfile
 		hasProfile := false
 		if catalog != nil {
-			if p, ok := catalog.Profile(modelName, prov.Name()); ok {
+			if p, ok := profileForProvider(catalog, modelName, prov); ok {
 				profile = p
 				hasProfile = true
 				s.applyProfileDefaults(req, profile, prov)
@@ -1216,9 +1218,46 @@ func modelTimeoutSeconds(
 
 	modelCfg, ok := findModelConfig(cfg, requestedModel, upstreamModel, providerName)
 	if !ok || modelCfg.TimeoutSeconds == nil || *modelCfg.TimeoutSeconds <= 0 {
-		return 60
+		return defaultModelTimeoutSeconds
 	}
 	return *modelCfg.TimeoutSeconds
+}
+
+func profileForProvider(catalog *provider.ModelCatalog, model string, prov provider.Provider) (provider.ModelProfile, bool) {
+	if catalog == nil || prov == nil {
+		return provider.ModelProfile{}, false
+	}
+	if profile, ok := catalog.Profile(model, prov.Name()); ok {
+		if profileHasExecutionDefaults(profile) {
+			return profile, true
+		}
+	}
+	capabilityName := provider.CapabilityNameOf(prov)
+	if strings.TrimSpace(capabilityName) != "" && !strings.EqualFold(capabilityName, prov.Name()) {
+		if profile, ok := catalog.Profile(model, capabilityName); ok {
+			return profile, true
+		}
+		selectionProviders := []string{capabilityName}
+		if provider.ResolveApiFormat(prov) == provider.ApiFormatOpenAi && !strings.EqualFold(capabilityName, "openai") {
+			selectionProviders = append(selectionProviders, "openai")
+		}
+		if profile, ok := catalog.ProfileFromSelections(model, selectionProviders...); ok {
+			return profile, true
+		}
+	}
+	if profile, ok := catalog.ProfileAny(model); ok {
+		return profile, true
+	}
+	return provider.ModelProfile{}, false
+}
+
+func profileHasExecutionDefaults(profile provider.ModelProfile) bool {
+	return profile.Temperature != nil ||
+		profile.TopP != nil ||
+		profile.MaxTokens != nil ||
+		strings.TrimSpace(profile.ReasoningEffort) != "" ||
+		profile.TimeoutSeconds != nil ||
+		profile.ContextLength != nil
 }
 
 func requestContextWithTimeout(parent context.Context, timeoutSeconds int) (context.Context, context.CancelFunc) {

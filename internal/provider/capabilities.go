@@ -58,6 +58,21 @@ func GetCapabilities(name string) ProviderCapabilities {
 	return ProviderCapabilities{}
 }
 
+// CapabilityNameOf 返回 provider 实例对应的能力注册名。
+// provider.Name() 是路由实例名（例如 useai2），能力名才决定内置参数、路径和模型 profile。
+func CapabilityNameOf(prov Provider) string {
+	if prov == nil {
+		return ""
+	}
+	if p, ok := prov.(*OpenAIProvider); ok {
+		return p.capabilityName()
+	}
+	if p, ok := prov.(*OllamaProvider); ok && strings.TrimSpace(p.CapabilityName) != "" {
+		return p.CapabilityName
+	}
+	return prov.Name()
+}
+
 // InferCapabilityName 根据 provider 实例配置推断能力注册表名称。
 //
 // provider 实例 ID 可以是 useai-paid、sensenova、openai-team-a；能力名则决定：
@@ -220,13 +235,7 @@ var providerCapabilities = map[string]ProviderCapabilities{
 // ResolveApiFormat 根据 provider 能力判断上游接口格式，类型判断只作兜底。
 func ResolveApiFormat(prov Provider) ApiFormat {
 	if prov != nil {
-		name := prov.Name()
-		if p, ok := prov.(*OpenAIProvider); ok {
-			name = p.capabilityName()
-		}
-		if p, ok := prov.(*OllamaProvider); ok && strings.TrimSpace(p.CapabilityName) != "" {
-			name = p.CapabilityName
-		}
+		name := CapabilityNameOf(prov)
 		if IsKnownProvider(name) {
 			return GetCapabilities(name).ApiFormat
 		}
