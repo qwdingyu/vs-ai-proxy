@@ -189,9 +189,11 @@ func proxyDefenseEnabled(cfg *config.AppConfig) bool {
 }
 
 func applyDefenseCandidatePolicy(cfg *config.AppConfig, candidates []provider.Candidate) []provider.Candidate {
-	// 防御关闭时只保留首选候选，目的是做精确诊断：
-	// 不跨 provider 自动兜底，也不把 new-api/sub2api 的真实错误掩盖成其他 provider 成功。
-	if proxyDefenseEnabled(cfg) || len(candidates) <= 1 {
+	// VS Stable 默认只执行首选候选：new-api/sub2api 这类上游网关内部本身负责渠道轮换。
+	// 代理层跨 provider 自动兜底会掩盖真实 provider 错误、放大请求与计费，
+	// 还可能把“绑定 provider 的模型”悄悄路由到另一个 provider。
+	// 防御开关仍控制 provider 内短重试、稳定 UA、协议兜底与冷却；不再代表跨 provider fallback。
+	if len(candidates) <= 1 {
 		return candidates
 	}
 	return candidates[:1]
@@ -288,6 +290,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		ww := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
 		next.ServeHTTP(ww, r)
+		ww.finalizeRequestStatus(r)
 
 		elapsed := time.Since(start).Seconds() * 1000
 
@@ -401,6 +404,18 @@ type responseWriter struct {
 	responseTools string
 	fallbackMode  string
 	normalization string
+}
+
+func (w *responseWriter) finalizeRequestStatus(r *http.Request) {
+	if w == nil || r == nil || r.Context().Err() == nil {
+		return
+	}
+	if w.statusCode < http.StatusBadRequest {
+		w.statusCode = 499
+	}
+	w.Header().Set("X-Proxy-Error-Code", "client_gone")
+	w.Header().Set("X-Proxy-Error-Message", "客户端在请求完成前取消或断开连接。")
+	w.Header().Set("X-Proxy-Error-Hint", "如果请求耗时接近 VS/Copilot 等待上限，优先检查上游延迟、模型超时和请求体大小。")
 }
 
 func (w *responseWriter) WriteHeader(code int) {
@@ -556,7 +571,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			if err != nil {
 				lastErr = err
-				attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
+				attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+				attempts = append(attempts, attempt)
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if isClientGoneError(err) {
 					return
@@ -566,6 +582,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				registry.RecordCandidateFailure(prov.Name(), err)
+				if shouldStopCandidateFallback(attempt.Category) {
+					break
+				}
 				continue
 			}
 			registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
@@ -595,9 +614,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					}
 					cancel()
 					lastErr = err
-					attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
+					attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+					attempts = append(attempts, attempt)
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					registry.RecordCandidateFailure(prov.Name(), err)
+					if shouldStopCandidateFallback(attempt.Category) {
+						break
+					}
 					continue
 				}
 				cancel()
@@ -640,9 +663,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			cancel()
 			lastErr = err
-			attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
+			attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+			attempts = append(attempts, attempt)
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 			registry.RecordCandidateFailure(prov.Name(), err)
+			if shouldStopCandidateFallback(attempt.Category) {
+				break
+			}
 			continue
 		}
 		cancel()
@@ -800,13 +827,17 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			if err != nil {
 				lastErr = err
-				attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
+				attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+				attempts = append(attempts, attempt)
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if streamWriter.HasWritten() {
 					registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 					return
 				}
 				registry.RecordCandidateFailure(prov.Name(), err)
+				if shouldStopCandidateFallback(attempt.Category) {
+					break
+				}
 				continue
 			}
 			registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
@@ -820,9 +851,13 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				cancel()
 				if err != nil {
 					lastErr = err
-					attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
+					attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+					attempts = append(attempts, attempt)
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					registry.RecordCandidateFailure(prov.Name(), err)
+					if shouldStopCandidateFallback(attempt.Category) {
+						break
+					}
 					continue
 				}
 				if converted, convErr := converter.OllamaChatResponse2OpenAI(body, req.Model); convErr == nil {
@@ -847,9 +882,13 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err != nil {
 			lastErr = err
-			attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
+			attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+			attempts = append(attempts, attempt)
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 			registry.RecordCandidateFailure(prov.Name(), err)
+			if shouldStopCandidateFallback(attempt.Category) {
+				break
+			}
 			continue
 		}
 		normalizeProviderSpecificToolCalls(resp, allowedToolNames(req))
@@ -1291,6 +1330,15 @@ func canAttemptAlternateChatMode(cfg *config.AppConfig, ctx context.Context, err
 	// 流式/非流式互相兜底可能产生第二次上游请求，必须受同一个防御开关控制。
 	// 客户端已取消时不兜底，避免用户离开后代理继续消耗上游额度。
 	return proxyDefenseEnabled(cfg) && ctx != nil && ctx.Err() == nil && provider.ShouldAttemptAlternateChatMode(err)
+}
+
+func shouldStopCandidateFallback(category string) bool {
+	switch category {
+	case "client_gone", "upstream_auth_error", "upstream_rate_limit", "upstream_payload_too_large", "upstream_request_error":
+		return true
+	default:
+		return false
+	}
 }
 
 func isClientGoneError(err error) bool {

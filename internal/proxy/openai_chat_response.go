@@ -219,22 +219,10 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 }
 
 func sanitizeRawToolCalls(calls []any, allowedTools map[string]struct{}) ([]any, []string) {
-	kept := make([]any, 0, len(calls))
-	removed := []string{}
-	for _, raw := range calls {
-		call, _ := raw.(map[string]any)
-		function, _ := call["function"].(map[string]any)
-		name, _ := function["name"].(string)
-		if isAllowedDSMLTool(name, allowedTools) {
-			kept = append(kept, raw)
-			continue
-		}
-		if strings.TrimSpace(name) == "" {
-			name = toolNoticeName(name)
-		}
-		removed = append(removed, name)
-	}
-	return kept, removed
+	// VS Stable 默认策略：工具调用必须优先透传，不能因为代理没有识别到
+	// tools/functions 声明就删除 create_file / powershell / git 等合法调用。
+	// strict 阻断以后只能作为显式高级策略启用；当前默认返回原始 calls。
+	return calls, nil
 }
 
 func toolNoticeName(name string) string {
@@ -565,35 +553,18 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 
 func (s *openAIStreamToolSanitizer) sanitizeDeltaToolCalls(choiceIndex int, calls []any) ([]any, []string, bool) {
 	kept := make([]any, 0, len(calls))
-	removed := []string{}
-	dropped := false
 	for _, raw := range calls {
 		call, _ := raw.(map[string]any)
-		index := openAIStreamToolCallIndex(call)
-		key := streamToolCallKey{choiceIndex: choiceIndex, toolIndex: index}
 		function, _ := call["function"].(map[string]any)
 		name, _ := function["name"].(string)
-		// OpenAI SSE 的 tool_calls 是增量协议：首片通常带 name，后续片经常只带
-		// index/arguments。续片不能按“空工具名”拦截；但如果同一 index 的首片
-		// 已被判定为非法工具，后续参数续片也必须静默丢弃，避免孤儿参数泄露给客户端。
-		if strings.TrimSpace(name) == "" {
-			if _, blocked := s.blockedToolCallIndexes[key]; blocked {
-				dropped = true
-				continue
-			}
-			kept = append(kept, raw)
-			continue
-		}
-		if isAllowedDSMLTool(name, s.allowedTools) {
-			delete(s.blockedToolCallIndexes, key)
+		// OpenAI SSE 的 tool_calls 是增量协议。默认稳定模式只观察工具名，
+		// 不再删除未声明工具，避免误拦 VS Copilot 的合法 create_file/powershell/git。
+		if strings.TrimSpace(name) != "" {
 			s.hasAllowedToolCalls[choiceIndex] = true
-			kept = append(kept, raw)
-			continue
 		}
-		s.blockedToolCallIndexes[key] = struct{}{}
-		removed = append(removed, name)
+		kept = append(kept, raw)
 	}
-	return kept, removed, dropped
+	return kept, nil, false
 }
 
 func (s *openAIStreamToolSanitizer) sanitizeLegacyFunctionCall(choiceIndex int, functionCall map[string]any) []string {
@@ -601,15 +572,10 @@ func (s *openAIStreamToolSanitizer) sanitizeLegacyFunctionCall(choiceIndex int, 
 	if strings.TrimSpace(name) == "" {
 		return nil
 	}
-	// OpenAI 流式 function_call 可能把 name 和 arguments 拆在不同 chunk；只有当前
-	// chunk 明确给出非法 name 时展示拦截提示，后续 arguments 续片按状态静默丢弃。
-	if isAllowedDSMLTool(name, s.allowedTools) {
-		s.blockedLegacyFunctionCalls[choiceIndex] = false
-		s.hasAllowedToolCalls[choiceIndex] = true
-		return nil
-	}
-	s.blockedLegacyFunctionCalls[choiceIndex] = true
-	return []string{name}
+	// legacy function_call 也按默认透传处理，只记录存在过工具调用。
+	s.blockedLegacyFunctionCalls[choiceIndex] = false
+	s.hasAllowedToolCalls[choiceIndex] = true
+	return nil
 }
 
 func openAIStreamChoiceIndex(choice map[string]any) int {

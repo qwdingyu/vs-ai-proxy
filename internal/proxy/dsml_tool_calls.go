@@ -57,38 +57,10 @@ func normalizeDSMLToolCallsInChatResponse(resp *provider.ChatResponse, allowedTo
 }
 
 func sanitizeExecutableToolCalls(msg *provider.Message, allowedTools map[string]struct{}) bool {
-	if msg == nil {
-		return false
-	}
-	removed := []string{}
-	kept := msg.ToolCalls[:0]
-	for _, call := range msg.ToolCalls {
-		name := strings.TrimSpace(call.Function.Name)
-		if isAllowedDSMLTool(name, allowedTools) {
-			kept = append(kept, call)
-			continue
-		}
-		if name == "" {
-			name = toolNoticeName(name)
-		}
-		removed = append(removed, name)
-	}
-	msg.ToolCalls = kept
-	if msg.FunctionCall != nil {
-		name := strings.TrimSpace(msg.FunctionCall.Name)
-		if !isAllowedDSMLTool(name, allowedTools) {
-			if name == "" {
-				name = toolNoticeName(name)
-			}
-			removed = append(removed, name)
-			msg.FunctionCall = nil
-		}
-	}
-	if len(removed) == 0 {
-		return false
-	}
-	msg.Content = appendToolSanitizationNotice(msg.Content, removed)
-	return true
+	// VS Stable 默认策略：工具调用不做阻断，只做协议修复/方言转换。
+	// 旧版 strict 行为会在代理未识别工具声明时误删 create_file/powershell/git，
+	// 直接破坏 Copilot 核心能力。后续如需安全阻断，应通过显式 tool_policy=strict 启用。
+	return false
 }
 
 func messageHasExecutableToolCalls(msg provider.Message) bool {

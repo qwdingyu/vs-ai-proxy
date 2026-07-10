@@ -452,7 +452,7 @@ func TestOpenAIChatConvertsNonStreamSSEBodyToJSON(t *testing.T) {
 	}
 }
 
-func TestOpenAIChatRawBlocksUndeclaredToolCallsAndStops(t *testing.T) {
+func TestOpenAIChatRawPassesThroughUndeclaredToolCallsInStableMode(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
 	prov.rawBody = []byte(`{
 		"id":"chatcmpl-tools",
@@ -478,14 +478,14 @@ func TestOpenAIChatRawBlocksUndeclaredToolCallsAndStops(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, `"tool_calls"`) || strings.Contains(body, `"finish_reason":"tool_calls"`) {
-		t.Fatalf("undeclared tool call should be removed with stop finish: %s", body)
+	if !strings.Contains(body, `"tool_calls"`) || !strings.Contains(body, `"name":"powershell"`) || !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("undeclared tool call should pass through in stable mode: %s", body)
 	}
-	if !strings.Contains(body, "Proxy blocked undeclared tool calls: powershell") || !strings.Contains(body, `"finish_reason":"stop"`) {
-		t.Fatalf("blocked tool notice/stop finish missing: %s", body)
+	if strings.Contains(body, "Proxy blocked undeclared tool calls") {
+		t.Fatalf("stable mode must not inject block notice: %s", body)
 	}
-	if got := rec.Header().Get("X-Proxy-Response-Tools"); got != "" {
-		t.Fatalf("response tool diagnostic should not report blocked tools: %q", got)
+	if got := rec.Header().Get("X-Proxy-Response-Tools"); !strings.Contains(got, "powershell") {
+		t.Fatalf("response tool diagnostic should report passed-through tools: %q", got)
 	}
 }
 
@@ -703,14 +703,14 @@ func TestOpenAIStreamBlocksLegacyFunctionCallContinuationAtHandler(t *testing.T)
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Proxy blocked undeclared tool calls: powershell") {
-		t.Fatalf("legacy undeclared function_call block notice missing: %s", body)
+	if !strings.Contains(body, `"function_call"`) || !strings.Contains(body, "Remove-Item") {
+		t.Fatalf("legacy undeclared function_call should pass through in stable mode: %s", body)
 	}
-	if strings.Contains(body, `"function_call"`) || strings.Contains(body, "Remove-Item") || strings.Contains(body, "<empty>") {
-		t.Fatalf("blocked legacy function_call continuation leaked: %s", body)
+	if strings.Contains(body, "Proxy blocked undeclared tool calls") || strings.Contains(body, "<empty>") {
+		t.Fatalf("stable mode must not inject block notice: %s", body)
 	}
-	if strings.Contains(body, `"finish_reason":"tool_calls"`) || !strings.Contains(body, `"finish_reason":"stop"`) {
-		t.Fatalf("legacy blocked stream should finish with stop: %s", body)
+	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("legacy stable stream should preserve tool_calls finish: %s", body)
 	}
 }
 
@@ -995,10 +995,10 @@ func TestStreamingMatrixReturnsCorrectFormats(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 3. failover：首个 provider 失败后自动切换
+// 3. 候选策略：默认不跨 provider 自动兜底
 // -----------------------------------------------------------------------------
 
-func TestFailoverWhenPrimaryProviderFails(t *testing.T) {
+func TestDoesNotCrossProviderFailoverWhenPrimaryProviderFails(t *testing.T) {
 	primary := newFakeProvider("primary", true, []string{"shared"}, &fakeChatResponse{Model: "shared", Content: "primary"}, "")
 	primary.chatErr = errors.New("primary unavailable")
 
@@ -1016,16 +1016,17 @@ func TestFailoverWhenPrimaryProviderFails(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
 	}
-
-	var resp provider.ChatResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if primary.chatCalls != 1 {
+		t.Fatalf("primary chat calls = %d, want 1", primary.chatCalls)
 	}
-	if resp.Choices[0].Message.Content != "secondary" {
-		t.Fatalf("content = %q, want %q", resp.Choices[0].Message.Content, "secondary")
+	if secondary.chatCalls != 0 || secondary.rawCalls != 0 || secondary.streamCalls != 0 {
+		t.Fatalf("secondary must not be tried by default: chat=%d raw=%d stream=%d", secondary.chatCalls, secondary.rawCalls, secondary.streamCalls)
+	}
+	if !strings.Contains(rec.Body.String(), `"candidate_count":1`) {
+		t.Fatalf("diagnostic should expose one executed candidate: %s", rec.Body.String())
 	}
 }
 
@@ -1155,7 +1156,7 @@ func TestStreamingDoesNotFailoverAfterBytesWritten(t *testing.T) {
 	}
 }
 
-func TestStreamingFailoverBeforeBytesWritten(t *testing.T) {
+func TestStreamingDoesNotCrossProviderFailoverBeforeBytesWritten(t *testing.T) {
 	primary := newFakeProvider("primary", true, []string{"shared"}, nil, "")
 	primary.streamErr = errors.New("stream unavailable")
 
@@ -1181,11 +1182,42 @@ func TestStreamingFailoverBeforeBytesWritten(t *testing.T) {
 	if primary.streamCalls != 1 {
 		t.Fatalf("primary stream calls = %d, want 1", primary.streamCalls)
 	}
-	if secondary.streamCalls != 1 {
-		t.Fatalf("secondary stream calls = %d, want 1 before bytes written", secondary.streamCalls)
+	if secondary.streamCalls != 0 {
+		t.Fatalf("secondary stream calls = %d, want 0 by default", secondary.streamCalls)
 	}
-	if !strings.Contains(rec.Body.String(), "secondary") {
-		t.Fatalf("body should contain secondary stream after pre-write failover, got %q", rec.Body.String())
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+}
+
+func TestFallbackStopsOnPayloadTooLarge(t *testing.T) {
+	primary := newFakeProvider("primary", true, []string{"shared"}, nil, "")
+	primary.rawErr = fmt.Errorf(`openai stream error: API 错误 413: {"error":{"message":"payload too large"}}`)
+	secondary := newFakeProvider("secondary", true, []string{"shared"}, &fakeChatResponse{Model: "shared", Content: "secondary"}, "")
+
+	server := newOpenServer(primary, secondary)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"shared","messages":[{"role":"user","content":"large"}],"stream":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if primary.rawCalls != 1 {
+		t.Fatalf("primary raw calls = %d, want 1", primary.rawCalls)
+	}
+	if secondary.chatCalls != 0 || secondary.rawCalls != 0 || secondary.streamCalls != 0 {
+		t.Fatalf("secondary should not be tried after 413: chat=%d raw=%d stream=%d", secondary.chatCalls, secondary.rawCalls, secondary.streamCalls)
+	}
+	if !strings.Contains(rec.Body.String(), "upstream_payload_too_large") {
+		t.Fatalf("diagnostic should classify 413 as payload too large: %s", rec.Body.String())
 	}
 }
 
@@ -2041,16 +2073,20 @@ func TestChatCompletionsSkipsCoolingProviderOnNextRequest(t *testing.T) {
 		rec := httptest.NewRecorder()
 
 		handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("request %d status = %d, want %d; body=%s", i+1, rec.Code, http.StatusOK, rec.Body.String())
+		wantStatus := http.StatusBadGateway
+		if i == 1 {
+			wantStatus = http.StatusOK
+		}
+		if rec.Code != wantStatus {
+			t.Fatalf("request %d status = %d, want %d; body=%s", i+1, rec.Code, wantStatus, rec.Body.String())
 		}
 	}
 
 	if primary.chatCalls != 1 {
 		t.Fatalf("primary chat calls = %d, want 1 after cooldown skip", primary.chatCalls)
 	}
-	if secondary.chatCalls != 2 {
-		t.Fatalf("secondary chat calls = %d, want 2", secondary.chatCalls)
+	if secondary.chatCalls != 1 {
+		t.Fatalf("secondary chat calls = %d, want 1 after primary enters cooldown", secondary.chatCalls)
 	}
 }
 

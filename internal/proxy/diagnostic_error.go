@@ -136,6 +136,8 @@ func classifyProxyErrorFromErr(err error, message string) string {
 		return "upstream_auth_error"
 	case status == http.StatusTooManyRequests:
 		return "upstream_rate_limit"
+	case status == http.StatusRequestEntityTooLarge:
+		return "upstream_payload_too_large"
 	case status == http.StatusBadRequest || status == http.StatusNotFound:
 		return "upstream_request_error"
 	case status >= http.StatusInternalServerError:
@@ -178,6 +180,8 @@ func diagnosticHint(category string) string {
 		return "请求已到达上游但鉴权失败；检查 API key 是否正确、是否过期，以及 provider 是否要求额外鉴权头。"
 	case "upstream_rate_limit":
 		return "请求已到达上游但触发限流或额度限制；检查账号余额、免费额度、并发限制，或等待冷却后重试。"
+	case "upstream_payload_too_large":
+		return "请求已到达上游但请求体或上下文过大；减少历史上下文、附件/文件内容，或确认该模型是否应路由到支持更大上下文的 provider。"
 	case "upstream_request_error":
 		return "请求已到达上游但参数或模型不可用；检查模型名、provider 类型、base_url 与请求参数治理。"
 	case "upstream_server_error":

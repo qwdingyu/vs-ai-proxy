@@ -92,7 +92,7 @@ func TestParseDSMLToolCallsPreservesParameterTypes(t *testing.T) {
 	}
 }
 
-func TestNormalizeProviderSpecificToolCallsBlocksUndeclaredStandardToolCalls(t *testing.T) {
+func TestNormalizeProviderSpecificToolCallsPassesThroughUndeclaredStandardToolCalls(t *testing.T) {
 	resp := &provider.ChatResponse{Choices: []provider.Choice{{
 		Message:      provider.Message{ToolCalls: []provider.ToolCall{{ID: "call_ps", Type: "function", Function: provider.FunctionCall{Name: "powershell", Arguments: `{"command":"pwd"}`}}}},
 		FinishReason: "tool_calls",
@@ -100,10 +100,10 @@ func TestNormalizeProviderSpecificToolCallsBlocksUndeclaredStandardToolCalls(t *
 
 	normalizeProviderSpecificToolCalls(resp, map[string]struct{}{"git": {}})
 	message := resp.Choices[0].Message
-	if len(message.ToolCalls) != 0 {
-		t.Fatalf("undeclared standard tool call must be blocked: %#v", message.ToolCalls)
+	if len(message.ToolCalls) != 1 || message.ToolCalls[0].Function.Name != "powershell" {
+		t.Fatalf("undeclared standard tool call should pass through in stable mode: %#v", message.ToolCalls)
 	}
-	if !strings.Contains(message.Content, "Proxy blocked undeclared tool calls: powershell") {
-		t.Fatalf("blocked tool notice missing: %#v", message)
+	if strings.Contains(message.Content, "Proxy blocked undeclared tool calls") {
+		t.Fatalf("stable mode must not pollute assistant content: %#v", message)
 	}
 }

@@ -33,6 +33,7 @@ func TestClassifyProxyErrorDistinguishesNetworkAndUpstreamStatus(t *testing.T) {
 		`ollama stream error: Ollama 错误 403`:          "upstream_auth_error",
 		`openai stream error: API 错误 400`:             "upstream_request_error",
 		`openai stream error: API 错误 404`:             "upstream_request_error",
+		`openai stream error: API 错误 413`:             "upstream_payload_too_large",
 		`openai stream error: API 错误 429`:             "upstream_rate_limit",
 		`openai stream error: API 错误 503`:             "upstream_server_error",
 		`openai stream error: context canceled`:       "client_gone",
@@ -59,6 +60,7 @@ func TestNewAttemptDiagnosticClassifiesWrappedContextCanceledAsClientGone(t *tes
 func TestDiagnosticHintCoversSpecificUpstreamCategories(t *testing.T) {
 	for _, category := range []string{
 		"upstream_auth_error",
+		"upstream_payload_too_large",
 		"upstream_rate_limit",
 		"upstream_request_error",
 		"upstream_server_error",

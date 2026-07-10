@@ -10,6 +10,7 @@ CONFIG_PATH="$ROOT_DIR/.bin/streaming-config.json"
 PROXY_PORT=11434
 UPSTREAM_PORT=11435
 PID_FILE="$ROOT_DIR/.bin/.streaming-test.pids"
+OUTPUT_PATH="$ROOT_DIR/.bin/streaming-output.runtime.txt"
 
 mkdir -p "$ROOT_DIR/.bin"
 
@@ -76,7 +77,7 @@ cleanup() {
     done < "$PID_FILE"
     rm -f "$PID_FILE"
   fi
-  rm -f "$PROXY_BIN" "$PYTHON_UPSTREAM" "$CONFIG_PATH"
+  rm -f "$PROXY_BIN" "$PYTHON_UPSTREAM" "$CONFIG_PATH" "$OUTPUT_PATH"
 }
 trap cleanup EXIT
 
@@ -133,12 +134,12 @@ done
 curl -N -sS "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{"model":"proxy-model","messages":[{"role":"user","content":"hi"}],"stream":true}' \
-  > "$ROOT_DIR/.bin/streaming-output.txt" || true
+  > "$OUTPUT_PATH" || true
 
-if grep -q 'data: {"id":' "$ROOT_DIR/.bin/streaming-output.txt"; then
+if grep -q 'data: {"id":' "$OUTPUT_PATH"; then
   echo "STREAMING_OK"
 else
   echo "STREAMING_FAIL"
-  cat "$ROOT_DIR/.bin/streaming-output.txt"
+  cat "$OUTPUT_PATH"
   exit 1
 fi

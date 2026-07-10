@@ -10,6 +10,7 @@ CONFIG_PATH="$ROOT_DIR/.bin/streaming-ollama-config.json"
 PROXY_PORT=11436
 UPSTREAM_PORT=11437
 PID_FILE="$ROOT_DIR/.bin/.streaming-ollama-test.pids"
+OUTPUT_PATH="$ROOT_DIR/.bin/streaming-ollama-output.runtime.txt"
 
 mkdir -p "$ROOT_DIR/.bin"
 
@@ -64,7 +65,7 @@ cleanup() {
     done < "$PID_FILE"
     rm -f "$PID_FILE"
   fi
-  rm -f "$PROXY_BIN" "$PYTHON_UPSTREAM" "$CONFIG_PATH"
+  rm -f "$PROXY_BIN" "$PYTHON_UPSTREAM" "$CONFIG_PATH" "$OUTPUT_PATH"
 }
 trap cleanup EXIT
 
@@ -132,16 +133,16 @@ req = urllib.request.Request(
 with urllib.request.urlopen(req, timeout=10) as resp:
     body = resp.read().decode('utf-8')
 
-with open(os.path.join(os.environ['ROOT_DIR'], '.bin', 'streaming-ollama-output.txt'), 'w') as f:
+with open(os.path.join(os.environ['ROOT_DIR'], '.bin', 'streaming-ollama-output.runtime.txt'), 'w') as f:
     f.write(body)
 
 print(body)
 PYCLIENT
 
-if grep -q '^data: {' "$ROOT_DIR/.bin/streaming-ollama-output.txt" && grep -q '^data: \[DONE\]' "$ROOT_DIR/.bin/streaming-ollama-output.txt"; then
+if grep -q '^data: {' "$OUTPUT_PATH" && grep -q '^data: \[DONE\]' "$OUTPUT_PATH"; then
   echo "STREAMING_OLLAMA_OK"
 else
   echo "STREAMING_OLLAMA_FAIL"
-  cat "$ROOT_DIR/.bin/streaming-ollama-output.txt"
+  cat "$OUTPUT_PATH"
   exit 1
 fi

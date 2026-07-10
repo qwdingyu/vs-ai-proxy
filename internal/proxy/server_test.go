@@ -96,6 +96,32 @@ func TestLoggingMiddlewareCapturesProviderAndModelHeaders(t *testing.T) {
 	}
 }
 
+func TestLoggingMiddlewareMarksClientGoneAfterPartialStream(t *testing.T) {
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: partial\n\n"))
+		cancel()
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logs := st.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if logs[0].StatusCode != 499 || logs[0].IsSuccess {
+		t.Fatalf("log status = %d success=%v, want 499 false", logs[0].StatusCode, logs[0].IsSuccess)
+	}
+	if logs[0].ErrorCode != "client_gone" {
+		t.Fatalf("error_code = %q, want client_gone", logs[0].ErrorCode)
+	}
+}
+
 func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) {
 	st := store.New(10)
 	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
@@ -312,7 +338,7 @@ func TestStreamOpenAIToOllamaPreservesToolCallArgumentChunks(t *testing.T) {
 	}
 }
 
-func TestStreamOpenAIToOllamaDropsContinuationAfterBlockedUndeclaredTool(t *testing.T) {
+func TestStreamOpenAIToOllamaPassesThroughUndeclaredToolContinuation(t *testing.T) {
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":"}}]},"finish_reason":null}]}`,
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Remove-Item\"}"}}]},"finish_reason":null}]}`,
@@ -333,11 +359,11 @@ func TestStreamOpenAIToOllamaDropsContinuationAfterBlockedUndeclaredTool(t *test
 		t.Fatalf("streamOpenAIToOllama returned error: %v", err)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Proxy blocked undeclared tool calls: powershell") {
-		t.Fatalf("undeclared tool block notice missing: %s", body)
+	if !strings.Contains(body, "powershell") || !strings.Contains(body, "Remove-Item") {
+		t.Fatalf("undeclared tool continuation should pass through to Ollama client in stable mode: %s", body)
 	}
-	if strings.Contains(body, "Remove-Item") || strings.Contains(body, "<empty>") || strings.Contains(body, `"tool_calls":[`) {
-		t.Fatalf("blocked tool continuation leaked to Ollama client: %s", body)
+	if strings.Contains(body, "Proxy blocked undeclared tool calls") || strings.Contains(body, "<empty>") {
+		t.Fatalf("stable mode must not inject block notice: %s", body)
 	}
 }
 
@@ -439,7 +465,7 @@ func TestStreamOpenAIPreservesDeclaredToolCallContinuationChunks(t *testing.T) {
 	}
 }
 
-func TestStreamOpenAIDropsContinuationAfterBlockedUndeclaredTool(t *testing.T) {
+func TestStreamOpenAIPassesThroughUndeclaredToolContinuation(t *testing.T) {
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":"}}]},"finish_reason":null}]}`,
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Remove-Item\"}"}}]},"finish_reason":null}]}`,
@@ -460,14 +486,14 @@ func TestStreamOpenAIDropsContinuationAfterBlockedUndeclaredTool(t *testing.T) {
 		t.Fatalf("streamOpenAI returned error: %v", err)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Proxy blocked undeclared tool calls: powershell") {
-		t.Fatalf("undeclared tool block notice missing: %s", body)
+	if !strings.Contains(body, `"name":"powershell"`) || !strings.Contains(body, "Remove-Item") {
+		t.Fatalf("undeclared tool continuation should pass through in stable mode: %s", body)
 	}
-	if strings.Contains(body, "Remove-Item") || strings.Contains(body, "<empty>") {
-		t.Fatalf("blocked tool continuation leaked to client: %s", body)
+	if strings.Contains(body, "Proxy blocked undeclared tool calls") || strings.Contains(body, "<empty>") {
+		t.Fatalf("stable mode must not inject block notice: %s", body)
 	}
-	if strings.Contains(body, `"finish_reason":"tool_calls"`) || !strings.Contains(body, `"finish_reason":"stop"`) {
-		t.Fatalf("finish_reason should be stop after all stream tool calls were blocked: %s", body)
+	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("finish_reason should remain tool_calls in stable mode: %s", body)
 	}
 }
 
