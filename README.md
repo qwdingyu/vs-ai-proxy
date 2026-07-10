@@ -78,6 +78,16 @@ http://127.0.0.1:12345/v1
 .\vs-ai-proxy.exe --self-update
 ```
 
+工具调用异常用户建议先执行：
+
+```powershell
+.\vs-ai-proxy.exe --check-update
+.\vs-ai-proxy.exe --self-update
+.\vs-ai-proxy.exe --version
+```
+
+确认版本为 `v0.2.25` 或更新版本后，再重新启动 Visual Studio。
+
 如需临时指定端口：
 
 ```powershell
