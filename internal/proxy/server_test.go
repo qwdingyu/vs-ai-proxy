@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -180,11 +181,28 @@ func TestModelTimeoutSecondsUsesSafeDefaultBudget(t *testing.T) {
 }
 
 func TestProfileForProviderFallsBackToCapabilityProfile(t *testing.T) {
+	dir := t.TempDir()
+	selectionDir := filepath.Join(dir, "model-selection")
+	if err := os.MkdirAll(selectionDir, 0755); err != nil {
+		t.Fatalf("mkdir model-selection: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(selectionDir, "openai.json"), []byte(`{
+		"provider":"openai",
+		"models":[{
+			"match":"gpt-5",
+			"priority":1,
+			"enabled":true,
+			"execution":{"timeout_seconds":120,"max_tokens":8192}
+		}]
+	}`), 0644); err != nil {
+		t.Fatalf("write model selection: %v", err)
+	}
+
 	registry := provider.NewRegistry("gpt-5.5", time.Minute)
 	prov := provider.NewOpenAIProviderWithCapability("useai2", "useai", "sk-test", "https://api.eforge.xyz/v1", true, time.Second)
 	registry.Add(&provider.ProviderEntry{Provider: prov, Models: []string{"gpt-5.5"}, Priority: 1})
 	registry.SetModels("useai2", []string{"gpt-5.5"})
-	catalog := provider.NewModelCatalog(registry, t.TempDir(), time.Minute)
+	catalog := provider.NewModelCatalog(registry, dir, time.Minute)
 
 	profile, ok := profileForProvider(catalog, "gpt-5.5", prov)
 	if !ok {
