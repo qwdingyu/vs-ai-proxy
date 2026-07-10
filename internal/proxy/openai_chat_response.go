@@ -6,6 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -71,6 +74,217 @@ func openAIStreamBodyToChatResponse(body []byte, model string) ([]byte, error) {
 		}},
 	}
 	return json.Marshal(resp)
+}
+
+func collectOpenAIStreamChatResponse(ctx context.Context, prov provider.Provider, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	streamReq := cloneChatRequest(req)
+	streamReq.Stream = true
+	stream, err := prov.ChatStream(ctx, streamReq)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	return collectOpenAIStreamReader(stream, streamReq.Model)
+}
+
+func collectOpenAIStreamReader(stream io.Reader, model string) (*provider.ChatResponse, error) {
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var content strings.Builder
+	var reasoning strings.Builder
+	toolChunks := map[int]map[string]any{}
+	finishReason := "stop"
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(line[5:])
+		if payload == "[DONE]" {
+			break
+		}
+		chunk, err := parseOpenAIStreamPayload(payload)
+		if err != nil {
+			continue
+		}
+		content.WriteString(chunk.Content)
+		reasoning.WriteString(chunk.Reasoning)
+		mergeOpenAIStreamToolCalls(toolChunks, chunk.ToolCalls)
+		if chunk.FinishReason != "" {
+			finishReason = chunk.FinishReason
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	message := provider.Message{Role: "assistant", Content: content.String(), Reasoning: reasoning.String()}
+	if calls := buildProviderToolCalls(toolChunks); len(calls) > 0 {
+		message.ToolCalls = calls
+	}
+	if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.Reasoning) == "" && len(message.ToolCalls) == 0 {
+		return nil, fmt.Errorf("SSE response has no content or tool calls")
+	}
+
+	return &provider.ChatResponse{
+		ID:      fmt.Sprintf("chatcmpl-sse-%d", time.Now().Unix()),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []provider.Choice{{
+			Index:        0,
+			Message:      message,
+			FinishReason: visualStudioFinishReason(finishReason),
+		}},
+	}, nil
+}
+
+func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, resp *provider.ChatResponse) error {
+	if resp == nil || len(resp.Choices) == 0 {
+		return fmt.Errorf("chat response has no choices")
+	}
+	choice := resp.Choices[0]
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	if roleChunk, err := json.Marshal(map[string]any{
+		"id":      resp.ID,
+		"object":  "chat.completion.chunk",
+		"created": resp.Created,
+		"model":   resp.Model,
+		"choices": []map[string]any{{"index": choice.Index, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}},
+	}); err == nil {
+		if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", roleChunk); writeErr != nil {
+			return writeErr
+		}
+	}
+	delta := map[string]any{}
+	if choice.Message.Content != "" {
+		delta["content"] = choice.Message.Content
+	}
+	if choice.Message.Reasoning != "" {
+		delta["reasoning_content"] = choice.Message.Reasoning
+	}
+	if len(choice.Message.ToolCalls) > 0 {
+		delta["tool_calls"] = choice.Message.ToolCalls
+	}
+	if len(delta) > 0 {
+		contentChunk, err := json.Marshal(map[string]any{
+			"id":      resp.ID,
+			"object":  "chat.completion.chunk",
+			"created": resp.Created,
+			"model":   resp.Model,
+			"choices": []map[string]any{{"index": choice.Index, "delta": delta, "finish_reason": nil}},
+		})
+		if err != nil {
+			return err
+		}
+		if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", contentChunk); writeErr != nil {
+			return writeErr
+		}
+	}
+	finish := visualStudioFinishReason(choice.FinishReason)
+	finishChunk, err := json.Marshal(map[string]any{
+		"id":      resp.ID,
+		"object":  "chat.completion.chunk",
+		"created": resp.Created,
+		"model":   resp.Model,
+		"choices": []map[string]any{{"index": choice.Index, "delta": map[string]any{}, "finish_reason": finish}},
+	})
+	if err != nil {
+		return err
+	}
+	if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", finishChunk); writeErr != nil {
+		return writeErr
+	}
+	if _, writeErr := io.WriteString(w, "data: [DONE]\n\n"); writeErr != nil {
+		return writeErr
+	}
+	flusher.Flush()
+	return nil
+}
+
+func mergeOpenAIStreamToolCalls(acc map[int]map[string]any, chunks []any) {
+	for _, raw := range chunks {
+		chunk, ok := raw.(map[string]any)
+		if !ok || chunk == nil {
+			continue
+		}
+		index := 0
+		if rawIndex, ok := chunk["index"].(float64); ok {
+			index = int(rawIndex)
+		}
+		current := acc[index]
+		if current == nil {
+			current = map[string]any{"index": float64(index), "type": "function"}
+			acc[index] = current
+		}
+		mergeToolCallChunk(current, chunk)
+	}
+}
+
+func mergeToolCallChunk(current map[string]any, chunk map[string]any) {
+	for key, value := range chunk {
+		switch key {
+		case "function":
+			fnChunk, _ := value.(map[string]any)
+			if fnChunk == nil {
+				continue
+			}
+			fnCurrent, _ := current["function"].(map[string]any)
+			if fnCurrent == nil {
+				fnCurrent = map[string]any{}
+				current["function"] = fnCurrent
+			}
+			for fnKey, fnValue := range fnChunk {
+				if fnKey == "arguments" {
+					existing, _ := fnCurrent[fnKey].(string)
+					fnCurrent[fnKey] = existing + fmt.Sprint(fnValue)
+					continue
+				}
+				if isEmptyToolChunkValue(fnCurrent[fnKey]) {
+					fnCurrent[fnKey] = fnValue
+				}
+			}
+		default:
+			if isEmptyToolChunkValue(current[key]) {
+				current[key] = value
+			}
+		}
+	}
+}
+
+func isEmptyToolChunkValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	text, ok := value.(string)
+	return ok && strings.TrimSpace(text) == ""
+}
+
+func buildProviderToolCalls(toolChunks map[int]map[string]any) []provider.ToolCall {
+	if len(toolChunks) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(toolChunks))
+	for index := range toolChunks {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	calls := make([]provider.ToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		data, err := json.Marshal(toolChunks[index])
+		if err != nil {
+			continue
+		}
+		var call provider.ToolCall
+		if err := json.Unmarshal(data, &call); err != nil {
+			continue
+		}
+		calls = append(calls, call)
+	}
+	return calls
 }
 
 func normalizeOpenAIChatResponseForVisualStudio(body []byte) []byte {

@@ -12,6 +12,10 @@
   - `Empty reply from server`
   - `503 Service temporarily unavailable`
   - 或 `stream=false` 却返回 `data: ...` SSE chunk，导致 JSON 解析失败。
+- 真实 Visual Studio Copilot 环境中，`/v1/chat/completions stream=true` 也出现过：
+  - `openai stream error: API 错误 503: Service temporarily unavailable`
+  - `context canceled`
+  - 最终对 VS 表现为 `upstream_server_error`。
 - Visual Studio Copilot 工具调用中，部分模型/provider 对 `tool_calls`、legacy `function_call`、object arguments、流式工具参数分片的兼容性不同。
 - 管理页面按钮文案曾使用“连接测试”，容易让用户误以为是网络连通性测试，而实际只是读取 provider 官方模型列表。
 
@@ -76,6 +80,7 @@
 - 管理测试页非流式失败后，会自动尝试流式兜底，并返回：
   - `fallback_mode: "stream"`
   - `warning: "非流式测试失败，已自动使用流式测试兜底..."`
+- 真实 `/v1/chat/completions stream=true` 路径如果流式上游失败且尚未写出响应，会反向尝试非流式请求；成功后合成为 OpenAI SSE 返回给 VS。
 
 ### 5. VS Copilot finish_reason 兼容
 
@@ -172,6 +177,22 @@ data: [DONE]
 - 测试页修复只能证明诊断体验改善。
 - 必须同步检查真实下游路径：`/v1/chat/completions`、`/api/chat`、stream 和 non-stream。
 - 每个测试页兜底都要问：真实代理路径是否也具备同等能力？
+
+### 坑 4.1：只修非流式不够，VS 真实路径可能是 stream=true
+
+真实 VS Copilot 会走 `/v1/chat/completions stream=true`。如果只处理 `stream=false` 返回 SSE、或只处理非流式失败后的流式兜底，仍会出现：
+
+```text
+模型 gpt-5.5 在提供商 useai2 流式失败: openai stream error: API 错误 503
+POST /v1/chat/completions - 502
+```
+
+最佳实践：
+
+- OpenAI 流式路径失败且尚未写出响应时，可以尝试非流式请求。
+- 非流式成功后必须合成为标准 OpenAI SSE：`data: chunk` + `data: [DONE]`。
+- 不能在已经写出部分 SSE 后再切换协议；只能在 response 尚未开始时兜底。
+- 工具调用也要能从 fallback 聚合结果中保留 `tool_calls`，避免 VS 工具执行失败。
 
 ### 坑 5：VS 对 finish_reason 比浏览器更严格
 

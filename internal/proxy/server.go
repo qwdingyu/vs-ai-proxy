@@ -525,14 +525,27 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if provider.ResolveApiFormat(prov) == provider.ApiFormatOpenAi {
 			if rawProvider, ok := prov.(rawOpenAIChatProvider); ok {
 				body, err := rawProvider.ChatRaw(ctx, req)
-				cancel()
 				if err != nil {
+					// VS Copilot 真实环境里，UseAI/gpt-5.5 非流式可能直接透出
+					// upstream_server_error，但同一 provider 的流式链路可用。
+					// 在还没写响应给下游时，尝试用流式聚合成非流式 JSON，避免 VS 端失败。
+					if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
+						cancel()
+						s.cacheChatResponse(fallbackResp)
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusOK)
+						_ = json.NewEncoder(w).Encode(fallbackResp)
+						registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+						return
+					}
+					cancel()
 					lastErr = err
 					attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					registry.RecordCandidateFailure(prov.Name(), err)
 					continue
 				}
+				cancel()
 				// Visual Studio Copilot 适配：
 				// 部分 OpenAI-compatible 上游即使 stream=false 也会返回 SSE data: chunk。
 				// 非流式下游期望 JSON，直接透传会导致解析失败，因此先尽力聚合为标准 chat.completion。
@@ -553,14 +566,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp, err := prov.Chat(ctx, req)
-		cancel()
 		if err != nil {
+			if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
+				cancel()
+				s.cacheChatResponse(fallbackResp)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(fallbackResp)
+				registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+				return
+			}
+			cancel()
 			lastErr = err
 			attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 			registry.RecordCandidateFailure(prov.Name(), err)
 			continue
 		}
+		cancel()
 		s.cacheChatResponse(resp)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -810,6 +833,17 @@ func (s *Server) handleStream(
 func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provider.Provider, req *provider.ChatRequest, flusher http.Flusher) error {
 	stream, err := prov.ChatStream(r.Context(), req)
 	if err != nil {
+		// VS Copilot 的 /v1/chat/completions stream=true 真实路径中，UseAI/New API
+		// 可能流式 503，但非流式同模型可用。尚未向下游写出 SSE 时，
+		// 尝试反向兜底：非流式拿到结果后合成为 OpenAI SSE，避免直接 502。
+		fallbackReq := cloneChatRequest(req)
+		fallbackReq.Stream = false
+		if resp, fallbackErr := prov.Chat(r.Context(), fallbackReq); fallbackErr == nil {
+			s.cacheChatResponse(resp)
+			if writeErr := writeOpenAIChatResponseAsSSE(w, flusher, resp); writeErr == nil {
+				return nil
+			}
+		}
 		return fmt.Errorf("openai stream error: %w", err)
 	}
 	defer stream.Close()

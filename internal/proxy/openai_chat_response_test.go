@@ -55,6 +55,31 @@ func TestOpenAIStreamBodyToChatResponseAggregatesSSE(t *testing.T) {
 	}
 }
 
+func TestCollectOpenAIStreamReaderAggregatesToolCallChunks(t *testing.T) {
+	stream := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+
+	resp, err := collectOpenAIStreamReader(stream, "gpt-5.5")
+	if err != nil {
+		t.Fatalf("collectOpenAIStreamReader returned error: %v", err)
+	}
+	if len(resp.Choices) != 1 || len(resp.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls missing: %#v", resp)
+	}
+	call := resp.Choices[0].Message.ToolCalls[0]
+	if call.ID != "call_1" || call.Function.Name != "create_file" || call.Function.Arguments != `{"path":"a.txt"}` {
+		t.Fatalf("unexpected tool call: %#v", call)
+	}
+	if resp.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls", resp.Choices[0].FinishReason)
+	}
+}
+
 func TestVisualStudioFinishReasonPreservesKnownValues(t *testing.T) {
 	for _, value := range []string{"stop", "length", "tool_calls", "content_filter", "function_call"} {
 		if got := visualStudioFinishReason(value); got != value {

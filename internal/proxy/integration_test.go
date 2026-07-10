@@ -451,6 +451,71 @@ func TestOpenAIChatConvertsNonStreamSSEBodyToJSON(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatFallsBackToStreamWhenNonStreamUpstreamFails(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":" from stream"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+	prov.rawErr = errors.New(`API 错误 503: {"error":{"message":"Service temporarily unavailable"}}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body provider.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response should be JSON chat response: %v; body=%s", err, rec.Body.String())
+	}
+	if len(body.Choices) != 1 || body.Choices[0].Message.Content != "Hello from stream" {
+		t.Fatalf("unexpected fallback response: %s", rec.Body.String())
+	}
+	if prov.rawCalls != 1 || prov.streamCalls != 1 {
+		t.Fatalf("rawCalls=%d streamCalls=%d, want one raw failure and one stream fallback", prov.rawCalls, prov.streamCalls)
+	}
+}
+
+func TestOpenAIStreamFallsBackToNonStreamWhenStreamUpstreamFails(t *testing.T) {
+	prov := newFakeProvider("useai2", true, []string{"gpt-5.5"}, &fakeChatResponse{Model: "gpt-5.5", Content: "Hello non-stream"}, "")
+	prov.streamErr = errors.New(`API 错误 503: {"error":{"message":"Service temporarily unavailable"}}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":true
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "data:") || !strings.Contains(body, "Hello non-stream") || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("expected SSE fallback body, got: %s", body)
+	}
+	if prov.streamCalls != 1 || prov.chatCalls != 1 {
+		t.Fatalf("streamCalls=%d chatCalls=%d, want one stream failure and one non-stream fallback", prov.streamCalls, prov.chatCalls)
+	}
+}
+
 func TestOllamaChatForwardsToolSchemaExtensionsToOpenAIProvider(t *testing.T) {
 	prov := newFakeProvider("usecpa", true, []string{"z-ai/glm-5.2"}, &fakeChatResponse{Model: "z-ai/glm-5.2", Content: "ok"}, "")
 	server := newOpenServer(prov)
