@@ -31,12 +31,16 @@ import (
 var version = "dev"
 
 var (
+	checkUpdateFn             = update.Check
 	selfUpdateFn              = update.SelfUpdate
 	launchReplacementFn       = update.LaunchReplacement
 	launchWindowsSelfUpdateFn = update.LaunchWindowsSelfUpdate
 )
 
-const startupUpdateTimeout = 10 * time.Second
+const (
+	startupUpdateCheckTimeout = 8 * time.Second
+	startupSelfUpdateTimeout  = 2 * time.Minute
+)
 
 // main 进程入口
 // 负责组装配置、日志、存储、代理服务与 API 服务，
@@ -174,36 +178,54 @@ func autoSelfUpdateOnStartup(logger *log.Logger, args []string) bool {
 
 	dir := filepath.Join(config.DefaultConfigDir(), "updates")
 	opts := update.Options{CurrentVersion: version, TargetDir: dir}
-	ctx, cancel := context.WithTimeout(context.Background(), startupUpdateTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), startupUpdateCheckTimeout)
+	defer cancel()
+
+	check, err := checkUpdateFn(ctx, opts)
+	if err != nil {
+		logger.Warn("启动自动更新检查失败，继续启动当前版本: %v", describeStartupUpdateError(err))
+		return false
+	}
+	if !check.UpdateAvailable {
+		logger.Info("当前已是最新版本: %s", check.CurrentVersion)
+		return false
+	}
+
+	logger.Info("发现新版本: %s -> %s，已转入后台下载并安装，不阻塞当前服务启动。", check.CurrentVersion, check.LatestTag)
+	go runStartupSelfUpdate(logger, opts, args)
+	return false
+}
+
+func runStartupSelfUpdate(logger *log.Logger, opts update.Options, args []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), startupSelfUpdateTimeout)
 	defer cancel()
 
 	result, err := selfUpdateFn(ctx, opts)
 	if err != nil {
-		logger.Warn("启动自动更新检查失败，继续启动当前版本: %v", err)
-		return false
+		logger.Warn("后台自动更新失败，继续运行当前版本: %v", describeStartupUpdateError(err))
+		return
 	}
 	if !result.UpdateAvailable {
-		logger.Info("当前已是最新版本: %s", result.CurrentVersion)
-		return false
+		logger.Info("后台自动更新确认当前已是最新版本: %s", result.CurrentVersion)
+		return
 	}
 
-	logger.Info("发现并安装新版本: %s -> %s", result.CurrentVersion, result.LatestTag)
+	logger.Info("后台已安装新版本: %s -> %s", result.CurrentVersion, result.LatestTag)
 	logger.Info("旧版本备份文件: %s", result.BackupPath)
 	restartArgs := restartArgsWithoutSelfUpdate(args)
 	if result.NeedsExternalApply {
 		if err := launchWindowsSelfUpdateFn(result, restartArgs); err != nil {
-			logger.Warn("启动 Windows 延迟替换失败，继续启动当前版本: %v", err)
-			return false
+			logger.Warn("启动 Windows 延迟替换失败，继续运行当前版本: %v", err)
+			return
 		}
 		logger.Info("已启动后台替换脚本，当前进程退出后会完成替换并重启。")
-		return true
+		return
 	}
 	if err := launchReplacementFn(result.ExecutablePath, restartArgs); err != nil {
-		logger.Warn("新版已安装，但自动重启失败，继续启动当前版本: %v", err)
-		return false
+		logger.Warn("新版已安装，但自动重启失败，继续运行当前版本: %v", err)
+		return
 	}
 	logger.Info("已启动新版进程，当前进程即将退出。")
-	return true
 }
 
 func autoUpdateEnabled() bool {
@@ -231,6 +253,20 @@ func isReleaseVersion(value string) bool {
 		}
 	}
 	return true
+}
+
+func describeStartupUpdateError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "访问 GitHub Release 超时，请检查 Windows 网络、代理、防火墙或 github.com/api.github.com 可达性；本次仅跳过自动更新，不影响代理服务启动"
+	}
+	message := err.Error()
+	if strings.Contains(message, "context deadline exceeded") || strings.Contains(message, "Client.Timeout exceeded") {
+		return "访问 GitHub Release 超时，请检查 Windows 网络、代理、防火墙或 github.com/api.github.com 可达性；本次仅跳过自动更新，不影响代理服务启动"
+	}
+	return message
 }
 
 func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {

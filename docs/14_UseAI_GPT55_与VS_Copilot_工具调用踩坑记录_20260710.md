@@ -657,3 +657,45 @@ git diff --check
 Windows + Visual Studio Copilot 用户当前建议升级到 `v0.2.28` 或更新版本。
 
 不要再推荐 `v0.2.24` / `v0.2.25` 作为最终修复版本；这些版本是修复链路中的阶段性版本，不包含后续“多 choice 状态隔离”和“请求无声明工具时阻断所有工具调用”的最终边界收紧。
+
+## 2026-07-10 追加：Windows 启动自动更新超时处理
+
+### 现象
+
+Windows 启动时出现：
+
+```text
+启动自动更新检查失败，继续启动当前版本: context deadline exceeded
+```
+
+这类错误表示启动阶段访问 GitHub Release 超时。常见原因包括：Windows 网络代理未配置给当前进程、防火墙或安全软件拦截、`api.github.com` 访问慢、GitHub 连接被重置，或启动时直接下载 Release 资产导致超过启动窗口。
+
+### 根因
+
+原启动流程把“检查更新”和“下载/安装更新”放在同一个同步启动窗口中执行。启动超时时间只有 10 秒，而 Windows 用户下载 GitHub Release zip 经常超过 10 秒，所以日志会出现 `context deadline exceeded`。
+
+### 当前策略
+
+启动阶段只做快速 Release 检查；如果发现新版本，下载和安装转入后台执行，不阻塞代理服务启动。
+
+- 检查失败：记录明确原因，继续启动当前版本。
+- 检查无更新：正常启动。
+- 检查有更新：后台下载并安装；Windows 下仍使用延迟替换脚本，等待当前进程退出后替换并重启。
+- 手工 `--self-update` 保持同步行为，适合用户主动升级时使用。
+
+### 用户排障建议
+
+如果仍频繁看到 GitHub 超时，可先在 PowerShell 中验证：
+
+```powershell
+Invoke-WebRequest https://api.github.com/repos/qwdingyu/vs-ai-proxy/releases/latest -UseBasicParsing
+```
+
+如公司网络或代理环境无法访问 GitHub，可临时关闭启动自动更新：
+
+```powershell
+$env:VS_AI_PROXY_AUTO_UPDATE="0"
+.\vs-ai-proxy.exe
+```
+
+关闭自动更新不会影响代理、模型测试或 VS Copilot 使用，只是不再启动时检查新版本。

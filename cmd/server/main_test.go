@@ -91,15 +91,23 @@ func TestRestartArgsWithoutSelfUpdate(t *testing.T) {
 
 func TestAutoSelfUpdateOnStartupLaunchesWindowsApply(t *testing.T) {
 	oldVersion := version
+	oldCheckUpdate := checkUpdateFn
 	oldSelfUpdate := selfUpdateFn
 	oldLaunchWindows := launchWindowsSelfUpdateFn
 	t.Cleanup(func() {
 		version = oldVersion
+		checkUpdateFn = oldCheckUpdate
 		selfUpdateFn = oldSelfUpdate
 		launchWindowsSelfUpdateFn = oldLaunchWindows
 	})
 
 	version = "v0.2.14"
+	checkUpdateFn = func(_ context.Context, opts update.Options) (update.CheckResult, error) {
+		if opts.CurrentVersion != "v0.2.14" {
+			t.Fatalf("CurrentVersion = %q, want v0.2.14", opts.CurrentVersion)
+		}
+		return update.CheckResult{CurrentVersion: "v0.2.14", LatestTag: "v0.2.15", UpdateAvailable: true}, nil
+	}
 	selfUpdateFn = func(_ context.Context, opts update.Options) (update.SelfUpdateResult, error) {
 		if opts.CurrentVersion != "v0.2.14" {
 			t.Fatalf("CurrentVersion = %q, want v0.2.14", opts.CurrentVersion)
@@ -115,9 +123,8 @@ func TestAutoSelfUpdateOnStartupLaunchesWindowsApply(t *testing.T) {
 			NeedsExternalApply: true,
 		}, nil
 	}
-	var launched bool
+	launched := make(chan struct{}, 1)
 	launchWindowsSelfUpdateFn = func(result update.SelfUpdateResult, args []string) error {
-		launched = true
 		if result.LatestTag != "v0.2.15" {
 			t.Fatalf("LatestTag = %q, want v0.2.15", result.LatestTag)
 		}
@@ -125,30 +132,33 @@ func TestAutoSelfUpdateOnStartupLaunchesWindowsApply(t *testing.T) {
 		if len(args) != len(want) || args[0] != want[0] || args[1] != want[1] {
 			t.Fatalf("args = %#v, want %#v", args, want)
 		}
+		launched <- struct{}{}
 		return nil
 	}
 
 	var logs bytes.Buffer
 	logger := log.New(&logs, log.LevelInfo, false)
-	if !autoSelfUpdateOnStartup(logger, []string{"--self-update", "--config", "prod.toml"}) {
-		t.Fatalf("autoSelfUpdateOnStartup() = false, want true")
+	if autoSelfUpdateOnStartup(logger, []string{"--self-update", "--config", "prod.toml"}) {
+		t.Fatalf("autoSelfUpdateOnStartup() = true, want false because startup must not block")
 	}
-	if !launched {
+	select {
+	case <-launched:
+	case <-time.After(time.Second):
 		t.Fatalf("LaunchWindowsSelfUpdate was not called")
 	}
 }
 
 func TestAutoSelfUpdateOnStartupContinuesWhenCheckFails(t *testing.T) {
 	oldVersion := version
-	oldSelfUpdate := selfUpdateFn
+	oldCheckUpdate := checkUpdateFn
 	t.Cleanup(func() {
 		version = oldVersion
-		selfUpdateFn = oldSelfUpdate
+		checkUpdateFn = oldCheckUpdate
 	})
 
 	version = "0.2.14"
-	selfUpdateFn = func(context.Context, update.Options) (update.SelfUpdateResult, error) {
-		return update.SelfUpdateResult{}, errors.New("network unavailable")
+	checkUpdateFn = func(context.Context, update.Options) (update.CheckResult, error) {
+		return update.CheckResult{}, errors.New("network unavailable")
 	}
 
 	var logs bytes.Buffer
@@ -163,21 +173,28 @@ func TestAutoSelfUpdateOnStartupContinuesWhenCheckFails(t *testing.T) {
 
 func TestAutoSelfUpdateOnStartupSkipsDevVersion(t *testing.T) {
 	oldVersion := version
-	oldSelfUpdate := selfUpdateFn
+	oldCheckUpdate := checkUpdateFn
 	t.Cleanup(func() {
 		version = oldVersion
-		selfUpdateFn = oldSelfUpdate
+		checkUpdateFn = oldCheckUpdate
 	})
 
 	version = "dev"
-	selfUpdateFn = func(context.Context, update.Options) (update.SelfUpdateResult, error) {
-		t.Fatalf("selfUpdateFn should not be called for dev version")
-		return update.SelfUpdateResult{}, nil
+	checkUpdateFn = func(context.Context, update.Options) (update.CheckResult, error) {
+		t.Fatalf("checkUpdateFn should not be called for dev version")
+		return update.CheckResult{}, nil
 	}
 
 	logger := log.New(io.Discard, log.LevelInfo, false)
 	if autoSelfUpdateOnStartup(logger, nil) {
 		t.Fatalf("autoSelfUpdateOnStartup() = true, want false")
+	}
+}
+
+func TestDescribeStartupUpdateErrorExplainsDeadline(t *testing.T) {
+	message := describeStartupUpdateError(context.DeadlineExceeded)
+	if !strings.Contains(message, "访问 GitHub Release 超时") || !strings.Contains(message, "不影响代理服务启动") {
+		t.Fatalf("message = %q, want friendly timeout guidance", message)
 	}
 }
 

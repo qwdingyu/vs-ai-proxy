@@ -31,6 +31,21 @@ func TestParseDSMLToolCallsAdvisorSample(t *testing.T) {
 	}
 }
 
+func TestAllowedToolNamesIncludesLegacyFunctions(t *testing.T) {
+	req := &provider.ChatRequest{
+		Tools: []provider.Tool{{Type: "function", Function: provider.ToolFunc{Name: "create_file"}}},
+		Extra: map[string]json.RawMessage{
+			"functions": []byte(`[{"name":"powershell"},{"name":"git"}]`),
+		},
+	}
+	allowed := allowedToolNames(req)
+	for _, name := range []string{"create_file", "powershell", "git"} {
+		if _, ok := allowed[name]; !ok {
+			t.Fatalf("allowed tools missing %q: %#v", name, allowed)
+		}
+	}
+}
+
 func TestParseDSMLToolCallsRejectsUndeclaredTools(t *testing.T) {
 	calls, cleaned := parseDSMLToolCalls(dsmlAdvisorSample, map[string]struct{}{"create_file": {}})
 	if len(calls) != 0 {

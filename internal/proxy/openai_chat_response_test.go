@@ -193,6 +193,17 @@ func TestNormalizeProviderSpecificToolCallsInOpenAIJSONBlocksToolsWhenRequestDec
 	}
 }
 
+func TestNormalizeProviderSpecificToolCallsInOpenAIJSONAllowsLegacyDeclaredFunction(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","function_call":{"name":"powershell","arguments":"{\"command\":\"pwd\"}"}},"finish_reason":"function_call"}]}`)
+	normalized := normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"powershell": {}})
+	if !strings.Contains(string(normalized), `"function_call"`) || !strings.Contains(string(normalized), `"name":"powershell"`) {
+		t.Fatalf("legacy declared function_call should be preserved: %s", normalized)
+	}
+	if strings.Contains(string(normalized), "Proxy blocked undeclared tool calls") || strings.Contains(string(normalized), `"finish_reason":"stop"`) {
+		t.Fatalf("declared legacy function_call should not be blocked: %s", normalized)
+	}
+}
+
 func TestNormalizeOpenAIStreamLineBlocksNamedToolWhenRequestDeclaresNone(t *testing.T) {
 	sanitizer := newOpenAIStreamToolSanitizer(nil)
 	line := normalizeOpenAIStreamLineForVisualStudioWithToolState(
@@ -329,6 +340,33 @@ func TestNormalizeOpenAIStreamLineTracksToolStatePerChoice(t *testing.T) {
 	}
 	if !strings.Contains(finish, `"index":1`) || !strings.Contains(finish, `"finish_reason":"stop"`) {
 		t.Fatalf("choice 1 should become stop after all tools blocked: %s", finish)
+	}
+}
+
+func TestNormalizeOpenAIStreamLineHandlesMixedToolsWithinChoice(t *testing.T) {
+	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"create_file": {}})
+	first := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}},{"index":1,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":"}}]},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if !strings.Contains(first, `"name":"create_file"`) || strings.Contains(first, `"name":"powershell"`) {
+		t.Fatalf("mixed tool chunk should keep declared tool and block undeclared tool: %s", first)
+	}
+
+	continuation := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}},{"index":1,"function":{"arguments":"\"Remove-Item\"}"}}]},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if !strings.Contains(continuation, "a.txt") || strings.Contains(continuation, "Remove-Item") || strings.Contains(continuation, "空工具名") {
+		t.Fatalf("mixed continuations should preserve only declared tool arguments: %s", continuation)
+	}
+
+	finish := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		sanitizer,
+	)
+	if !strings.Contains(finish, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("finish should remain tool_calls because a declared tool survived: %s", finish)
 	}
 }
 
