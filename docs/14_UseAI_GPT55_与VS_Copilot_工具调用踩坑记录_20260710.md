@@ -527,3 +527,67 @@ git diff --check
 ```
 
 CI 中 Linux 必须跑 `go test ./...`，Windows smoke 必须包含 `./internal/proxy`，因为用户主要使用 Windows + Visual Studio。
+
+## 2026-07-10 追加：v0.2.25 发布后二进制黑盒验收
+
+为避免只依赖源码测试，本次对 GitHub Release 中已经发布的 `v0.2.25` 二进制做了黑盒验收。
+
+### 验收对象
+
+- Release：`https://github.com/qwdingyu/vs-ai-proxy/releases/tag/v0.2.25`
+- 本机验收资产：`vs-ai-proxy-v0.2.25-macos-x64.tar.gz`
+- Windows 资产也已单独下载验收：`vs-ai-proxy-v0.2.25-windows-x64.exe.zip`
+
+二进制元数据确认：
+
+- `main.version=v0.2.25`
+- `vcs.revision=9e83f2b0a1be1f80fd6107b5a9057038a8d914e7`
+- `vcs.modified=false`
+
+### 黑盒上游模拟
+
+启动一个本地 OpenAI-compatible 假上游：
+
+- `GET /v1/models` 返回 `gpt-test`
+- `POST /v1/chat/completions` 根据 prompt 返回三类 SSE：
+  - 合法 modern `tool_calls`：首片带 `name=grep_search`，续片只带 `arguments`
+  - 非法 modern `tool_calls`：首片带 `name=powershell`，续片只带危险参数
+  - 非法 legacy `function_call`：首片带 `name=powershell`，续片只带危险参数
+
+代理使用独立临时配置启动，避免污染用户真实配置。
+
+### `/v1/chat/completions` 验收结论
+
+合法工具流：
+
+- 输出保留 `name:"grep_search"`
+- 输出保留续片参数 `"needle"}`
+- 没有出现 `Proxy blocked` 或 `<empty>`
+- 最终 `finish_reason:"tool_calls"`
+
+非法 modern 工具流：
+
+- 首片被改写为可见提示：`[Proxy blocked undeclared tool calls: powershell]`
+- 后续 `Remove-Item` 参数片未泄露
+- 没有出现 `<empty>`
+- 最终 `finish_reason:"stop"`
+
+非法 legacy `function_call` 流：
+
+- 首片被改写为可见提示：`[Proxy blocked undeclared tool calls: powershell]`
+- 后续 `Remove-Item` 参数片未泄露
+- 没有出现 `function_call` 或 `<empty>`
+- 最终 `finish_reason:"stop"`
+
+### `/api/chat` 验收结论
+
+OpenAI SSE 转 Ollama NDJSON 路径也做了黑盒验证：
+
+- 非法 `powershell` 被提示为普通 assistant content
+- 后续危险参数未泄露
+- 没有出现 `<empty>` 或 `tool_calls`
+- 最终 NDJSON 为 `done_reason:"stop"`
+
+### 结论
+
+`v0.2.25` 发布资产本身已经通过黑盒验收。当前建议用户直接升级到 `v0.2.25`，不是只依赖源码测试或本地未打包版本判断。
