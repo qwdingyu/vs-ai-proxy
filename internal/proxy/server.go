@@ -1058,8 +1058,10 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 	finishReason := "stop"
 	scanner := newStreamScanner(stream)
 	acc := newStreamReasoningAccumulator()
+	streamToolSanitizer := newOpenAIStreamToolSanitizer(allowedToolNames(req))
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := normalizeOpenAIStreamLineForVisualStudioWithToolState(scanner.Text(), streamToolSanitizer)
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ":") {
 			continue
 		}

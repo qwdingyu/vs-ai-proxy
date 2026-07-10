@@ -273,6 +273,35 @@ func TestStreamOpenAIToOllamaPreservesToolCallArgumentChunks(t *testing.T) {
 	}
 }
 
+func TestStreamOpenAIToOllamaDropsContinuationAfterBlockedUndeclaredTool(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Remove-Item\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
+	rec := httptest.NewRecorder()
+	chatReq := &provider.ChatRequest{
+		Model: "gpt-test",
+		Tools: []provider.Tool{{Type: "function", Function: provider.ToolFunc{Name: "grep_search"}}},
+	}
+
+	if err := server.streamOpenAIToOllama(rec, req, prov, chatReq, rec); err != nil {
+		t.Fatalf("streamOpenAIToOllama returned error: %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Proxy blocked undeclared tool calls: powershell") {
+		t.Fatalf("undeclared tool block notice missing: %s", body)
+	}
+	if strings.Contains(body, "Remove-Item") || strings.Contains(body, "<empty>") || strings.Contains(body, `"tool_calls":[`) {
+		t.Fatalf("blocked tool continuation leaked to Ollama client: %s", body)
+	}
+}
+
 func TestStreamOllamaPassthroughWritesNDJSON(t *testing.T) {
 	stream := `{"model":"llama","message":{"role":"assistant","content":"hi"},"done":false}` + "\n"
 	server := &Server{}
@@ -397,6 +426,9 @@ func TestStreamOpenAIDropsContinuationAfterBlockedUndeclaredTool(t *testing.T) {
 	}
 	if strings.Contains(body, "Remove-Item") || strings.Contains(body, "<empty>") {
 		t.Fatalf("blocked tool continuation leaked to client: %s", body)
+	}
+	if strings.Contains(body, `"finish_reason":"tool_calls"`) || !strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Fatalf("finish_reason should be stop after all stream tool calls were blocked: %s", body)
 	}
 }
 

@@ -128,6 +128,33 @@ func TestCollectOpenAIStreamReaderBlocksUndeclaredToolCalls(t *testing.T) {
 	if !strings.Contains(message.Content, "Proxy blocked undeclared tool calls: powershell") {
 		t.Fatalf("blocked tool notice missing: %#v", message)
 	}
+	if resp.Choices[0].FinishReason != "stop" {
+		t.Fatalf("finish_reason = %q, want stop after all tool calls were blocked", resp.Choices[0].FinishReason)
+	}
+}
+
+func TestCollectOpenAIStreamReaderKeepsToolCallsFinishWhenSomeDeclaredToolsRemain(t *testing.T) {
+	stream := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_grep","type":"function","function":{"name":"grep_search","arguments":"{\"query\":\"needle\"}"}},{"index":1,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+
+	resp, err := collectOpenAIStreamReader(stream, "gpt-5.5", map[string]struct{}{"grep_search": {}})
+	if err != nil {
+		t.Fatalf("collectOpenAIStreamReader returned error: %v", err)
+	}
+	message := resp.Choices[0].Message
+	if len(message.ToolCalls) != 1 || message.ToolCalls[0].Function.Name != "grep_search" {
+		t.Fatalf("declared tool call should remain: %#v", message.ToolCalls)
+	}
+	if !strings.Contains(message.Content, "powershell") {
+		t.Fatalf("blocked tool notice missing: %#v", message)
+	}
+	if resp.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls while declared calls remain", resp.Choices[0].FinishReason)
+	}
 }
 
 func TestNormalizeProviderSpecificToolCallsInOpenAIJSONBlocksUndeclaredTools(t *testing.T) {
@@ -205,6 +232,14 @@ func TestNormalizeOpenAIStreamLineDropsContinuationAfterBlockedToolCall(t *testi
 	if strings.Contains(second, `"tool_calls"`) || strings.Contains(second, "Remove-Item") || strings.Contains(second, "<empty>") {
 		t.Fatalf("continuation for blocked tool must be silently dropped: %s", second)
 	}
+
+	finish := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		sanitizer,
+	)
+	if strings.Contains(finish, `"finish_reason":"tool_calls"`) || !strings.Contains(finish, `"finish_reason":"stop"`) {
+		t.Fatalf("finish_reason must become stop when all tool calls were blocked: %s", finish)
+	}
 }
 
 func TestNormalizeOpenAIStreamLineDropsLegacyContinuationAfterBlockedFunctionCall(t *testing.T) {
@@ -223,6 +258,14 @@ func TestNormalizeOpenAIStreamLineDropsLegacyContinuationAfterBlockedFunctionCal
 	)
 	if strings.Contains(second, `"function_call"`) || strings.Contains(second, "Remove-Item") || strings.Contains(second, "<empty>") {
 		t.Fatalf("legacy continuation for blocked tool must be silently dropped: %s", second)
+	}
+
+	finish := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		sanitizer,
+	)
+	if strings.Contains(finish, `"finish_reason":"tool_calls"`) || !strings.Contains(finish, `"finish_reason":"stop"`) {
+		t.Fatalf("legacy finish_reason must become stop when function_call was blocked: %s", finish)
 	}
 }
 

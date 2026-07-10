@@ -470,6 +470,7 @@ type openAIStreamToolSanitizer struct {
 	allowedTools              map[string]struct{}
 	blockedToolCallIndexes    map[int]struct{}
 	blockedLegacyFunctionCall bool
+	hasAllowedToolCall        bool
 }
 
 func newOpenAIStreamToolSanitizer(allowedTools map[string]struct{}) *openAIStreamToolSanitizer {
@@ -531,6 +532,10 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 				changed = true
 			}
 		}
+		if finish, ok := choice["finish_reason"].(string); ok && finish == "tool_calls" && !s.hasAllowedToolCall {
+			choice["finish_reason"] = "stop"
+			changed = true
+		}
 	}
 	if !changed {
 		return line
@@ -564,6 +569,7 @@ func (s *openAIStreamToolSanitizer) sanitizeDeltaToolCalls(calls []any) ([]any, 
 		}
 		if isAllowedDSMLTool(name, s.allowedTools) {
 			delete(s.blockedToolCallIndexes, index)
+			s.hasAllowedToolCall = true
 			kept = append(kept, raw)
 			continue
 		}
@@ -582,6 +588,7 @@ func (s *openAIStreamToolSanitizer) sanitizeLegacyFunctionCall(functionCall map[
 	// chunk 明确给出非法 name 时展示拦截提示，后续 arguments 续片按状态静默丢弃。
 	if isAllowedDSMLTool(name, s.allowedTools) {
 		s.blockedLegacyFunctionCall = false
+		s.hasAllowedToolCall = true
 		return nil
 	}
 	s.blockedLegacyFunctionCall = true

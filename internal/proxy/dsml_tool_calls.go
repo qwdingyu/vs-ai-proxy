@@ -36,7 +36,11 @@ func normalizeDSMLToolCallsInChatResponse(resp *provider.ChatResponse, allowedTo
 		msg := &resp.Choices[i].Message
 		if len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
 			if sanitizeExecutableToolCalls(msg, allowedTools) {
-				resp.Choices[i].FinishReason = visualStudioFinishReason(resp.Choices[i].FinishReason)
+				if messageHasExecutableToolCalls(*msg) {
+					resp.Choices[i].FinishReason = "tool_calls"
+				} else {
+					resp.Choices[i].FinishReason = "stop"
+				}
 			}
 			if len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
 				continue
@@ -85,6 +89,10 @@ func sanitizeExecutableToolCalls(msg *provider.Message, allowedTools map[string]
 	}
 	msg.Content = appendToolSanitizationNotice(msg.Content, removed)
 	return true
+}
+
+func messageHasExecutableToolCalls(msg provider.Message) bool {
+	return len(msg.ToolCalls) > 0 || msg.FunctionCall != nil
 }
 
 func appendToolSanitizationNotice(content string, removed []string) string {
