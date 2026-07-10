@@ -126,6 +126,28 @@ func TestLoggingMiddlewareMarksClientGoneAfterPartialStream(t *testing.T) {
 	}
 }
 
+func TestEnrichClientGoneDiagnosticsNearClientDeadline(t *testing.T) {
+	code, message, hint := enrichClientGoneDiagnostics(499, 99_995, 1_075_855, "client_gone", "客户端取消", "原始提示")
+
+	if code != "client_deadline_reached" {
+		t.Fatalf("code = %q, want client_deadline_reached", code)
+	}
+	if !strings.Contains(message, "接近等待上限") {
+		t.Fatalf("message should explain client deadline: %q", message)
+	}
+	if !strings.Contains(hint, "20-30 秒") || !strings.Contains(hint, "1050.6 KB") {
+		t.Fatalf("hint should include upstream timeout guidance and request size: %q", hint)
+	}
+}
+
+func TestEnrichClientGoneDiagnosticsKeepsShortCancelAsClientGone(t *testing.T) {
+	code, message, hint := enrichClientGoneDiagnostics(499, 18_000, 1024, "client_gone", "客户端取消", "原始提示")
+
+	if code != "client_gone" || message != "客户端取消" || hint != "原始提示" {
+		t.Fatalf("short cancel should remain unchanged: code=%q message=%q hint=%q", code, message, hint)
+	}
+}
+
 func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) {
 	st := store.New(10)
 	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}

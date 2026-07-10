@@ -22,7 +22,10 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/internal/store"
 )
 
-const defaultModelTimeoutSeconds = 180
+const (
+	defaultModelTimeoutSeconds        = 180
+	clientDeadlineDiagnosticThreshold = 90_000
+)
 
 // Server 代理服务器
 // 负责接收 Visual Studio / Ollama 客户端的兼容协议请求，
@@ -312,6 +315,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		errorCode := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Code")
 		errorMessage := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Message")
 		errorHint := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Hint")
+		errorCode, errorMessage, errorHint = enrichClientGoneDiagnostics(ww.statusCode, elapsed, r.ContentLength, errorCode, errorMessage, errorHint)
 		requestTools := ww.requestTools
 		if requestTools == "" {
 			requestTools = firstNonEmptyHeader(ww.Header(), "X-Proxy-Request-Tools")
@@ -350,6 +354,18 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 		s.logger.Info("%s %s - %d (%.0f ms)", r.Method, r.URL.Path, ww.statusCode, elapsed)
 	})
+}
+
+func enrichClientGoneDiagnostics(statusCode int, elapsedMs float64, requestBytes int64, code, message, hint string) (string, string, string) {
+	if statusCode != 499 || code != "client_gone" || elapsedMs < clientDeadlineDiagnosticThreshold {
+		return code, message, hint
+	}
+	message = "客户端在接近等待上限时取消请求；通常表示上游模型首 token/完整响应过慢，而不是代理主动中断。"
+	hint = "优先检查 new-api/sub2api 内部渠道首 token 耗时、单渠道超时与重试策略；建议把单渠道超时控制在 20-30 秒，让上游网关在 VS/Copilot 约 100 秒等待上限前完成切换。"
+	if requestBytes > 0 {
+		hint += fmt.Sprintf(" 本次请求体约 %.1f KB，若小请求稳定而大请求超时，应减少上下文/文件内容或选择更稳的大上下文渠道。", float64(requestBytes)/1024)
+	}
+	return "client_deadline_reached", message, hint
 }
 
 func firstNonEmptyHeader(header http.Header, keys ...string) string {
