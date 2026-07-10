@@ -269,6 +269,60 @@ func TestNormalizeOpenAIStreamLineDropsLegacyContinuationAfterBlockedFunctionCal
 	}
 }
 
+func TestNormalizeOpenAIStreamLineTracksToolStatePerChoice(t *testing.T) {
+	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"grep_search": {}})
+	first := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_grep","type":"function","function":{"name":"grep_search","arguments":"{\"query\":"}}]},"finish_reason":null},{"index":1,"delta":{"tool_calls":[{"index":0,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":"}}]},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if !strings.Contains(first, `"name":"grep_search"`) || strings.Contains(first, `"name":"powershell"`) {
+		t.Fatalf("mixed choices should keep declared tool and block undeclared tool: %s", first)
+	}
+
+	continuation := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"needle\"}"}}]},"finish_reason":null},{"index":1,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Remove-Item\"}"}}]},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if !strings.Contains(continuation, "needle") || strings.Contains(continuation, "Remove-Item") || strings.Contains(continuation, "<empty>") {
+		t.Fatalf("continuations must be scoped by choice index: %s", continuation)
+	}
+
+	finish := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"},{"index":1,"delta":{},"finish_reason":"tool_calls"}]}`,
+		sanitizer,
+	)
+	if !strings.Contains(finish, `"index":0`) || !strings.Contains(finish, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("choice 0 should keep tool_calls finish: %s", finish)
+	}
+	if !strings.Contains(finish, `"index":1`) || !strings.Contains(finish, `"finish_reason":"stop"`) {
+		t.Fatalf("choice 1 should become stop after all tools blocked: %s", finish)
+	}
+}
+
+func TestNormalizeProviderSpecificToolCallsInOpenAIJSONReportsEmptyLegacyFunctionCall(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","function_call":{"arguments":"{\"query\":\"needle\"}"}},"finish_reason":"function_call"}]}`)
+	normalized := normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"grep_search": {}})
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content      string         `json:"content"`
+				FunctionCall map[string]any `json:"function_call"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(normalized, &parsed); err != nil {
+		t.Fatalf("unmarshal normalized response: %v; body=%s", err, normalized)
+	}
+	choice := parsed.Choices[0]
+	if choice.Message.FunctionCall != nil {
+		t.Fatalf("empty legacy function_call should be removed: %s", normalized)
+	}
+	if !strings.Contains(choice.Message.Content, "Proxy blocked undeclared tool calls: <empty>") || choice.FinishReason != "stop" {
+		t.Fatalf("empty legacy function_call should produce clear notice and stop finish: %s", normalized)
+	}
+}
+
 func TestVisualStudioFinishReasonPreservesKnownValues(t *testing.T) {
 	for _, value := range []string{"stop", "length", "tool_calls", "content_filter", "function_call"} {
 		if got := visualStudioFinishReason(value); got != value {

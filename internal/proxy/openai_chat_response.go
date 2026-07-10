@@ -194,7 +194,7 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 			name, _ := functionCall["name"].(string)
 			if !isAllowedDSMLTool(name, allowedTools) {
 				delete(message, "function_call")
-				message["content"] = appendToolSanitizationNotice(asString(message["content"]), []string{name})
+				message["content"] = appendToolSanitizationNotice(asString(message["content"]), []string{toolNoticeName(name)})
 				choice["finish_reason"] = "stop"
 				changed = true
 			}
@@ -232,11 +232,18 @@ func sanitizeRawToolCalls(calls []any, allowedTools map[string]struct{}) ([]any,
 			continue
 		}
 		if strings.TrimSpace(name) == "" {
-			name = "<empty>"
+			name = toolNoticeName(name)
 		}
 		removed = append(removed, name)
 	}
 	return kept, removed
+}
+
+func toolNoticeName(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "<empty>"
+	}
+	return name
 }
 
 func asString(value any) string {
@@ -467,14 +474,24 @@ func normalizeOpenAIStreamFinishReasonForVisualStudio(line string) string {
 }
 
 type openAIStreamToolSanitizer struct {
-	allowedTools              map[string]struct{}
-	blockedToolCallIndexes    map[int]struct{}
-	blockedLegacyFunctionCall bool
-	hasAllowedToolCall        bool
+	allowedTools               map[string]struct{}
+	blockedToolCallIndexes     map[streamToolCallKey]struct{}
+	blockedLegacyFunctionCalls map[int]bool
+	hasAllowedToolCalls        map[int]bool
+}
+
+type streamToolCallKey struct {
+	choiceIndex int
+	toolIndex   int
 }
 
 func newOpenAIStreamToolSanitizer(allowedTools map[string]struct{}) *openAIStreamToolSanitizer {
-	return &openAIStreamToolSanitizer{allowedTools: allowedTools, blockedToolCallIndexes: map[int]struct{}{}}
+	return &openAIStreamToolSanitizer{
+		allowedTools:               allowedTools,
+		blockedToolCallIndexes:     map[streamToolCallKey]struct{}{},
+		blockedLegacyFunctionCalls: map[int]bool{},
+		hasAllowedToolCalls:        map[int]bool{},
+	}
 }
 
 func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
@@ -500,6 +517,7 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 		if choice == nil {
 			continue
 		}
+		choiceIndex := openAIStreamChoiceIndex(choice)
 		delta, _ := choice["delta"].(map[string]any)
 		if delta == nil {
 			delta, _ = choice["message"].(map[string]any)
@@ -508,7 +526,7 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 			continue
 		}
 		if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
-			kept, removed, dropped := s.sanitizeDeltaToolCalls(calls)
+			kept, removed, dropped := s.sanitizeDeltaToolCalls(choiceIndex, calls)
 			if len(removed) > 0 || dropped {
 				if len(kept) > 0 {
 					delta["tool_calls"] = kept
@@ -522,17 +540,17 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 			}
 		}
 		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
-			removed := s.sanitizeLegacyFunctionCall(functionCall)
+			removed := s.sanitizeLegacyFunctionCall(choiceIndex, functionCall)
 			if len(removed) > 0 {
 				delete(delta, "function_call")
 				delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), removed)
 				changed = true
-			} else if _, stillPresent := delta["function_call"]; stillPresent && s.blockedLegacyFunctionCall {
+			} else if _, stillPresent := delta["function_call"]; stillPresent && s.blockedLegacyFunctionCalls[choiceIndex] {
 				delete(delta, "function_call")
 				changed = true
 			}
 		}
-		if finish, ok := choice["finish_reason"].(string); ok && finish == "tool_calls" && !s.hasAllowedToolCall {
+		if finish, ok := choice["finish_reason"].(string); ok && finish == "tool_calls" && !s.hasAllowedToolCalls[choiceIndex] {
 			choice["finish_reason"] = "stop"
 			changed = true
 		}
@@ -547,20 +565,21 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 	return "data: " + string(normalized)
 }
 
-func (s *openAIStreamToolSanitizer) sanitizeDeltaToolCalls(calls []any) ([]any, []string, bool) {
+func (s *openAIStreamToolSanitizer) sanitizeDeltaToolCalls(choiceIndex int, calls []any) ([]any, []string, bool) {
 	kept := make([]any, 0, len(calls))
 	removed := []string{}
 	dropped := false
 	for _, raw := range calls {
 		call, _ := raw.(map[string]any)
 		index := openAIStreamToolCallIndex(call)
+		key := streamToolCallKey{choiceIndex: choiceIndex, toolIndex: index}
 		function, _ := call["function"].(map[string]any)
 		name, _ := function["name"].(string)
 		// OpenAI SSE 的 tool_calls 是增量协议：首片通常带 name，后续片经常只带
 		// index/arguments。续片不能按“空工具名”拦截；但如果同一 index 的首片
 		// 已被判定为非法工具，后续参数续片也必须静默丢弃，避免孤儿参数泄露给客户端。
 		if strings.TrimSpace(name) == "" {
-			if _, blocked := s.blockedToolCallIndexes[index]; blocked {
+			if _, blocked := s.blockedToolCallIndexes[key]; blocked {
 				dropped = true
 				continue
 			}
@@ -568,18 +587,18 @@ func (s *openAIStreamToolSanitizer) sanitizeDeltaToolCalls(calls []any) ([]any, 
 			continue
 		}
 		if isAllowedDSMLTool(name, s.allowedTools) {
-			delete(s.blockedToolCallIndexes, index)
-			s.hasAllowedToolCall = true
+			delete(s.blockedToolCallIndexes, key)
+			s.hasAllowedToolCalls[choiceIndex] = true
 			kept = append(kept, raw)
 			continue
 		}
-		s.blockedToolCallIndexes[index] = struct{}{}
+		s.blockedToolCallIndexes[key] = struct{}{}
 		removed = append(removed, name)
 	}
 	return kept, removed, dropped
 }
 
-func (s *openAIStreamToolSanitizer) sanitizeLegacyFunctionCall(functionCall map[string]any) []string {
+func (s *openAIStreamToolSanitizer) sanitizeLegacyFunctionCall(choiceIndex int, functionCall map[string]any) []string {
 	name, _ := functionCall["name"].(string)
 	if strings.TrimSpace(name) == "" {
 		return nil
@@ -587,12 +606,25 @@ func (s *openAIStreamToolSanitizer) sanitizeLegacyFunctionCall(functionCall map[
 	// OpenAI 流式 function_call 可能把 name 和 arguments 拆在不同 chunk；只有当前
 	// chunk 明确给出非法 name 时展示拦截提示，后续 arguments 续片按状态静默丢弃。
 	if isAllowedDSMLTool(name, s.allowedTools) {
-		s.blockedLegacyFunctionCall = false
-		s.hasAllowedToolCall = true
+		s.blockedLegacyFunctionCalls[choiceIndex] = false
+		s.hasAllowedToolCalls[choiceIndex] = true
 		return nil
 	}
-	s.blockedLegacyFunctionCall = true
+	s.blockedLegacyFunctionCalls[choiceIndex] = true
 	return []string{name}
+}
+
+func openAIStreamChoiceIndex(choice map[string]any) int {
+	if choice == nil {
+		return 0
+	}
+	switch raw := choice["index"].(type) {
+	case float64:
+		return int(raw)
+	case int:
+		return raw
+	}
+	return 0
 }
 
 func openAIStreamToolCallIndex(call map[string]any) int {
