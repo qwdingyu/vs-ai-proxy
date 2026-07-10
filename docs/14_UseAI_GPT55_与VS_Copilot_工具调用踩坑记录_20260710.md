@@ -457,3 +457,73 @@ API 错误 500: upstream error: do request failed
 - 日志只记录工具名摘要，不记录命令参数。
 
 这条规则的目的不是限制正常工具调用，而是防止模型或上游 provider 越过 VS/Copilot 客户端声明的工具权限边界。
+
+## 2026-07-10 追加：v0.2.21 到 v0.2.24 工具调用回归与最终修复边界
+
+### 现象
+
+`v0.2.21` 引入声明工具边界后，真实 VS Copilot 流式工具调用出现了更严重的失败：
+
+```text
+[Proxy blocked undeclared tool calls: <empty>]
+无法运行 get_file / grep_search / create_file
+```
+
+这不是 VS 工具本身没有声明，而是代理把 OpenAI SSE 中合法的参数续片误判成空工具名。
+
+### 根因
+
+OpenAI 流式工具调用是增量协议：
+
+1. 首个 chunk 通常包含 `tool_calls[0].function.name`。
+2. 后续 chunk 经常只包含 `index` 和 `function.arguments` 的片段。
+3. 这些参数续片不能独立判断工具名，也不能按 `<empty>` 工具拦截。
+
+错误做法是逐行无状态调用完整响应的工具过滤器。完整响应里缺少工具名可以视为非法；但流式参数续片缺少工具名是正常协议形态。
+
+### 修复版本
+
+用户侧遇到工具调用异常时，应升级到 `v0.2.24` 或更新版本。
+
+关键修复链路：
+
+- `v0.2.22`：允许合法 OpenAI SSE 参数续片通过，不再把续片显示成 `<empty>`。
+- `v0.2.23`：直通 SSE 改成有状态过滤；非法工具首片被拦截后，同 index 的后续参数片静默丢弃，避免孤儿参数泄露。
+- `v0.2.24`：当所有工具都被拦截后，`finish_reason` 改为 `stop`；当仍有合法工具保留时才继续使用 `tool_calls`。`/api/chat` 的 OpenAI→Ollama 流转换也接入同一过滤策略。
+
+### 当前必须保持的协议规则
+
+1. 非流式完整响应可以按完整工具名严格校验。
+2. 流式 `tool_calls` / legacy `function_call` 必须按 chunk 状态处理。
+3. 无 `name` 的参数续片：
+   - 如果对应工具 index 已确认合法，放行。
+   - 如果对应工具 index 已被拦截，静默丢弃。
+   - 如果还没有看到名称，不得按 `<empty>` 提示给用户。
+4. 明确带非法 `name` 的 chunk 必须拦截，并输出可见诊断：`Proxy blocked undeclared tool calls: <name>`。
+5. 拦截后不能让客户端继续看到 `finish_reason:"tool_calls"`，除非仍有合法工具调用保留。
+6. `/v1/chat/completions` 与 `/api/chat` 必须使用同一工具边界，不能只修 VS 路径。
+
+### 已固化的回归测试
+
+必须保留以下测试类型：
+
+- helper 层：合法参数续片不被 `<empty>` 拦截。
+- helper 层：非法工具首片被拦后，后续参数续片不泄露。
+- handler 层：真实 `/v1/chat/completions` 流式路径覆盖 modern `tool_calls`。
+- handler 层：真实 `/v1/chat/completions` 流式路径覆盖 legacy `function_call`。
+- handler 层：raw 非流式 JSON 中未声明 `tool_calls` 被移除且 `finish_reason=stop`。
+- `/api/chat`：OpenAI SSE 转 Ollama NDJSON 时同样执行声明工具边界。
+- Windows CI：必须运行 `internal/proxy` 测试，不能只测命令行和更新模块。
+
+### 发布校验要求
+
+以后涉及工具调用、流式、模型测试页、fallback 的改动，发布前至少执行：
+
+```bash
+go test ./internal/proxy -count=1
+go test ./... -count=1
+go test -race ./internal/proxy -count=1
+git diff --check
+```
+
+CI 中 Linux 必须跑 `go test ./...`，Windows smoke 必须包含 `./internal/proxy`，因为用户主要使用 Windows + Visual Studio。

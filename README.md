@@ -126,6 +126,8 @@ C:\Users\你的用户名\.config\vs-ai-proxy\config.json
 
 请确认所选模型和上游 provider 支持工具调用。不同上游对流式、非流式、`tool_calls` 的兼容程度不同，建议优先使用测试页和请求日志定位。
 
+如果在 Visual Studio Copilot 中看到 `Proxy blocked undeclared tool calls: <empty>`、`create_file` / `grep_search` / `powershell` 无法执行，或流式工具调用参数丢失，请先升级到 `v0.2.24` 或更新版本。`v0.2.24` 修复了 OpenAI 流式 `tool_calls` / legacy `function_call` 参数分片、非法工具拦截后的续片丢弃，以及 `finish_reason` 与实际剩余工具调用不一致的问题。
+
 ## 加入 QQ 群
 
 欢迎加入 QQ 群交流 Visual Studio Copilot BYOM、provider 配置和排障问题。

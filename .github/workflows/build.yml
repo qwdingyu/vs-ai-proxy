@@ -29,6 +29,9 @@ jobs:
       - name: 静态检查
         run: go vet ./...
 
+      - name: 全量测试
+        run: go test ./... -count=1
+
       - name: 编译（当前平台）
         run: make build
 
@@ -51,9 +54,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: 关键包测试
+      - name: Windows 关键路径测试
         shell: bash
-        run: go test ./cmd/server ./internal/update ./internal/api -count=1
+        run: go test ./cmd/server ./internal/update ./internal/api ./internal/proxy -count=1
 
       - name: Windows 构建版本校验
         shell: bash
