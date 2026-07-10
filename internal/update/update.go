@@ -215,19 +215,30 @@ func LaunchWindowsSelfUpdate(result SelfUpdateResult, args []string) error {
 		return errors.New("当前更新不需要 Windows 延迟替换脚本")
 	}
 	scriptPath := filepath.Join(filepath.Dir(result.StagedBinaryPath), "vs-ai-proxy-self-update.ps1")
+	logPath := filepath.Join(filepath.Dir(result.StagedBinaryPath), "vs-ai-proxy-self-update.log")
 	quotedArgs := powershellStringArray(args)
 	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 $pidToWait = %d
 $exe = %s
 $stage = %s
 $backup = %s
+$log = %s
 $argsToPass = @(%s)
-while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
-if (Test-Path $backup) { Remove-Item -Force $backup }
-if (Test-Path $exe) { Move-Item -Force $exe $backup }
-Move-Item -Force $stage $exe
-Start-Process -FilePath $exe -ArgumentList $argsToPass -WorkingDirectory %s
-`, os.Getpid(), psQuote(result.ExecutablePath), psQuote(result.StagedBinaryPath), psQuote(result.BackupPath), quotedArgs, psQuote(mustGetwd()))
+try {
+  "[$(Get-Date -Format o)] waiting for pid $pidToWait" | Out-File -FilePath $log -Encoding utf8 -Append
+  while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
+  "[$(Get-Date -Format o)] replacing $exe" | Out-File -FilePath $log -Encoding utf8 -Append
+  if (Test-Path $backup) { Remove-Item -Force $backup }
+  if (Test-Path $exe) { Move-Item -Force $exe $backup }
+  Move-Item -Force $stage $exe
+  "[$(Get-Date -Format o)] starting $exe" | Out-File -FilePath $log -Encoding utf8 -Append
+  Start-Process -FilePath $exe -ArgumentList $argsToPass -WorkingDirectory %s
+  "[$(Get-Date -Format o)] done" | Out-File -FilePath $log -Encoding utf8 -Append
+} catch {
+  "[$(Get-Date -Format o)] ERROR $($_.Exception.Message)" | Out-File -FilePath $log -Encoding utf8 -Append
+  throw
+}
+`, os.Getpid(), psQuote(result.ExecutablePath), psQuote(result.StagedBinaryPath), psQuote(result.BackupPath), psQuote(logPath), quotedArgs, psQuote(mustGetwd()))
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 		return err
 	}

@@ -37,6 +37,8 @@ var (
 	launchWindowsSelfUpdateFn = update.LaunchWindowsSelfUpdate
 )
 
+var startupSelfUpdateExit = make(chan struct{}, 1)
+
 const (
 	startupUpdateCheckTimeout = 8 * time.Second
 	startupSelfUpdateTimeout  = 2 * time.Minute
@@ -114,10 +116,15 @@ func main() {
 	logger.Info("VS AI Proxy %s 已启动，监听地址=http://%s，管理面板=http://%s/admin", version, publicAddr, publicAddr)
 	logPublicAccessHint(appAddr, logger)
 
-	// 监听退出信号，优雅关闭
+	// 监听退出信号，优雅关闭；Windows 后台自更新脚本启动后也会通知当前进程退出，
+	// 这样脚本才能解除 exe 文件占用，完成 .new -> exe 和旧版本 .bak 替换。
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	select {
+	case <-quit:
+	case <-startupSelfUpdateExit:
+		logger.Info("后台自更新已准备替换，当前进程即将退出以完成 Windows 文件替换。")
+	}
 
 	logger.Info("正在关闭服务...")
 	cancel()
@@ -218,7 +225,8 @@ func runStartupSelfUpdate(logger *log.Logger, opts update.Options, args []string
 			logger.Warn("启动 Windows 延迟替换失败，继续运行当前版本: %v", err)
 			return
 		}
-		logger.Info("已启动后台替换脚本，当前进程退出后会完成替换并重启。")
+		logger.Info("已启动后台替换脚本，当前进程将自动退出以完成替换并重启。")
+		notifyStartupSelfUpdateExit()
 		return
 	}
 	if err := launchReplacementFn(result.ExecutablePath, restartArgs); err != nil {
@@ -226,6 +234,13 @@ func runStartupSelfUpdate(logger *log.Logger, opts update.Options, args []string
 		return
 	}
 	logger.Info("已启动新版进程，当前进程即将退出。")
+}
+
+func notifyStartupSelfUpdateExit() {
+	select {
+	case startupSelfUpdateExit <- struct{}{}:
+	default:
+	}
 }
 
 func autoUpdateEnabled() bool {

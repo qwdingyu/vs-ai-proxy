@@ -699,3 +699,157 @@ $env:VS_AI_PROXY_AUTO_UPDATE="0"
 ```
 
 关闭自动更新不会影响代理、模型测试或 VS Copilot 使用，只是不再启动时检查新版本。
+
+## 2026-07-10 追加：`max_output_tokens` 导致工具调用未进入执行阶段
+
+### 现象
+
+真实 Visual Studio Copilot 环境中出现：
+
+```text
+POST /v1/chat/completions - 502
+模型 gpt-5.5 在提供商 useai2 流式失败: openai stream error: API 错误 400: {"error":{"message":"Unsupported parameter: max_output_tokens","type":"invalid_request_error","param":"","code":null}}
+请求 declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,...
+```
+
+用户看到的是“无法运行 `create_file`”，但这次不是工具声明丢失，也不是代理拦截了 `create_file`。日志已经显示请求里声明了工具；真正失败发生在模型响应之前：上游在 `/v1/chat/completions` 阶段拒绝了请求参数。
+
+### 根因
+
+`max_output_tokens` 是 Responses API 常见参数，而当前真实请求走的是 OpenAI Chat Completions 兼容接口：
+
+```text
+/v1/chat/completions
+```
+
+部分 OpenAI-compatible 网关会宽容忽略未知参数，但 New API、sub2api 或其他网关可能选择严格校验并返回 `400 Unsupported parameter`。一旦上游直接返回 400，模型不会生成任何 `tool_calls`，VS Copilot 就会表现为“工具无法执行”。
+
+### 为什么这不是单个工具问题
+
+这类错误会影响所有工具，不只影响 `create_file`：
+
+- `create_file`
+- `apply_patch`
+- `powershell`
+- `git`
+- `code_search`
+- `read_file`
+- 其他 VS Copilot 声明的工具
+
+只要请求在进入模型前被 400 拒绝，任何工具都没有机会被调用。
+
+### 解决方案
+
+在 OpenAI-compatible provider 的 `/v1/chat/completions` 出口统一做协议归一化：
+
+- 如果请求包含 `max_output_tokens` 且没有 `max_tokens`，转换为 `max_tokens`。
+- 删除原始 `max_output_tokens`，避免严格网关返回 400。
+- 保留 `tools`、`tool_choice`、`parallel_tool_calls` 和 provider 扩展字段，不能因为参数清洗破坏工具声明。
+- 非流式 `ChatRaw` 和流式 `ChatStream` 都必须走同一归一化，因为 VS Copilot 真实工具执行通常是 `stream=true`。
+
+实现位置：
+
+- `internal/provider/provider.go` 中 `marshalOpenAIChatCompletionsRequest`
+- `internal/provider/provider.go` 中 `normalizeOpenAIChatCompletionsRequestBody`
+
+回归测试：
+
+- `TestOpenAIProviderChatRawConvertsMaxOutputTokensForChatCompletions`
+- `TestOpenAIProviderChatStreamConvertsMaxOutputTokensForChatCompletions`
+
+### 对 New API / sub2api / 其他 OpenAI-compatible 网关是否通用
+
+这个方案是协议层通用方案，不是 New API 特判，也不是针对 `gpt-5.5` 或 `create_file` 的局部补丁。
+
+通用原因：
+
+1. 代理对外接收的是 VS Copilot 请求，对上游发送的是 `/v1/chat/completions`。
+2. `/v1/chat/completions` 的通用 token 上限参数是 `max_tokens`；`max_output_tokens` 属于另一类 API 形态或网关扩展。
+3. 把 `max_output_tokens` 映射为 `max_tokens`，比直接透传更符合 Chat Completions 兼容网关的最大公约数。
+4. New API、sub2api、one-api、LiteLLM、OpenRouter 风格网关都可能对未知参数采取不同策略；在代理边界做规范化能减少网关差异。
+
+边界说明：
+
+- 如果某个上游同时支持 `max_output_tokens` 和 `max_tokens`，当前策略优先保留用户/客户端已经显式给出的 `max_tokens`，只在缺失时用 `max_output_tokens` 补齐。
+- 如果未来出现新的严格错误，例如 `Unsupported parameter: parallel_tool_calls`、`reasoning_effort`、`store`、`metadata`，不能盲目删除所有未知字段；应按“Chat Completions 标准 + VS Copilot 必需字段 + provider 已知兼容字段”的原则逐项治理。
+- 不能把所有 `Extra` 全删掉，因为 `tool_choice`、`parallel_tool_calls`、provider 路由字段和部分 Copilot 扩展可能依赖未知字段保真。
+
+### 后续排障标准
+
+遇到“工具无法执行”时，不要先按工具名判断；先看上游错误阶段：
+
+1. 如果日志是 `Unsupported parameter: xxx`，说明请求在模型前被网关拒绝，是参数兼容问题。
+2. 如果日志显示 `declared:` 中没有目标工具，说明客户端没有声明工具，代理阻断是正确的安全行为。
+3. 如果 `declared:` 有目标工具、上游无 4xx、响应也有 `tool_calls`，但工具仍未执行，再排查流式工具分片和 `finish_reason`。
+4. 如果上游返回 5xx / `do_request_failed`，属于上游渠道健康或网关路由问题，代理可短重试但不能保证所有渠道一定成功。
+
+### 当前结论
+
+针对这次 `max_output_tokens` 造成的 gpt-5.5 / VS Copilot 工具不可用问题，当前修复是通用协议兼容方案，适用于 New API，也适用于 sub2api 等严格校验 OpenAI-compatible 网关。
+
+## 2026-07-10 追加：Windows 自更新 `.new` / `.ps1` 长期残留
+
+### 现象
+
+Windows 后台自动更新日志显示：
+
+```text
+后台已安装新版本: v0.2.30 -> v0.2.31
+旧版本备份文件: ...\vs-ai-proxy.exe.bak-20260710091223
+已启动后台替换脚本，当前进程退出后会完成替换并重启。
+```
+
+但用户目录中长期保留：
+
+- `vs-ai-proxy.exe.new`
+- `vs-ai-proxy-self-update.ps1`
+
+同时旧的 `vs-ai-proxy.exe` 仍然是旧版本，`.bak-*` 也没有生成。
+
+### 根因
+
+Windows 不能覆盖正在运行的 exe。原设计让 PowerShell 脚本等待当前进程退出后再执行：
+
+```powershell
+while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
+```
+
+但后台自动更新路径启动脚本后，主进程继续运行并继续占用 `vs-ai-proxy.exe`。这导致脚本一直等待 PID 退出，永远走不到：
+
+```powershell
+Move-Item $exe $backup
+Move-Item $stage $exe
+```
+
+因此 `.new` 和 `.ps1` 长期存在，旧 exe 不变。这是自更新流程问题，不是用户误解。
+
+### 修复策略
+
+Windows 后台替换脚本启动成功后，主进程必须主动退出，让脚本解除文件占用并完成替换。
+
+当前策略：
+
+1. 后台下载并暂存新版为 `vs-ai-proxy.exe.new`。
+2. 生成 `vs-ai-proxy-self-update.ps1`。
+3. 成功启动替换脚本后，通知主进程退出。
+4. 主进程优雅关闭 HTTP 服务和请求日志。
+5. PowerShell 脚本检测到旧进程退出后：
+   - 把旧 exe 移动为 `.bak-*`
+   - 把 `.new` 移动为正式 `vs-ai-proxy.exe`
+   - 重新启动新版进程
+6. 脚本写入 `vs-ai-proxy-self-update.log`，便于排查替换失败原因。
+
+### 排障标准
+
+如果仍看到 `.new` / `.ps1` 残留：
+
+1. 先看 `vs-ai-proxy-self-update.log` 是否有 ERROR。
+2. 检查旧进程是否仍在运行或被杀毒软件/Windows Defender 锁定。
+3. 检查目录是否有写权限。
+4. 手工退出所有 `vs-ai-proxy.exe` 进程后，再查看是否完成 `.bak-*` 和新版 exe 替换。
+
+### 注意事项
+
+- `.bak-*` 只有替换真正发生后才会生成。
+- `.new` 存在只代表新版已暂存，不代表替换已完成。
+- 自动更新不应只提示“当前进程退出后替换”，而必须在自动更新路径主动触发退出，否则脚本会一直等待。

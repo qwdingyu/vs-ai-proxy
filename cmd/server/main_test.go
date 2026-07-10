@@ -94,14 +94,17 @@ func TestAutoSelfUpdateOnStartupLaunchesWindowsApply(t *testing.T) {
 	oldCheckUpdate := checkUpdateFn
 	oldSelfUpdate := selfUpdateFn
 	oldLaunchWindows := launchWindowsSelfUpdateFn
+	oldStartupSelfUpdateExit := startupSelfUpdateExit
 	t.Cleanup(func() {
 		version = oldVersion
 		checkUpdateFn = oldCheckUpdate
 		selfUpdateFn = oldSelfUpdate
 		launchWindowsSelfUpdateFn = oldLaunchWindows
+		startupSelfUpdateExit = oldStartupSelfUpdateExit
 	})
 
 	version = "v0.2.14"
+	startupSelfUpdateExit = make(chan struct{}, 1)
 	checkUpdateFn = func(_ context.Context, opts update.Options) (update.CheckResult, error) {
 		if opts.CurrentVersion != "v0.2.14" {
 			t.Fatalf("CurrentVersion = %q, want v0.2.14", opts.CurrentVersion)
@@ -145,6 +148,11 @@ func TestAutoSelfUpdateOnStartupLaunchesWindowsApply(t *testing.T) {
 	case <-launched:
 	case <-time.After(time.Second):
 		t.Fatalf("LaunchWindowsSelfUpdate was not called")
+	}
+	select {
+	case <-startupSelfUpdateExit:
+	case <-time.After(time.Second):
+		t.Fatalf("startup self-update should notify main process to exit")
 	}
 }
 
