@@ -166,6 +166,28 @@ func TestNormalizeOpenAIStreamLineBlocksUndeclaredToolCalls(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAIStreamLineAllowsArgumentOnlyToolCallChunks(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"query\"}"}}]},"finish_reason":null}]}`
+	normalized := normalizeOpenAIStreamLineForVisualStudioWithTools(line, map[string]struct{}{"grep_search": {}})
+	if strings.Contains(normalized, "Proxy blocked undeclared tool calls") {
+		t.Fatalf("argument-only stream chunk must not be blocked: %s", normalized)
+	}
+	if !strings.Contains(normalized, `"tool_calls"`) || !strings.Contains(normalized, `"arguments"`) {
+		t.Fatalf("argument-only stream chunk must pass through unchanged enough for VS to merge it: %s", normalized)
+	}
+}
+
+func TestNormalizeOpenAIStreamLineAllowsLegacyFunctionCallArgumentChunks(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"function_call":{"arguments":"\"pattern\"}"}},"finish_reason":null}]}`
+	normalized := normalizeOpenAIStreamLineForVisualStudioWithTools(line, map[string]struct{}{"grep_search": {}})
+	if strings.Contains(normalized, "Proxy blocked undeclared tool calls") {
+		t.Fatalf("legacy function_call argument-only chunk must not be blocked: %s", normalized)
+	}
+	if !strings.Contains(normalized, `"function_call"`) || !strings.Contains(normalized, `"arguments"`) {
+		t.Fatalf("legacy argument-only chunk must pass through for client-side merge: %s", normalized)
+	}
+}
+
 func TestVisualStudioFinishReasonPreservesKnownValues(t *testing.T) {
 	for _, value := range []string{"stop", "length", "tool_calls", "content_filter", "function_call"} {
 		if got := visualStudioFinishReason(value); got != value {

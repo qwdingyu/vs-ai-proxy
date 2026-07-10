@@ -486,7 +486,7 @@ func sanitizeOpenAIStreamLineToolCalls(line string, allowedTools map[string]stru
 			continue
 		}
 		if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
-			kept, removed := sanitizeRawToolCalls(calls, allowedTools)
+			kept, removed := sanitizeOpenAIStreamDeltaToolCalls(calls, allowedTools)
 			if len(removed) > 0 {
 				if len(kept) > 0 {
 					delta["tool_calls"] = kept
@@ -499,7 +499,9 @@ func sanitizeOpenAIStreamLineToolCalls(line string, allowedTools map[string]stru
 		}
 		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
 			name, _ := functionCall["name"].(string)
-			if !isAllowedDSMLTool(name, allowedTools) {
+			// OpenAI 流式 function_call 可能把 name 和 arguments 拆在不同 chunk；
+			// 只有当前 chunk 明确给出非法 name 时才能拦截，arguments 续片必须放行。
+			if strings.TrimSpace(name) != "" && !isAllowedDSMLTool(name, allowedTools) {
 				delete(delta, "function_call")
 				delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), []string{name})
 				changed = true
@@ -514,6 +516,29 @@ func sanitizeOpenAIStreamLineToolCalls(line string, allowedTools map[string]stru
 		return line
 	}
 	return "data: " + string(normalized)
+}
+
+func sanitizeOpenAIStreamDeltaToolCalls(calls []any, allowedTools map[string]struct{}) ([]any, []string) {
+	kept := make([]any, 0, len(calls))
+	removed := []string{}
+	for _, raw := range calls {
+		call, _ := raw.(map[string]any)
+		function, _ := call["function"].(map[string]any)
+		name, _ := function["name"].(string)
+		// OpenAI SSE 的 tool_calls 是增量协议：首片通常带 name，后续片经常只带
+		// index/arguments。续片没有独立语义，不能按“空工具名”拦截，否则会把
+		// get_file/grep_search/create_file 等合法工具的参数片段改写成普通文本。
+		if strings.TrimSpace(name) == "" {
+			kept = append(kept, raw)
+			continue
+		}
+		if isAllowedDSMLTool(name, allowedTools) {
+			kept = append(kept, raw)
+			continue
+		}
+		removed = append(removed, name)
+	}
+	return kept, removed
 }
 
 func normalizeOpenAIFinishReason(choice map[string]any) bool {
