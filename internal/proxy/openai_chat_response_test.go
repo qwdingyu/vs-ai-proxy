@@ -182,6 +182,39 @@ func TestNormalizeProviderSpecificToolCallsInOpenAIJSONBlocksUndeclaredTools(t *
 	}
 }
 
+func TestNormalizeProviderSpecificToolCallsInOpenAIJSONBlocksToolsWhenRequestDeclaresNone(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	normalized := normalizeProviderSpecificToolCallsInOpenAIJSON(body, nil)
+	if strings.Contains(string(normalized), `"tool_calls"`) || strings.Contains(string(normalized), `"finish_reason":"tool_calls"`) {
+		t.Fatalf("tool calls must be blocked when request declares no tools: %s", normalized)
+	}
+	if !strings.Contains(string(normalized), "powershell") || !strings.Contains(string(normalized), `"finish_reason":"stop"`) {
+		t.Fatalf("blocked tool notice/stop finish missing: %s", normalized)
+	}
+}
+
+func TestNormalizeOpenAIStreamLineBlocksNamedToolWhenRequestDeclaresNone(t *testing.T) {
+	sanitizer := newOpenAIStreamToolSanitizer(nil)
+	line := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if strings.Contains(line, `"tool_calls"`) || !strings.Contains(line, "Proxy blocked undeclared tool calls: powershell") {
+		t.Fatalf("named stream tool must be blocked when request declares no tools: %s", line)
+	}
+}
+
+func TestNormalizeProviderSpecificToolCallsInOpenAIJSONReportsEmptyToolNameWithoutEnglishPlaceholder(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_empty","type":"function","function":{"arguments":"{\"query\":\"needle\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	normalized := normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"grep_search": {}})
+	if strings.Contains(string(normalized), "<empty>") {
+		t.Fatalf("empty tool name should not expose English placeholder: %s", normalized)
+	}
+	if !strings.Contains(string(normalized), "空工具名") || !strings.Contains(string(normalized), `"finish_reason":"stop"`) {
+		t.Fatalf("empty tool name should produce localized notice and stop finish: %s", normalized)
+	}
+}
+
 func TestNormalizeOpenAIStreamLineBlocksUndeclaredToolCalls(t *testing.T) {
 	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":null}]}`
 	normalized := normalizeOpenAIStreamLineForVisualStudioWithTools(line, map[string]struct{}{"git": {}})
@@ -318,7 +351,7 @@ func TestNormalizeProviderSpecificToolCallsInOpenAIJSONReportsEmptyLegacyFunctio
 	if choice.Message.FunctionCall != nil {
 		t.Fatalf("empty legacy function_call should be removed: %s", normalized)
 	}
-	if !strings.Contains(choice.Message.Content, "Proxy blocked undeclared tool calls: <empty>") || choice.FinishReason != "stop" {
+	if strings.Contains(choice.Message.Content, "<empty>") || !strings.Contains(choice.Message.Content, "Proxy blocked undeclared tool calls: 空工具名") || choice.FinishReason != "stop" {
 		t.Fatalf("empty legacy function_call should produce clear notice and stop finish: %s", normalized)
 	}
 }

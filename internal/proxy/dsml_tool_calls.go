@@ -29,7 +29,7 @@ const (
 )
 
 func normalizeDSMLToolCallsInChatResponse(resp *provider.ChatResponse, allowedTools map[string]struct{}) {
-	if resp == nil || len(allowedTools) == 0 {
+	if resp == nil {
 		return
 	}
 	for i := range resp.Choices {
@@ -57,7 +57,7 @@ func normalizeDSMLToolCallsInChatResponse(resp *provider.ChatResponse, allowedTo
 }
 
 func sanitizeExecutableToolCalls(msg *provider.Message, allowedTools map[string]struct{}) bool {
-	if msg == nil || len(allowedTools) == 0 {
+	if msg == nil {
 		return false
 	}
 	removed := []string{}
@@ -69,7 +69,7 @@ func sanitizeExecutableToolCalls(msg *provider.Message, allowedTools map[string]
 			continue
 		}
 		if name == "" {
-			name = "<empty>"
+			name = toolNoticeName(name)
 		}
 		removed = append(removed, name)
 	}
@@ -78,7 +78,7 @@ func sanitizeExecutableToolCalls(msg *provider.Message, allowedTools map[string]
 		name := strings.TrimSpace(msg.FunctionCall.Name)
 		if !isAllowedDSMLTool(name, allowedTools) {
 			if name == "" {
-				name = "<empty>"
+				name = toolNoticeName(name)
 			}
 			removed = append(removed, name)
 			msg.FunctionCall = nil

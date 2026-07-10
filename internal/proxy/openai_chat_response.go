@@ -155,9 +155,6 @@ func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse, allowedTool
 }
 
 func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools map[string]struct{}) []byte {
-	if len(allowedTools) == 0 {
-		return body
-	}
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
 		return body
@@ -241,7 +238,7 @@ func sanitizeRawToolCalls(calls []any, allowedTools map[string]struct{}) ([]any,
 
 func toolNoticeName(name string) string {
 	if strings.TrimSpace(name) == "" {
-		return "<empty>"
+		return "空工具名"
 	}
 	return name
 }
@@ -495,7 +492,7 @@ func newOpenAIStreamToolSanitizer(allowedTools map[string]struct{}) *openAIStrea
 }
 
 func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
-	if s == nil || len(s.allowedTools) == 0 {
+	if s == nil {
 		return line
 	}
 	trimmed := strings.TrimSpace(line)

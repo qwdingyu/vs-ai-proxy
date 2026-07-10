@@ -256,7 +256,11 @@ func TestStreamOpenAIToOllamaPreservesToolCallArgumentChunks(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
 	rec := httptest.NewRecorder()
 
-	err := server.streamOpenAIToOllama(rec, req, prov, &provider.ChatRequest{Model: "gpt-test"}, rec)
+	chatReq := &provider.ChatRequest{
+		Model: "gpt-test",
+		Tools: []provider.Tool{{Type: "function", Function: provider.ToolFunc{Name: "create_file"}}},
+	}
+	err := server.streamOpenAIToOllama(rec, req, prov, chatReq, rec)
 	if err != nil {
 		t.Fatalf("streamOpenAIToOllama returned error: %v", err)
 	}
