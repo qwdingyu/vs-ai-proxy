@@ -299,3 +299,161 @@ git diff --check
 - 真实代理路由与 raw OpenAI 透传：`internal/proxy/server.go`
 - 管理测试接口：`internal/api/api.go`
 - 管理页面文案、按钮防抖、模型下拉：`web/dist/index.html`
+
+## 2026-07-10 追加：生产级审查后的全局加固
+
+### 问题 8：重试、模式兜底和 provider fallback 叠加会放大请求
+
+真实日志出现过 85-100 秒请求，例如：
+
+```text
+模型 gpt-5.5 在提供商 useai2 流式失败: context canceled
+POST /v1/chat/completions - 502 (100001 ms)
+```
+
+根因不是单个模型名，而是恢复策略叠加：
+
+1. OpenAI provider 对瞬态 5xx 做短重试。
+2. 代理层在非流式失败时会尝试流式聚合，流式失败时会尝试非流式合成 SSE。
+3. 注册表还可能继续尝试同模型的其他 provider 候选。
+4. 如果每一层都各自使用新的超时预算，请求会被放大，用户看到长时间卡住，服务端也会增加上游压力和计费风险。
+
+最佳实践已经固化到代码：
+
+- `timeout_seconds` 现在表示单个 provider candidate 的总预算，而不是每次 HTTP attempt 的预算。
+- 未配置模型超时时默认使用 60 秒总预算，避免无界等待。
+- provider 内部 HTTP 请求不再用第二套 `http.Client.Timeout` 截断模型级 deadline，防止 `timeout_seconds=180` 仍被默认 60 秒提前杀掉。
+- 流式/非流式互相兜底只在可恢复错误发生时触发：5xx、网络瞬断、协议不兼容。
+- 4xx、429、`context canceled`、`context deadline exceeded` 不触发模式兜底。
+- 429 在没有明确 `Retry-After` 支持前不盲目重试，避免放大限流和账单风险。
+
+排障信号：
+
+- `X-Proxy-Fallback-Mode: nonstream-to-stream` 表示非流式失败后，代理用流式聚合成 JSON 成功。
+- `X-Proxy-Fallback-Mode: stream-to-nonstream` 表示流式失败后，代理用非流式响应合成 SSE 成功。
+- 没有该 header 时，不应把成功误判为 fallback 成功。
+
+### 问题 9：DSML 工具调用必须是协议边界转换，不是模型名特判
+
+`step-router-v1` 返回 DSML 文本工具调用是 provider/model 方言问题，不应写死模型名，也不应只对某个 provider 打补丁。
+
+当前规则：
+
+- 只转换客户端请求中声明过的 `tools` / legacy `functions`。
+- DSML 中任意工具未声明、参数重复、参数缺少 name、超过资源限制时，整组 DSML 原样保留为文本，不执行任何工具。
+- 这是原子策略：不能“合法的执行、非法的删除”，否则会造成模型意图被代理层篡改。
+- `string="false"` 的参数会尽力保留数字、布尔、null 类型；`string="true"` 保持字符串。
+- 工具调用 ID 使用内容哈希生成，避免简单递增 ID 在重放/缓存场景下不稳定。
+- 支持 `<｜DSML｜...>` 和 `<|DSML|...>` 两类 marker。
+- 资源上限：DSML 内容 1MiB、工具调用 32 个、单调用参数 64 个、参数 JSON 256KiB。
+
+流式 DSML 的权衡：
+
+- 代理只探测开头少量 SSE 行，以保护普通流式首 token 延迟。
+- 检测到 DSML 后才聚合完整流并输出标准 OpenAI SSE `tool_calls`。
+- 普通 SSE 必须逐行原样转发，不能因为 DSML 探测被重复、改写或延迟到全量完成。
+- `X-Proxy-Tool-Call-Normalization: dsml` 表示本次确实发生了 DSML 到标准 `tool_calls` 的转换。
+
+### 问题 10：测试页成功不等于 VS Copilot 真实路径成功
+
+管理测试页通常是短 prompt、单接口、人工触发；VS Copilot 真实路径会覆盖：
+
+- `/v1/chat/completions`
+- `stream=true` 和 `stream=false`
+- 标准 `tool_calls`
+- legacy `functions/function_call`
+- 流式工具参数分片
+- 模型输出 DSML 方言
+- 上游返回 SSE 但客户端请求非流式
+- 上游 5xx、网关 `do_request_failed`、客户端取消
+
+因此回归测试必须覆盖真实代理入口，不能只看 `/api/test/chat`。
+
+### 新增必须保持的回归测试
+
+关键测试包含：
+
+- provider 重试共享同一个 operation timeout，不允许每次 attempt 获得新的完整预算。
+- 模型级长 timeout 可以覆盖 provider 默认短 timeout。
+- 4xx、429、取消、超时不触发流/非流互相兜底。
+- fallback 成功时响应头必须显示 `X-Proxy-Fallback-Mode`。
+- 普通 SSE 在 DSML 探测后仍保持原样。
+- 未声明 DSML 工具必须原样保留，不得转换或删除。
+- 混合合法/非法 DSML 工具调用必须整组拒绝。
+- 重复 DSML 参数必须整组拒绝。
+
+### 后续禁止回退的实践
+
+1. 不要按 `gpt-5.5`、`step-router-v1`、`glm-5.2` 等模型名写兼容分支；应识别协议形态。
+2. 不要在代理层和 provider 层分别设置互相竞争的超时语义。
+3. 不要对 4xx、429、用户取消做兜底重试。
+4. 不要在流式已写出字节后切换 provider，否则下游会收到混合流。
+5. 不要把 DSML 文本无条件转换为工具调用，必须校验声明工具和资源限制。
+6. 不要把“测试页可用”宣传为“VS Copilot 工具调用全链路可用”，除非真实 `/v1/chat/completions` 流/非流都通过。
+7. 不要删除 `X-Proxy-Fallback-Mode` / `X-Proxy-Tool-Call-Normalization`，它们是线上定位“上游成功”还是“代理恢复成功”的关键证据。
+
+### 2026-07-10 追加：`client_gone` 与上游 500 必须分开判断
+
+真实日志中可能同时看到：
+
+```text
+流状态: 错误
+client_gone
+openai_stream_error
+API 错误 500: upstream error: do request failed
+```
+
+这类日志容易误判为“GPT 模型自身持续不可用”。实际需要拆成两件事：
+
+1. `API 错误 500 / do_request_failed`：上游网关或上游渠道失败，属于 provider/server 侧错误。
+2. `client_gone` / `context canceled`：下游客户端已经取消或断开，属于客户端生命周期事件。
+
+最佳实践：
+
+- 一旦请求 context 已取消，代理不应继续流/非流兜底，也不应切换到其他 provider。
+- `client_gone` 不应记为 `upstream_server_error`，否则会误导排障，把用户取消当成模型故障。
+- 如果没有 `client_gone`，单纯 `API 错误 500 / do_request_failed` 仍可按瞬态上游错误处理，并允许在未写出响应前做一次安全兜底。
+- 如果已经写出流式字节，不允许切换 provider；下游会收到混合 SSE，风险更高。
+
+当前回归测试已覆盖：
+
+- wrapped `context.Canceled + API 错误 500` 分类为 `client_gone`。
+- 流式请求在 `client_gone` 后不会继续请求 secondary provider。
+
+### 2026-07-10 追加：工具调用日志必须可诊断但不能泄露命令参数
+
+客户反馈中出现“有些修改能看到痕迹，有些改完看不到痕迹”。在 VS Copilot 场景里，这通常需要区分：
+
+1. 编辑器/补丁类工具：例如文件编辑、apply patch，通常更容易看到 diff。
+2. 命令类工具：例如 `powershell`、`git`、终端命令，可能绕过编辑器缓冲区，用户只能看到最终文件状态。
+
+代理不能执行这些工具，但必须把协议层工具调用记录清楚，方便判断当次请求到底发生了什么。
+
+当前日志增强策略：
+
+- `request_tools`：只记录客户端声明过哪些工具，例如 `declared: git,powershell`。
+- `response_tools`：只记录模型实际返回了哪些工具，例如 `returned: powershell` 或 `streamed: git`。
+- `fallback_mode`：记录是否发生流/非流恢复，例如 `stream-to-nonstream`。
+- `normalization`：记录是否发生 provider-specific 归一化，例如 `dsml`。
+- 不记录完整工具参数，不记录 PowerShell/Git 命令正文，避免把用户本机路径、命令、secret 写进日志。
+
+排障建议：
+
+- 如果 `request_tools` 里没有某个工具名，模型/DSML 中出现该工具时不应转换执行，这是安全边界。
+- 如果 `response_tools` 为空，说明模型没有返回标准工具调用，可能只是输出了普通文本建议。
+- 如果 `response_tools` 出现 `powershell` / `git`，但用户看不到编辑器 diff，应优先怀疑是命令类工具修改了工作区，而不是代理直接改文件。
+- 如果出现 `normalization: dsml`，说明代理把 provider 方言转换成标准 `tool_calls`，应继续检查工具名是否在声明列表中。
+
+### 2026-07-10 追加：标准 `tool_calls` 也必须受声明工具边界约束
+
+此前 DSML 方言已经要求工具名必须出现在客户端请求声明的 `tools` / legacy `functions` 中。但进一步审查发现，标准 OpenAI `tool_calls`、legacy `function_call`、流式 `tool_calls` 也必须遵守同一条安全边界，否则模型可能凭空返回 `powershell`、`git` 等命令类工具调用，导致下游工具宿主尝试执行未授权工具。
+
+当前统一规则：
+
+- 请求没有声明工具时，代理不主动把文本或方言转换成工具调用。
+- 请求声明了工具时，响应中的标准 `tool_calls` / `function_call` 只保留声明过的工具名。
+- 未声明工具调用会被移除，并转成可见文本提示：`Proxy blocked undeclared tool calls: ...`。
+- raw OpenAI JSON、typed ChatResponse、流式 SSE、流式聚合 fallback、DSML 方言都走同一条边界。
+- 日志只记录工具名摘要，不记录命令参数。
+
+这条规则的目的不是限制正常工具调用，而是防止模型或上游 provider 越过 VS/Copilot 客户端声明的工具权限边界。

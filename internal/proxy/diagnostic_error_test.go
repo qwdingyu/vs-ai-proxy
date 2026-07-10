@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -33,6 +35,8 @@ func TestClassifyProxyErrorDistinguishesNetworkAndUpstreamStatus(t *testing.T) {
 		`openai stream error: API 错误 404`:             "upstream_request_error",
 		`openai stream error: API 错误 429`:             "upstream_rate_limit",
 		`openai stream error: API 错误 503`:             "upstream_server_error",
+		`openai stream error: context canceled`:       "client_gone",
+		`client_gone`:                                 "client_gone",
 		`context deadline exceeded`:                   "timeout",
 		`解析响应失败: invalid character`:                   "proxy_parse_error",
 	}
@@ -41,6 +45,14 @@ func TestClassifyProxyErrorDistinguishesNetworkAndUpstreamStatus(t *testing.T) {
 		if got := classifyProxyError(message); got != want {
 			t.Fatalf("%q classified as %q, want %q", message, got, want)
 		}
+	}
+}
+
+func TestNewAttemptDiagnosticClassifiesWrappedContextCanceledAsClientGone(t *testing.T) {
+	err := errors.Join(context.Canceled, errors.New(`openai stream error: API 错误 500: {"error":{"code":"do_request_failed"}}`))
+	attempt := newAttemptDiagnostic("useai", "gpt-5.5", err)
+	if attempt.Category != "client_gone" {
+		t.Fatalf("category = %q, want client_gone; message=%s", attempt.Category, attempt.Message)
 	}
 }
 

@@ -94,6 +94,37 @@ func TestLoggingMiddlewareCapturesProviderAndModelHeaders(t *testing.T) {
 	}
 }
 
+func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) {
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setProxyDiagnosticHeader(w, "X-Proxy-Request-Tools", "declared: git,powershell")
+		setProxyDiagnosticHeader(w, "X-Proxy-Response-Tools", "returned: powershell")
+		setProxyFallbackMode(w, "stream-to-nonstream")
+		setProxyToolNormalization(w, "dsml")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logs := st.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	logEntry := logs[0]
+	if logEntry.RequestTools != "declared: git,powershell" || logEntry.ResponseTools != "returned: powershell" {
+		t.Fatalf("tool diagnostics missing: %#v", logEntry)
+	}
+	if logEntry.FallbackMode != "stream-to-nonstream" || logEntry.Normalization != "dsml" {
+		t.Fatalf("recovery diagnostics missing: %#v", logEntry)
+	}
+	if strings.Contains(logEntry.RequestTools+logEntry.ResponseTools, "Get-ChildItem") {
+		t.Fatalf("tool diagnostics must not include command arguments: %#v", logEntry)
+	}
+}
+
 func TestBuildRegistryUsesConfiguredProviderIDs(t *testing.T) {
 	server := testRegistryServer()
 	registry := server.buildRegistry(&config.AppConfig{
@@ -138,6 +169,12 @@ func TestServerConfigDirFollowsConfigManagerPath(t *testing.T) {
 
 	if got, want := server.configDir(), filepath.Dir(path); got != want {
 		t.Fatalf("configDir() = %q, want %q", got, want)
+	}
+}
+
+func TestModelTimeoutSecondsUsesSafeDefaultBudget(t *testing.T) {
+	if got := modelTimeoutSeconds(&config.AppConfig{}, "gpt-test", "gpt-test", "useai", provider.ModelProfile{}, false); got != 60 {
+		t.Fatalf("default timeout = %d, want 60 seconds", got)
 	}
 }
 
@@ -188,6 +225,21 @@ func TestParseOpenAIStreamPayloadConvertsLegacyFunctionCall(t *testing.T) {
 	fn, _ := call["function"].(map[string]any)
 	if fn["name"] != "powershell" {
 		t.Fatalf("function call not converted: %#v", chunk.ToolCalls)
+	}
+}
+
+func TestParseOpenAIStreamPayloadConvertsLegacyGitFunctionCall(t *testing.T) {
+	chunk, err := parseOpenAIStreamPayload(`{"choices":[{"delta":{"function_call":{"name":"git","arguments":"{\"args\":[\"status\",\"--short\"],\"cwd\":\"C:\\\\repo\"}"}},"finish_reason":null}]}`)
+	if err != nil {
+		t.Fatalf("parseOpenAIStreamPayload returned error: %v", err)
+	}
+	if len(chunk.ToolCalls) != 1 {
+		t.Fatalf("tool calls len = %d, want 1", len(chunk.ToolCalls))
+	}
+	call, _ := chunk.ToolCalls[0].(map[string]any)
+	fn, _ := call["function"].(map[string]any)
+	if fn["name"] != "git" || fn["arguments"] != `{"args":["status","--short"],"cwd":"C:\\repo"}` {
+		t.Fatalf("legacy git function call not converted: %#v", chunk.ToolCalls)
 	}
 }
 
@@ -287,6 +339,91 @@ func TestStreamOpenAINormalizesBlankFinishReasonForVisualStudio(t *testing.T) {
 	}
 	if !strings.Contains(body, `"finish_reason":"stop"`) {
 		t.Fatalf("finish_reason was not normalized to stop: %s", body)
+	}
+}
+
+func TestStreamOpenAIConvertsSuccessfulDSMLStreamToToolCalls(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"<｜DSML｜tool_calls> <｜DSML｜invoke name=\"get_file\">"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":" <｜DSML｜parameter name=\"filename\" string=\"true\">a.cs</｜DSML｜parameter> </｜DSML｜invoke> </｜DSML｜tool_calls>"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	chatReq := &provider.ChatRequest{
+		Model: "step-router-v1",
+		Tools: []provider.Tool{{Type: "function", Function: provider.ToolFunc{Name: "get_file"}}},
+	}
+
+	err := server.streamOpenAI(rec, req, prov, chatReq, rec)
+	if err != nil {
+		t.Fatalf("streamOpenAI returned error: %v", err)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "<｜DSML｜") || !strings.Contains(body, `"tool_calls"`) || !strings.Contains(body, `"name":"get_file"`) {
+		t.Fatalf("DSML stream was not normalized: %s", body)
+	}
+	if got := rec.Header().Get("X-Proxy-Tool-Call-Normalization"); got != "dsml" {
+		t.Fatalf("normalization header = %q, want dsml", got)
+	}
+}
+
+func TestStreamOpenAIProbePreservesOrdinarySSE(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	chatReq := &provider.ChatRequest{
+		Model: "gpt-test",
+		Tools: []provider.Tool{{Type: "function", Function: provider.ToolFunc{Name: "get_file"}}},
+	}
+
+	if err := server.streamOpenAI(rec, req, prov, chatReq, rec); err != nil {
+		t.Fatalf("streamOpenAI returned error: %v", err)
+	}
+	if rec.Body.String() != stream {
+		t.Fatalf("ordinary SSE changed during DSML probe:\n got: %q\nwant: %q", rec.Body.String(), stream)
+	}
+	if got := rec.Header().Get("X-Proxy-Tool-Call-Normalization"); got != "" {
+		t.Fatalf("ordinary stream should not report DSML normalization: %q", got)
+	}
+}
+
+func TestStreamOpenAILeavesUndeclaredDSMLAsText(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"<｜DSML｜tool_calls><｜DSML｜invoke name=\"delete_file\"></｜DSML｜invoke></｜DSML｜tool_calls>"},"finish_reason":null}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	chatReq := &provider.ChatRequest{
+		Model: "gpt-test",
+		Tools: []provider.Tool{{Type: "function", Function: provider.ToolFunc{Name: "get_file"}}},
+	}
+
+	if err := server.streamOpenAI(rec, req, prov, chatReq, rec); err != nil {
+		t.Fatalf("streamOpenAI returned error: %v", err)
+	}
+	if rec.Body.String() != stream {
+		t.Fatalf("undeclared DSML should remain original text: got %q want %q", rec.Body.String(), stream)
+	}
+	if got := rec.Header().Get("X-Proxy-Tool-Call-Normalization"); got != "" {
+		t.Fatalf("rejected DSML must not report normalization: %q", got)
 	}
 }
 

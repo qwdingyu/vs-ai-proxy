@@ -238,6 +238,51 @@ func TestFunctionCallAcceptsObjectArguments(t *testing.T) {
 	}
 }
 
+func TestFunctionCallPreservesCommandArgumentsForShellTools(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		payload  string
+		wantKey  string
+		want     string
+	}{
+		{
+			name:     "powershell command",
+			toolName: "powershell",
+			payload:  `{"command":"Get-ChildItem -Force | Select-Object -First 5","cwd":"C:\\repo"}`,
+			wantKey:  "command",
+			want:     "Get-ChildItem -Force | Select-Object -First 5",
+		},
+		{
+			name:     "git command",
+			toolName: "git",
+			payload:  `{"args":["status","--short"],"cwd":"C:\\repo with spaces"}`,
+			wantKey:  "cwd",
+			want:     `C:\repo with spaces`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var msg Message
+			data := []byte(`{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"` + tt.toolName + `","arguments":` + tt.payload + `}}]}`)
+			if err := json.Unmarshal(data, &msg); err != nil {
+				t.Fatalf("unmarshal message: %v", err)
+			}
+			if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != tt.toolName {
+				t.Fatalf("tool call not preserved: %#v", msg.ToolCalls)
+			}
+			var args map[string]any
+			if err := json.Unmarshal([]byte(msg.ToolCalls[0].Function.Arguments), &args); err != nil {
+				t.Fatalf("arguments should remain JSON object string: %q", msg.ToolCalls[0].Function.Arguments)
+			}
+			if args[tt.wantKey] != tt.want {
+				t.Fatalf("%s = %#v, want %#v; args=%#v", tt.wantKey, args[tt.wantKey], tt.want, args)
+			}
+		})
+	}
+}
+
 func TestChatRequestPreservesLegacyFunctionFields(t *testing.T) {
 	var req ChatRequest
 	if err := json.Unmarshal([]byte(`{

@@ -7,10 +7,11 @@ import (
 )
 
 type streamReasoningAccumulator struct {
-	reasoning    strings.Builder
-	toolCallIDs  []string
-	hasToolCalls bool
-	finished     bool
+	reasoning     strings.Builder
+	toolCallIDs   []string
+	toolCallNames []string
+	hasToolCalls  bool
+	finished      bool
 }
 
 func newStreamReasoningAccumulator() *streamReasoningAccumulator {
@@ -92,6 +93,12 @@ func addToolCallID(a *streamReasoningAccumulator, raw any) {
 		}
 	}
 	a.toolCallIDs = append(a.toolCallIDs, id)
+
+	if function, ok := call["function"].(map[string]any); ok && function != nil {
+		if name, ok := function["name"].(string); ok && strings.TrimSpace(name) != "" {
+			a.toolCallNames = append(a.toolCallNames, strings.TrimSpace(name))
+		}
+	}
 }
 
 func (s *Server) cacheChatResponse(resp *provider.ChatResponse) {

@@ -24,7 +24,6 @@ func (s *Server) cacheRawOpenAIChatResponse(body []byte) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return
 	}
-	normalizeProviderSpecificToolCalls(&resp)
 	s.cacheChatResponse(&resp)
 }
 
@@ -85,10 +84,10 @@ func collectOpenAIStreamChatResponse(ctx context.Context, prov provider.Provider
 		return nil, err
 	}
 	defer stream.Close()
-	return collectOpenAIStreamReader(stream, streamReq.Model)
+	return collectOpenAIStreamReader(stream, streamReq.Model, allowedToolNames(req))
 }
 
-func collectOpenAIStreamReader(stream io.Reader, model string) (*provider.ChatResponse, error) {
+func collectOpenAIStreamReader(stream io.Reader, model string, allowedTools map[string]struct{}) (*provider.ChatResponse, error) {
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var content strings.Builder
@@ -125,7 +124,7 @@ func collectOpenAIStreamReader(stream io.Reader, model string) (*provider.ChatRe
 		message.ToolCalls = calls
 	}
 	if len(message.ToolCalls) == 0 {
-		calls, cleaned := parseDSMLToolCalls(message.Content)
+		calls, cleaned := parseDSMLToolCalls(message.Content, allowedTools)
 		if len(calls) > 0 {
 			message.Content = cleaned
 			message.ToolCalls = calls
@@ -147,15 +146,18 @@ func collectOpenAIStreamReader(stream io.Reader, model string) (*provider.ChatRe
 			FinishReason: visualStudioFinishReason(finishReason),
 		}},
 	}
-	normalizeProviderSpecificToolCalls(resp)
+	normalizeProviderSpecificToolCalls(resp, allowedTools)
 	return resp, nil
 }
 
-func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse) {
-	normalizeDSMLToolCallsInChatResponse(resp)
+func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse, allowedTools map[string]struct{}) {
+	normalizeDSMLToolCallsInChatResponse(resp, allowedTools)
 }
 
-func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte) []byte {
+func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools map[string]struct{}) []byte {
+	if len(allowedTools) == 0 {
+		return body
+	}
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
 		return body
@@ -175,10 +177,31 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte) []byte {
 			continue
 		}
 		if calls, ok := message["tool_calls"].([]any); ok && len(calls) > 0 {
+			kept, removed := sanitizeRawToolCalls(calls, allowedTools)
+			if len(removed) > 0 {
+				if len(kept) > 0 {
+					message["tool_calls"] = kept
+				} else {
+					delete(message, "tool_calls")
+					message["content"] = appendToolSanitizationNotice(asString(message["content"]), removed)
+					choice["finish_reason"] = "stop"
+				}
+				changed = true
+			}
+			continue
+		}
+		if functionCall, ok := message["function_call"].(map[string]any); ok && functionCall != nil {
+			name, _ := functionCall["name"].(string)
+			if !isAllowedDSMLTool(name, allowedTools) {
+				delete(message, "function_call")
+				message["content"] = appendToolSanitizationNotice(asString(message["content"]), []string{name})
+				choice["finish_reason"] = "stop"
+				changed = true
+			}
 			continue
 		}
 		content, _ := message["content"].(string)
-		toolCalls, cleaned := parseDSMLToolCalls(content)
+		toolCalls, cleaned := parseDSMLToolCalls(content, allowedTools)
 		if len(toolCalls) == 0 {
 			continue
 		}
@@ -195,6 +218,30 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func sanitizeRawToolCalls(calls []any, allowedTools map[string]struct{}) ([]any, []string) {
+	kept := make([]any, 0, len(calls))
+	removed := []string{}
+	for _, raw := range calls {
+		call, _ := raw.(map[string]any)
+		function, _ := call["function"].(map[string]any)
+		name, _ := function["name"].(string)
+		if isAllowedDSMLTool(name, allowedTools) {
+			kept = append(kept, raw)
+			continue
+		}
+		if strings.TrimSpace(name) == "" {
+			name = "<empty>"
+		}
+		removed = append(removed, name)
+	}
+	return kept, removed
+}
+
+func asString(value any) string {
+	text, _ := value.(string)
+	return text
 }
 
 func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, resp *provider.ChatResponse) error {
@@ -382,6 +429,11 @@ func normalizeOpenAIChatResponseForVisualStudio(body []byte) []byte {
 }
 
 func normalizeOpenAIStreamLineForVisualStudio(line string) string {
+	return normalizeOpenAIStreamLineForVisualStudioWithTools(line, nil)
+}
+
+func normalizeOpenAIStreamLineForVisualStudioWithTools(line string, allowedTools map[string]struct{}) string {
+	line = sanitizeOpenAIStreamLineToolCalls(line, allowedTools)
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, ":") || !strings.HasPrefix(trimmed, "data:") {
 		return line
@@ -400,6 +452,67 @@ func normalizeOpenAIStreamLineForVisualStudio(line string) string {
 	// Visual Studio Copilot 适配：
 	// 流式路径由 OpenAI .NET SDK 逐个 SSE chunk 反序列化，不能只修最终 JSON。
 	// 这里保留 SSE 协议外壳，仅修正 data JSON 内 VS 无法接受的 finish_reason。
+	return "data: " + string(normalized)
+}
+
+func sanitizeOpenAIStreamLineToolCalls(line string, allowedTools map[string]struct{}) string {
+	if len(allowedTools) == 0 {
+		return line
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, ":") || !strings.HasPrefix(trimmed, "data:") {
+		return line
+	}
+	payload := strings.TrimSpace(trimmed[5:])
+	if payload == "" || payload == "[DONE]" {
+		return line
+	}
+	var root map[string]any
+	if json.Unmarshal([]byte(payload), &root) != nil {
+		return line
+	}
+	choices, _ := root["choices"].([]any)
+	changed := false
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]any)
+		if choice == nil {
+			continue
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			delta, _ = choice["message"].(map[string]any)
+		}
+		if delta == nil {
+			continue
+		}
+		if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
+			kept, removed := sanitizeRawToolCalls(calls, allowedTools)
+			if len(removed) > 0 {
+				if len(kept) > 0 {
+					delta["tool_calls"] = kept
+				} else {
+					delete(delta, "tool_calls")
+					delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), removed)
+				}
+				changed = true
+			}
+		}
+		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
+			name, _ := functionCall["name"].(string)
+			if !isAllowedDSMLTool(name, allowedTools) {
+				delete(delta, "function_call")
+				delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), []string{name})
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return line
+	}
+	normalized, err := json.Marshal(root)
+	if err != nil {
+		return line
+	}
 	return "data: " + string(normalized)
 }
 

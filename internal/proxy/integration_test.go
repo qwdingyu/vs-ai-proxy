@@ -461,6 +461,7 @@ func TestOpenAIChatConvertsDSMLTextToToolCalls(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
 		"model":"step-router-v1",
 		"messages":[{"role":"user","content":"review files"}],
+		"tools":[{"type":"function","function":{"name":"get_file","description":"Read file","parameters":{"type":"object"}}}],
 		"stream":false
 	}`))
 	rec := httptest.NewRecorder()
@@ -516,6 +517,33 @@ func TestOpenAIChatFallsBackToStreamWhenNonStreamUpstreamFails(t *testing.T) {
 	if prov.rawCalls != 1 || prov.streamCalls != 1 {
 		t.Fatalf("rawCalls=%d streamCalls=%d, want one raw failure and one stream fallback", prov.rawCalls, prov.streamCalls)
 	}
+	if got := rec.Header().Get("X-Proxy-Fallback-Mode"); got != "nonstream-to-stream" {
+		t.Fatalf("fallback header = %q, want nonstream-to-stream", got)
+	}
+}
+
+func TestOpenAIChatDoesNotFallbackToStreamForClientError(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, `data: [DONE]`+"\n")
+	prov.rawErr = errors.New(`API 错误 400: {"error":{"message":"invalid tools"}}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if prov.streamCalls != 0 {
+		t.Fatalf("streamCalls=%d, client errors must not trigger alternate-mode requests", prov.streamCalls)
+	}
 }
 
 func TestOpenAIStreamFallsBackToNonStreamWhenStreamUpstreamFails(t *testing.T) {
@@ -544,6 +572,9 @@ func TestOpenAIStreamFallsBackToNonStreamWhenStreamUpstreamFails(t *testing.T) {
 	if prov.streamCalls != 1 || prov.chatCalls != 1 {
 		t.Fatalf("streamCalls=%d chatCalls=%d, want one stream failure and one non-stream fallback", prov.streamCalls, prov.chatCalls)
 	}
+	if got := rec.Header().Get("X-Proxy-Fallback-Mode"); got != "stream-to-nonstream" {
+		t.Fatalf("fallback header = %q, want stream-to-nonstream", got)
+	}
 }
 
 func TestOpenAIStreamFallbackConvertsDSMLToToolCalls(t *testing.T) {
@@ -557,6 +588,7 @@ func TestOpenAIStreamFallbackConvertsDSMLToToolCalls(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
 		"model":"step-router-v1",
 		"messages":[{"role":"user","content":"review files"}],
+		"tools":[{"type":"function","function":{"name":"get_file","description":"Read file","parameters":{"type":"object"}}}],
 		"stream":true
 	}`))
 	rec := httptest.NewRecorder()
@@ -581,6 +613,7 @@ func TestOllamaChatConvertsDSMLTextToToolCalls(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{
 		"model":"step-router-v1",
 		"messages":[{"role":"user","content":"review files"}],
+		"tools":[{"type":"function","function":{"name":"get_file","description":"Read file","parameters":{"type":"object"}}}],
 		"stream":false
 	}`))
 	rec := httptest.NewRecorder()
@@ -1030,6 +1063,36 @@ func TestStreamingFailoverBeforeBytesWritten(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "secondary") {
 		t.Fatalf("body should contain secondary stream after pre-write failover, got %q", rec.Body.String())
+	}
+}
+
+func TestStreamingDoesNotFailoverWhenClientGone(t *testing.T) {
+	primary := newFakeProvider("primary", true, []string{"shared"}, nil, "")
+	primary.streamErr = context.Canceled
+	secondaryStream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"secondary"},"finish_reason":null}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	secondary := newFakeProvider("secondary", true, []string{"shared"}, nil, secondaryStream)
+
+	server := newOpenServer(primary, secondary)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"shared","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if primary.streamCalls != 1 {
+		t.Fatalf("primary stream calls = %d, want 1", primary.streamCalls)
+	}
+	if secondary.streamCalls != 0 || secondary.chatCalls != 0 {
+		t.Fatalf("secondary calls = stream:%d chat:%d, client_gone must not fail over", secondary.streamCalls, secondary.chatCalls)
 	}
 }
 

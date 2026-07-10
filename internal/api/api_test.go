@@ -309,12 +309,15 @@ func TestAdminRouteRequiresLoginWhenConfigured(t *testing.T) {
 func TestAdminStaticFAQImagesAreServed(t *testing.T) {
 	apiSrv, _ := newAPITestHarnessWithStaticFS(t, fstest.MapFS{
 		"index.html":                    {Data: []byte("admin-app")},
+		"assets/images/qrcode_qq.png":   {Data: []byte("png-qq")},
 		"assets/images/vs-config-1.png": {Data: []byte("png-1")},
 		"assets/images/vs-config-2.png": {Data: []byte("png-2")},
 		"assets/images/vs-config-3.png": {Data: []byte("png-3")},
 	})
 
 	for _, path := range []string{
+		"/assets/images/qrcode_qq.png",
+		"/admin/assets/images/qrcode_qq.png",
 		"/admin/assets/images/vs-config-1.png",
 		"/admin/assets/images/vs-config-2.png",
 		"/admin/assets/images/vs-config-3.png",

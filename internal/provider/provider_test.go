@@ -130,7 +130,7 @@ func TestOpenAIProviderChatRawPreservesCommonToolMatrix(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	toolNames := []string{"create_file", "powershell", "run_in_terminal", "apply_patch", "read_file"}
+	toolNames := []string{"create_file", "powershell", "git", "run_in_terminal", "apply_patch", "read_file"}
 	tools := make([]map[string]any, 0, len(toolNames))
 	for _, name := range toolNames {
 		tools = append(tools, map[string]any{
@@ -283,6 +283,25 @@ func TestOpenAIProviderChatRawDoesNotRetryClientErrors(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderChatRawDoesNotBlindRetryRateLimits(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.ChatRaw(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("ChatRaw should return the 429 error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, 429 without Retry-After must not be blindly retried", calls)
+	}
+}
+
 func TestOpenAIProviderChatStreamRetriesTransientServerErrors(t *testing.T) {
 	calls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -305,6 +324,62 @@ func TestOpenAIProviderChatStreamRetriesTransientServerErrors(t *testing.T) {
 	stream.Close()
 	if calls != 2 {
 		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestOpenAIProviderRetriesShareOneOperationTimeout(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		time.Sleep(70 * time.Millisecond)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"temporarily unavailable"}}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, 100*time.Millisecond)
+	started := time.Now()
+	_, err := prov.ChatRaw(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("ChatRaw should fail when the shared operation budget expires")
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("retries exceeded shared timeout budget: %s", elapsed)
+	}
+	if calls > 2 {
+		t.Fatalf("calls = %d, retries must not receive a fresh timeout per attempt", calls)
+	}
+}
+
+func TestOpenAIProviderHonorsLongerParentDeadlineThanClientDefault(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(80 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := prov.ChatRaw(ctx, &ChatRequest{Model: "slow-model", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatalf("parent model deadline should override the shorter client default: %v", err)
+	}
+}
+
+func TestShouldAttemptAlternateChatModeRejectsNonRecoverableErrors(t *testing.T) {
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		&providerHTTPError{StatusCode: http.StatusBadRequest, Message: "bad request"},
+		&providerHTTPError{StatusCode: http.StatusTooManyRequests, Message: "rate limited"},
+	} {
+		if ShouldAttemptAlternateChatMode(err) {
+			t.Fatalf("non-recoverable error should not switch modes: %v", err)
+		}
+	}
+	if !ShouldAttemptAlternateChatMode(&providerHTTPError{StatusCode: http.StatusServiceUnavailable, Message: "unavailable"}) {
+		t.Fatal("503 should allow one alternate-mode recovery attempt")
 	}
 }
 

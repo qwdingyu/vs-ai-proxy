@@ -1,0 +1,179 @@
+package proxy
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+
+	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
+)
+
+const maxToolDiagnosticNames = 8
+
+func requestToolSummary(req *provider.ChatRequest) string {
+	if req == nil {
+		return ""
+	}
+	names := []string{}
+	for _, tool := range req.Tools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	if raw := req.Extra["functions"]; len(raw) > 0 {
+		var functions []struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &functions) == nil {
+			for _, function := range functions {
+				name := strings.TrimSpace(function.Name)
+				if name != "" {
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	return formatToolSummary("declared", names)
+}
+
+func responseToolSummaryFromChatResponse(resp *provider.ChatResponse) string {
+	if resp == nil {
+		return ""
+	}
+	names := []string{}
+	for _, choice := range resp.Choices {
+		for _, call := range choice.Message.ToolCalls {
+			name := strings.TrimSpace(call.Function.Name)
+			if name != "" {
+				names = append(names, name)
+			}
+		}
+		if choice.Message.FunctionCall != nil {
+			name := strings.TrimSpace(choice.Message.FunctionCall.Name)
+			if name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return formatToolSummary("returned", names)
+}
+
+func responseToolSummaryFromRawOpenAIJSON(body []byte) string {
+	var resp provider.ChatResponse
+	if json.Unmarshal(body, &resp) != nil {
+		return ""
+	}
+	return responseToolSummaryFromChatResponse(&resp)
+}
+
+func toolSummaryFromAccumulator(acc *streamReasoningAccumulator) string {
+	if acc == nil || !acc.hasToolCalls {
+		return ""
+	}
+	if len(acc.toolCallNames) > 0 {
+		return formatToolSummary("streamed", acc.toolCallNames)
+	}
+	return "streamed: count>=1"
+}
+
+func formatToolSummary(prefix string, names []string) string {
+	unique := uniqueSortedToolNames(names)
+	if len(unique) == 0 {
+		return ""
+	}
+	shown := unique
+	if len(shown) > maxToolDiagnosticNames {
+		shown = shown[:maxToolDiagnosticNames]
+	}
+	summary := fmt.Sprintf("%s: %s", prefix, strings.Join(shown, ","))
+	if len(unique) > len(shown) {
+		summary += fmt.Sprintf(" +%d", len(unique)-len(shown))
+	}
+	return summary
+}
+
+func uniqueSortedToolNames(names []string) []string {
+	seen := map[string]string{}
+	for _, name := range names {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, exists := seen[key]; !exists {
+			seen[key] = trimmed
+		}
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, seen[key])
+	}
+	return out
+}
+
+func setRequestToolDiagnosticHeader(w http.ResponseWriter, req *provider.ChatRequest) {
+	if summary := requestToolSummary(req); summary != "" {
+		setProxyDiagnosticHeader(w, "X-Proxy-Request-Tools", summary)
+	}
+}
+
+func setResponseToolDiagnosticHeader(w http.ResponseWriter, resp *provider.ChatResponse) {
+	if summary := responseToolSummaryFromChatResponse(resp); summary != "" {
+		setProxyDiagnosticHeader(w, "X-Proxy-Response-Tools", summary)
+	}
+}
+
+func setRawResponseToolDiagnosticHeader(w http.ResponseWriter, body []byte) {
+	if summary := responseToolSummaryFromRawOpenAIJSON(body); summary != "" {
+		setProxyDiagnosticHeader(w, "X-Proxy-Response-Tools", summary)
+	}
+}
+
+func setStreamToolDiagnosticHeader(w http.ResponseWriter, acc *streamReasoningAccumulator) {
+	if summary := toolSummaryFromAccumulator(acc); summary != "" {
+		setProxyDiagnosticHeader(w, "X-Proxy-Response-Tools", summary)
+	}
+}
+
+func setProxyFallbackMode(w http.ResponseWriter, mode string) {
+	setProxyDiagnosticHeader(w, "X-Proxy-Fallback-Mode", mode)
+}
+
+func setProxyToolNormalization(w http.ResponseWriter, mode string) {
+	setProxyDiagnosticHeader(w, "X-Proxy-Tool-Call-Normalization", mode)
+}
+
+func setProxyDiagnosticHeader(w http.ResponseWriter, key, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" || w == nil {
+		return
+	}
+	w.Header().Set(key, value)
+	setResponseWriterDiagnosticField(w, key, value)
+}
+
+func setResponseWriterDiagnosticField(w http.ResponseWriter, key, value string) {
+	switch target := w.(type) {
+	case *responseWriter:
+		switch key {
+		case "X-Proxy-Request-Tools":
+			target.requestTools = value
+		case "X-Proxy-Response-Tools":
+			target.responseTools = value
+		case "X-Proxy-Fallback-Mode":
+			target.fallbackMode = value
+		case "X-Proxy-Tool-Call-Normalization":
+			target.normalization = value
+		}
+	case *streamAttemptWriter:
+		setResponseWriterDiagnosticField(target.ResponseWriter, key, value)
+	}
+}

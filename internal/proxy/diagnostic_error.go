@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -103,7 +105,7 @@ func newAttemptDiagnostic(providerName, upstreamModel string, err error) attempt
 	return attemptDiagnostic{
 		Provider: providerName,
 		Upstream: upstreamModel,
-		Category: classifyProxyError(message),
+		Category: classifyProxyErrorFromErr(err, message),
 		Message:  message,
 	}
 }
@@ -119,9 +121,15 @@ func sanitizeDiagnosticMessage(message string) string {
 }
 
 func classifyProxyError(message string) string {
+	return classifyProxyErrorFromErr(nil, message)
+}
+
+func classifyProxyErrorFromErr(err error, message string) string {
 	lower := strings.ToLower(message)
 	status := upstreamHTTPStatus(message)
 	switch {
+	case errors.Is(err, context.Canceled) || strings.Contains(lower, "context canceled") || strings.Contains(lower, "client_gone"):
+		return "client_gone"
 	case strings.Contains(lower, "context deadline exceeded") || strings.Contains(lower, "timeout"):
 		return "timeout"
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
@@ -162,6 +170,8 @@ func upstreamHTTPStatus(message string) int {
 
 func diagnosticHint(category string) string {
 	switch category {
+	case "client_gone":
+		return "客户端已取消或断开连接；代理不会继续重试或切换 provider，避免把一次取消放大为多次上游请求。"
 	case "network_error":
 		return "检查 provider base_url、DNS、代理网络、云主机防火墙，或上游连接是否被重置。"
 	case "upstream_auth_error":

@@ -1,154 +1,150 @@
 # VS AI Proxy
 
-VS AI Proxy 是一个面向 Visual Studio / Copilot BYOM 场景的本地 AI 代理服务。它把多个上游 AI provider 聚合到一个本地端口，兼容 OpenAI `/v1/*` 和 Ollama `/api/*` 常用接口，并提供 Web 管理面板用于配置 provider、模型和运行状态。
+VS AI Proxy 是给 **Windows + Visual Studio Copilot BYOM** 场景使用的本地 AI 代理。它把 OpenAI-compatible 上游统一代理到本机 `127.0.0.1:12345`，让 Visual Studio 可以通过本地 endpoint 使用你配置的模型。
 
-## 核心功能
+## 适合谁使用
 
-- **单端口代理**：默认监听 `127.0.0.1:12345`，同时提供代理 API 和管理面板。
-- **多 provider 路由**：支持 OpenAI-compatible provider、DeepSeek、UseAI、Ollama 等配置形态，可按优先级自动路由。
-- **Visual Studio / Copilot 适配**：兼容 `/v1/chat/completions`、`/v1/models`、`/api/chat`、`/api/tags`、`/api/show` 等路径。
-- **Web 管理面板**：在 `/admin` 中管理 provider、模型、健康状态、请求日志和测试连接。
-- **社群入口**：管理面板内置“联系我们”，可加入 QQ 群获取更新通知和交流支持。
-- **模型元数据补齐**：按模型名补齐上下文长度、最大输出、tools/vision/reasoning 等展示和默认参数。
-- **配置热加载**：配置文件变更后自动热加载；端口变更仍需重启进程。
-- **版本检查与下载**：可检查 GitHub Release 最新版本，并自动下载当前平台资产。
+- 使用 Windows 和 Visual Studio 的 Copilot 用户。
+- 想在 Visual Studio 中接入自定义 OpenAI-compatible 服务的用户。
+- 需要管理多个 provider、多个模型，并在一个本地地址中统一使用的用户。
 
-## 快速开始
+## 主要功能
 
-从 GitHub Releases 下载当前平台压缩包：
+- **Visual Studio 适配**：支持 `/v1/models`、`/v1/chat/completions` 等 OpenAI-compatible 接口。
+- **本地管理面板**：通过浏览器配置 provider、模型和测试请求。
+- **模型下拉测试**：测试页按所选 provider 加载官方返回的模型，减少填错模型名。
+- **工具调用兼容**：兼容常见 `tool_calls`、流式工具调用和部分 provider 的工具调用方言。
+- **故障诊断**：请求日志会记录 provider、模型、上游模型和错误原因，方便排查。
+- **自动更新**：启动或命令行可检查并更新到最新 Release。
 
-- macOS Apple Silicon：`vs-ai-proxy-vX.Y.Z-macos-arm64.tar.gz`
-- macOS Intel：`vs-ai-proxy-vX.Y.Z-macos-x64.tar.gz`
-- Linux x64：`vs-ai-proxy-vX.Y.Z-linux-x64.tar.gz`
-- Linux ARM64：`vs-ai-proxy-vX.Y.Z-linux-arm64.tar.gz`
-- Windows x64：`vs-ai-proxy-vX.Y.Z-windows-x64.exe.zip`
+## Windows 快速开始
 
-解压后运行：
+1. 打开 GitHub Releases，下载：
 
-```bash
-./vs-ai-proxy
-```
+   ```text
+   vs-ai-proxy-vX.Y.Z-windows-x64.exe.zip
+   ```
 
-启动后打开管理面板：
+2. 解压到固定目录，例如：
 
-```text
-http://127.0.0.1:12345/admin
-```
+   ```text
+   C:\vs-ai-proxy\
+   ```
 
-默认配置文件位置：
+3. 双击运行：
 
-```text
-~/.config/vs-ai-proxy/config.json
-```
+   ```text
+   vs-ai-proxy.exe
+   ```
 
-## 常用命令
+4. 浏览器打开管理面板：
 
-```bash
-# 查看当前版本
-./vs-ai-proxy --version
+   ```text
+   http://127.0.0.1:12345/admin
+   ```
 
-# 检查是否有新版本
-./vs-ai-proxy --check-update
+5. 在「提供商」页面新增 provider：
 
-# 下载并解压最新版本到默认更新目录
-./vs-ai-proxy --update
+   - `类型`：选择 `openai`
+   - `Base URL`：填写上游地址，例如 `https://api.example.com/v1`
+   - `API Key`：填写上游密钥
+   - `启用`：保持开启
 
-# 全自动安装更新并重启到新版
-./vs-ai-proxy --self-update
+6. 在「测试」页面选择 provider，再从模型下拉框选择模型并点击测试。
 
-# 下载并解压到指定目录
-./vs-ai-proxy --update --update-dir /tmp/vs-ai-proxy-update
-```
+## Visual Studio 配置
 
-说明：正式版本普通启动时会先自动检查更新；如果发现 GitHub Release 中存在更新版本，会下载、校验、备份当前二进制、替换为新版，并自动切换到新版进程。macOS/Linux 使用原地进程切换，Windows 使用延迟替换脚本。若检查或替换失败，程序会记录警告并继续启动当前版本，避免因为 GitHub 网络或权限问题阻断服务。
-
-如需关闭启动自动更新，可设置：
-
-```bash
-VS_AI_PROXY_AUTO_UPDATE=0 ./vs-ai-proxy
-```
-
-`--update` 只下载并解压更新包；`--self-update` 会立即执行同样的全自动安装和重启流程，适合在命令行中主动触发升级。
-
-如果没有配置 `GITHUB_TOKEN`，程序仍可检查更新；只有遇到 GitHub 匿名 API 限流时，才会提示稍后重试或设置 token。可选配置：
-
-```bash
-export GITHUB_TOKEN=你的_token
-./vs-ai-proxy --check-update
-```
-
-## 基本配置流程
-
-1. 启动 `vs-ai-proxy`。
-2. 打开 `http://127.0.0.1:12345/admin`。
-3. 在「提供商」页面添加或编辑 provider：
-   - `id`：运行时 provider 实例 ID，例如 `deepseek`、`usecpa`、`ollama`。
-   - `type`：`openai` 或 `ollama`。
-   - `base_url`：上游 API 地址。
-   - `api_key`：上游密钥，Ollama 本地通常可留空。
-   - `priority`：数字越小越优先。
-4. 在「模型」页面添加模型。
-5. 在「测试」页面测试 provider 和模型连通性。
-
-注意：模型名中的厂商前缀不是 provider ID。例如 `z-ai/glm-5.2` 中的 `z-ai` 是模型命名空间，不一定对应 `providers[].id`。如果不确定 provider 绑定，请留空 `provider_id`，系统会按 provider 优先级自动路由。
-
-## Visual Studio / Copilot 配置
-
-把本服务作为本地 BYOM endpoint 使用：
+在 Visual Studio / Copilot 的 BYOM 或自定义模型服务配置中，填写本地 endpoint：
 
 ```text
 http://127.0.0.1:12345
 ```
 
-根据客户端要求选择 OpenAI-compatible 或 Ollama-compatible 路径。本项目同时保留 `/v1/*` 和 `/api/*` 两类接口，便于 Visual Studio / Copilot 不同版本的模型发现和聊天请求。
+如果客户端要求 OpenAI-compatible 地址，通常使用：
 
-## 环境变量
+```text
+http://127.0.0.1:12345/v1
+```
 
-| 变量 | 作用 |
-| --- | --- |
-| `CONFIG_PATH` | 指定配置文件路径 |
-| `STORE_PATH` | 指定请求日志文件路径 |
-| `HOST` | 指定监听地址，默认 `127.0.0.1` |
-| `PORT` | 覆盖配置中的端口 |
-| `ADMIN_API_KEY` | 启用管理面板/API 访问保护 |
-| `GITHUB_TOKEN` | 版本检查时使用 GitHub 鉴权，避免 API 限流 |
+实际以 Visual Studio 当前版本的配置界面提示为准。
 
-## 联系我们
+## 常用命令（Windows PowerShell）
 
-欢迎加入 QQ 群：`390485182`。
+进入解压目录后执行：
 
-群内主要交流 Visual Studio / Copilot BYOM、多 provider 配置、Ollama/DeepSeek/OpenAI-compatible 接入和部署排障；加入后也会不定期发布免费大模型体验活动信息。
+```powershell
+.\vs-ai-proxy.exe --version
+.\vs-ai-proxy.exe --check-update
+.\vs-ai-proxy.exe --self-update
+```
 
-## 从源码构建
+如需临时指定端口：
 
-要求 Go 版本见 `go.mod`。
+```powershell
+$env:PORT="12345"
+.\vs-ai-proxy.exe
+```
 
-```bash
+如需关闭启动自动更新：
+
+```powershell
+$env:VS_AI_PROXY_AUTO_UPDATE="0"
+.\vs-ai-proxy.exe
+```
+
+## 配置文件位置
+
+Windows 默认配置文件通常位于：
+
+```text
+%USERPROFILE%\.config\vs-ai-proxy\config.json
+```
+
+例如：
+
+```text
+C:\Users\你的用户名\.config\vs-ai-proxy\config.json
+```
+
+一般建议优先使用管理面板修改配置，不建议手工编辑 JSON。
+
+## 常见问题
+
+### 1. 测试页成功，Visual Studio 仍失败怎么办？
+
+请优先查看管理面板中的请求日志，确认：
+
+- Visual Studio 请求的模型名是否和测试页一致。
+- 请求是否走到了正确 provider。
+- 上游返回的是 401/403、404、429、5xx，还是超时。
+
+### 2. 模型列表里有模型，但聊天失败怎么办？
+
+模型列表成功只代表 `/models` 可访问，不代表 `/chat/completions` 一定可用。请在测试页选择同一个 provider 和模型做真实聊天测试。
+
+### 3. 工具调用失败怎么办？
+
+请确认所选模型和上游 provider 支持工具调用。不同上游对流式、非流式、`tool_calls` 的兼容程度不同，建议优先使用测试页和请求日志定位。
+
+## 加入 QQ 群
+
+欢迎加入 QQ 群交流 Visual Studio Copilot BYOM、provider 配置和排障问题。
+
+QQ群：`390485182`
+
+![QQ 群二维码](web/dist/assets/images/qrcode_qq.png)
+
+## 开发者构建
+
+普通用户不需要从源码构建。开发者可使用：
+
+```powershell
 go test ./...
 make build
-./vs-ai-proxy --version
 ```
 
-不建议直接运行裸 `go build ./cmd/server` 作为发布构建；请通过 `make build` 或 release workflow 注入版本号，避免 Web 页面和 `--version` 显示为开发兜底版本。
-
-Docker 构建时同样建议传入版本号：
-
-```bash
-docker build --build-arg VERSION="$(git describe --tags --always --dirty)" -t vs-ai-proxy:local .
-```
-
-跨平台 Release 包由 GitHub Actions 构建。维护者发布时使用：
-
-```bash
-make release-notes
-.bin/tag-release.sh 0.2.14 --push
-```
-
-不要手工上传本地构建产物到 GitHub Release。
+发布包由 GitHub Actions 构建，请不要手工上传本地构建产物到 Release。
 
 ## 更多文档
 
-详细排障和设计记录见 `docs/`：
-
-- `docs/11_模型provider_id误绑定与Release文案规范化记录_20260704.md`
-- `docs/12_版本检查与自动下载设计记录_20260704.md`
+详细设计、排障和版本记录见 `docs/` 目录。

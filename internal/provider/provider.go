@@ -275,6 +275,9 @@ func parseOpenAIChatSSEChunk(payload string) (string, string, error) {
 }
 
 func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte, error) {
+	ctx, cancel := providerOperationContext(ctx, p.Timeout)
+	defer cancel()
+
 	req.Stream = false
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -312,7 +315,7 @@ func (p *OpenAIProvider) doChatRaw(ctx context.Context, body []byte) ([]byte, er
 
 	p.applyOpenAIRequestHeaders(httpReq, "application/json")
 
-	resp, err := p.Client.Do(httpReq)
+	resp, err := p.doChatHTTPRequest(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
@@ -344,9 +347,12 @@ func shouldRetryOpenAIProviderError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var httpErr *providerHTTPError
 	if errors.As(err, &httpErr) {
-		return httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= http.StatusInternalServerError
+		return httpErr.StatusCode >= http.StatusInternalServerError
 	}
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, "empty reply") ||
@@ -354,6 +360,29 @@ func shouldRetryOpenAIProviderError(err error) bool {
 		strings.Contains(lower, "eof") ||
 		strings.Contains(lower, "stream error") ||
 		strings.Contains(lower, "timeout")
+}
+
+// ShouldAttemptAlternateChatMode 判断流式与非流式之间是否值得做一次协议兜底。
+// 只允许服务端 5xx、网络瞬态错误和响应协议不兼容触发；鉴权、参数、限流和取消
+// 不切换模式，避免重复计费、请求放大以及在客户端已放弃后继续访问上游。
+func ShouldAttemptAlternateChatMode(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var httpErr *providerHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode >= http.StatusInternalServerError
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "empty reply") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "unexpected eof") ||
+		strings.Contains(lower, "stream error") ||
+		strings.Contains(lower, "api 错误 5") ||
+		strings.Contains(lower, "upstream_server_error") ||
+		strings.Contains(lower, "do_request_failed") ||
+		strings.Contains(lower, "解析响应失败") ||
+		strings.Contains(lower, "response is not")
 }
 
 func responseBodyPreview(body []byte) string {
@@ -366,9 +395,12 @@ func responseBodyPreview(body []byte) string {
 }
 
 func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.ReadCloser, error) {
+	ctx, cancel := providerOperationContext(ctx, p.Timeout)
+
 	req.Stream = true
 	body, err := json.Marshal(req)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
@@ -378,7 +410,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	for attempt := 0; attempt < openAIProviderMaxAttempts; attempt++ {
 		stream, err := p.doChatStream(ctx, body)
 		if err == nil {
-			return stream, nil
+			return &cancelReadCloser{ReadCloser: stream, cancel: cancel}, nil
 		}
 		lastErr = err
 		if !shouldRetryOpenAIProviderError(err) || attempt == openAIProviderMaxAttempts-1 {
@@ -388,11 +420,36 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
+				cancel()
 				return nil, ctx.Err()
 			}
 		}
 	}
+	cancel()
 	return nil, lastErr
+}
+
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *cancelReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+	return err
+}
+
+func providerOperationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return parent, func() {}
+	}
+	// 代理层的单模型 timeout_seconds 是更精确的请求预算；一旦调用方已经设置
+	// deadline，provider 必须继承它，不能再用默认 60 秒把长推理模型提前截断。
+	if _, ok := parent.Deadline(); ok {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func (p *OpenAIProvider) doChatStream(ctx context.Context, body []byte) (io.ReadCloser, error) {
@@ -403,7 +460,7 @@ func (p *OpenAIProvider) doChatStream(ctx context.Context, body []byte) (io.Read
 
 	p.applyOpenAIRequestHeaders(httpReq, "text/event-stream")
 
-	resp, err := p.Client.Do(httpReq)
+	resp, err := p.doChatHTTPRequest(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
@@ -422,6 +479,15 @@ func (p *OpenAIProvider) doChatStream(ctx context.Context, body []byte) (io.Read
 	}
 
 	return resp.Body, nil
+}
+
+func (p *OpenAIProvider) doChatHTTPRequest(req *http.Request) (*http.Response, error) {
+	// ChatRaw/ChatStream 已在 operation context 上统一控制总预算。这里关闭
+	// http.Client.Timeout，避免它按单次 Do 再启动一个计时器：否则 180 秒模型
+	// 仍会被默认 60 秒提前截断，重试又可能为每次尝试重新获得 60 秒。
+	client := *p.Client
+	client.Timeout = 0
+	return client.Do(req)
 }
 
 func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {

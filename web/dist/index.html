@@ -62,6 +62,11 @@
     .hero-card h2 { margin-top: 0; }
     .feature-list { margin: 10px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.75; }
     .quick-card { background: #0f1115; border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    .community-card { display: grid; grid-template-columns: minmax(0, 1fr) 180px; gap: 18px; align-items: center; min-height: 220px; background: radial-gradient(circle at 90% 20%, rgba(88,166,255,0.14), transparent 32%), #0f1115; }
+    .community-copy { min-width: 0; }
+    .community-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .qrcode-frame { display: grid; place-items: center; justify-self: end; width: 180px; padding: 12px; border: 1px solid rgba(88,166,255,0.26); border-radius: 14px; background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(240,246,252,0.94)); box-shadow: 0 18px 42px rgba(0,0,0,0.28); }
+    .qrcode-caption { margin-top: 10px; color: #30363d; font-size: 12px; font-weight: 700; text-align: center; }
     .stack { display: flex; flex-direction: column; gap: 12px; }
     .pre { white-space: pre-wrap; word-break: break-word; background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 280px; overflow: auto; }
     .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #0f1115; font-size: 12px; }
@@ -75,6 +80,7 @@
     .contact-card { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.6fr); gap: 16px; align-items: stretch; }
     .contact-hero { background: linear-gradient(135deg, rgba(35,134,54,0.18), rgba(88,166,255,0.14)); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
     .qq-number { font-size: 34px; font-weight: 800; letter-spacing: 1px; color: #f0f6fc; margin: 10px 0; }
+    .qq-qrcode { display: block; width: 100%; border-radius: 8px; }
     .contact-list { margin: 12px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.8; }
     .faq-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
     .guide-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
@@ -82,7 +88,7 @@
     .faq-list details { background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 10px; }
     .faq-list summary { cursor: pointer; font-weight: 700; }
     .faq-list p { color: var(--muted); line-height: 1.7; }
-    @media (max-width: 900px) { .header { align-items: flex-start; flex-direction: column; } .nav { flex-wrap: wrap; } .stats, .grid-2, .grid-3, .hero-grid, .contact-card, .guide-steps { grid-template-columns: 1fr; } }
+    @media (max-width: 900px) { .header { align-items: flex-start; flex-direction: column; } .nav { flex-wrap: wrap; } .stats, .grid-2, .grid-3, .hero-grid, .contact-card, .guide-steps, .community-card { grid-template-columns: 1fr; } .qrcode-frame { justify-self: start; width: 170px; } }
   </style>
 </head>
 <body>
@@ -122,11 +128,22 @@
               <li>提供请求统计、日志排障和正式版本自动更新。</li>
             </ul>
           </div>
-          <div class="quick-card">
-            <div class="label">官方交流群</div>
-            <div class="qq-number">390485182</div>
-            <p class="hint">加入 QQ 群获取配置帮助、版本更新提醒和不定期免费大模型活动。</p>
-            <button class="btn primary" id="btnCopyQQHome">复制 QQ 群号</button>
+          <div class="quick-card community-card">
+            <div class="community-copy">
+              <div class="label">官方交流群</div>
+              <div class="qq-number">390485182</div>
+              <p class="hint">扫码加入 QQ 群，获取 Visual Studio / Copilot BYOM 配置帮助、版本更新提醒和免费大模型活动。</p>
+              <div class="community-actions">
+                <button class="btn primary" id="btnCopyQQHome">复制 QQ 群号</button>
+                <a class="btn" href="#/contact">查看加入说明</a>
+              </div>
+            </div>
+            <div class="qrcode-frame" aria-label="VS AI Proxy QQ 群二维码">
+              <div>
+                <img class="qq-qrcode" src="/admin/assets/images/qrcode_qq.png" alt="VS AI Proxy QQ 群二维码">
+                <div class="qrcode-caption">手机 QQ 扫码加入</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -159,13 +176,14 @@
               <th>路径</th>
               <th>提供商</th>
               <th>模型</th>
+              <th>工具/恢复</th>
               <th>错误</th>
               <th>状态</th>
               <th>延迟</th>
             </tr>
           </thead>
           <tbody id="dashboardLogs">
-            <tr><td colspan="8" class="empty">暂无日志</td></tr>
+            <tr><td colspan="9" class="empty">暂无日志</td></tr>
           </tbody>
         </table>
       </section>
@@ -379,13 +397,14 @@
               <th>路径</th>
               <th>提供商</th>
               <th>模型</th>
+              <th>工具/恢复</th>
               <th>错误</th>
               <th>状态</th>
               <th>延迟</th>
             </tr>
           </thead>
           <tbody id="logTable">
-            <tr><td colspan="8" class="empty">加载中...</td></tr>
+            <tr><td colspan="9" class="empty">加载中...</td></tr>
           </tbody>
         </table>
       </section>
@@ -404,6 +423,12 @@
           </div>
           <div class="panel" style="margin:0;">
             <div class="label">适合加入的人</div>
+            <div class="qrcode-frame" style="justify-self:start;margin-top:12px;">
+              <div>
+                <img class="qq-qrcode" src="/admin/assets/images/qrcode_qq.png" alt="VS AI Proxy QQ 群二维码">
+                <div class="qrcode-caption">手机 QQ 扫码加入</div>
+              </div>
+            </div>
             <ul class="contact-list">
               <li>正在接入 Visual Studio / Copilot BYOM 的开发者</li>
               <li>需要配置 DeepSeek、Ollama、OpenAI-compatible provider 的用户</li>
@@ -564,6 +589,18 @@
       const hint = log.error_hint ? `&#10;建议: ${escapeHTML(log.error_hint)}` : '';
       return `<span class="badge warn" title="${message}${hint}">${code}</span>`;
     };
+    const formatToolDiagnostics = (log) => {
+      const parts = [];
+      if (log.request_tools) parts.push(`请求 ${log.request_tools}`);
+      if (log.response_tools) parts.push(`响应 ${log.response_tools}`);
+      if (log.fallback_mode) parts.push(`恢复 ${log.fallback_mode}`);
+      if (log.normalization) parts.push(`归一化 ${log.normalization}`);
+      if (!parts.length) return '-';
+      const text = parts.join(' | ');
+      const escaped = escapeHTML(text);
+      const shortText = escaped.length > 96 ? escaped.slice(0, 96) + '...' : escaped;
+      return `<span class="badge" title="${escaped}">${shortText}</span>`;
+    };
 
     const providerKey = (provider) => provider?.id || provider?.name || '';
     const providerLabel = (provider) => {
@@ -651,7 +688,7 @@
         const tbody = $('dashboardLogs');
         const logs = logsRes.logs || [];
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无日志</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无日志</td></tr>';
           return;
         }
         tbody.innerHTML = logs.map(log => `
@@ -661,6 +698,7 @@
             <td>${log.path}</td>
             <td>${log.provider || '-'}</td>
             <td>${formatModelRoute(log)}</td>
+            <td>${formatToolDiagnostics(log)}</td>
             <td>${formatLogError(log)}</td>
             <td><span class="${statusClass(log.status_code)}">${log.status_code}</span></td>
             <td>${Number(log.elapsed_ms).toFixed(0)} ms</td>
@@ -953,7 +991,7 @@
 
         const tbody = $('logTable');
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无日志</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无日志</td></tr>';
           return;
         }
         tbody.innerHTML = logs.map(log => `
@@ -963,6 +1001,7 @@
             <td>${log.path}</td>
             <td>${log.provider || '-'}</td>
             <td>${formatModelRoute(log)}</td>
+            <td>${formatToolDiagnostics(log)}</td>
             <td>${formatLogError(log)}</td>
             <td><span class="${statusClass(log.status_code)}">${log.status_code}</span></td>
             <td>${Number(log.elapsed_ms).toFixed(0)} ms</td>

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -286,19 +287,39 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		errorCode := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Code")
 		errorMessage := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Message")
 		errorHint := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Hint")
+		requestTools := ww.requestTools
+		if requestTools == "" {
+			requestTools = firstNonEmptyHeader(ww.Header(), "X-Proxy-Request-Tools")
+		}
+		responseTools := ww.responseTools
+		if responseTools == "" {
+			responseTools = firstNonEmptyHeader(ww.Header(), "X-Proxy-Response-Tools")
+		}
+		fallbackMode := ww.fallbackMode
+		if fallbackMode == "" {
+			fallbackMode = firstNonEmptyHeader(ww.Header(), "X-Proxy-Fallback-Mode")
+		}
+		normalization := ww.normalization
+		if normalization == "" {
+			normalization = firstNonEmptyHeader(ww.Header(), "X-Proxy-Tool-Call-Normalization")
+		}
 
 		s.store.AddLog(store.RequestLog{
-			Method:       r.Method,
-			Path:         r.URL.Path,
-			Provider:     provider,
-			Model:        model,
-			Upstream:     upstream,
-			StatusCode:   ww.statusCode,
-			ElapsedMs:    elapsed,
-			IsSuccess:    ww.statusCode < 400,
-			ErrorCode:    errorCode,
-			ErrorMessage: errorMessage,
-			ErrorHint:    errorHint,
+			Method:        r.Method,
+			Path:          r.URL.Path,
+			Provider:      provider,
+			Model:         model,
+			Upstream:      upstream,
+			StatusCode:    ww.statusCode,
+			ElapsedMs:     elapsed,
+			IsSuccess:     ww.statusCode < 400,
+			ErrorCode:     errorCode,
+			ErrorMessage:  errorMessage,
+			ErrorHint:     errorHint,
+			RequestTools:  requestTools,
+			ResponseTools: responseTools,
+			FallbackMode:  fallbackMode,
+			Normalization: normalization,
 		})
 
 		s.logger.Info("%s %s - %d (%.0f ms)", r.Method, r.URL.Path, ww.statusCode, elapsed)
@@ -351,10 +372,14 @@ func isAuthorizedProxyRequest(r *http.Request, proxyKey string) bool {
 // 供 loggingMiddleware 在请求完成后读取并写入 Store。
 type responseWriter struct {
 	http.ResponseWriter
-	statusCode int
-	provider   string
-	model      string
-	upstream   string
+	statusCode    int
+	provider      string
+	model         string
+	upstream      string
+	requestTools  string
+	responseTools string
+	fallbackMode  string
+	normalization string
 }
 
 func (w *responseWriter) WriteHeader(code int) {
@@ -442,6 +467,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "解析请求失败", http.StatusBadRequest)
 		return
 	}
+	setRequestToolDiagnosticHeader(w, &req)
 
 	cfg, registry, catalog := s.snapshot()
 	if catalog != nil {
@@ -511,6 +537,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				attempts = append(attempts, newAttemptDiagnostic(prov.Name(), modelID, err))
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
+				if isClientGoneError(err) {
+					return
+				}
 				if streamWriter.HasWritten() {
 					registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
 					return
@@ -529,15 +558,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					// VS Copilot 真实环境里，UseAI/gpt-5.5 非流式可能直接透出
 					// upstream_server_error，但同一 provider 的流式链路可用。
 					// 在还没写响应给下游时，尝试用流式聚合成非流式 JSON，避免 VS 端失败。
-					if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
-						cancel()
-						normalizeProviderSpecificToolCalls(fallbackResp)
-						s.cacheChatResponse(fallbackResp)
-						w.Header().Set("Content-Type", "application/json")
-						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(fallbackResp)
-						registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
-						return
+					if canAttemptAlternateChatMode(ctx, err) {
+						if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
+							cancel()
+							setProxyFallbackMode(w, "nonstream-to-stream")
+							normalizeProviderSpecificToolCalls(fallbackResp, allowedToolNames(req))
+							setResponseToolDiagnosticHeader(w, fallbackResp)
+							s.cacheChatResponse(fallbackResp)
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusOK)
+							_ = json.NewEncoder(w).Encode(fallbackResp)
+							registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+							return
+						}
 					}
 					cancel()
 					lastErr = err
@@ -557,7 +590,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				// raw OpenAI 响应直接透传能最大化保留上游扩展字段，但 VS 对
 				// finish_reason 比 Web/ curl 更严格，写回前需要做最小兼容归一化。
 				body = normalizeOpenAIChatResponseForVisualStudio(body)
-				body = normalizeProviderSpecificToolCallsInOpenAIJSON(body)
+				body = normalizeProviderSpecificToolCallsInOpenAIJSON(body, allowedToolNames(req))
+				setRawResponseToolDiagnosticHeader(w, body)
 				s.cacheRawOpenAIChatResponse(body)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
@@ -569,15 +603,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		resp, err := prov.Chat(ctx, req)
 		if err != nil {
-			if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
-				cancel()
-				normalizeProviderSpecificToolCalls(fallbackResp)
-				s.cacheChatResponse(fallbackResp)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(fallbackResp)
-				registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
-				return
+			if canAttemptAlternateChatMode(ctx, err) {
+				if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
+					cancel()
+					setProxyFallbackMode(w, "nonstream-to-stream")
+					normalizeProviderSpecificToolCalls(fallbackResp, allowedToolNames(req))
+					setResponseToolDiagnosticHeader(w, fallbackResp)
+					s.cacheChatResponse(fallbackResp)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					json.NewEncoder(w).Encode(fallbackResp)
+					registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+					return
+				}
 			}
 			cancel()
 			lastErr = err
@@ -587,7 +625,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		cancel()
-		normalizeProviderSpecificToolCalls(resp)
+		normalizeProviderSpecificToolCalls(resp, allowedToolNames(req))
+		setResponseToolDiagnosticHeader(w, resp)
 		s.cacheChatResponse(resp)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -711,6 +750,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 		if tools, ok := ollamaReq["tools"].([]any); ok {
 			req.Tools = buildTools(tools)
 		}
+		setRequestToolDiagnosticHeader(w, req)
 
 		if stop, ok := ollamaReq["stop"].([]any); ok {
 			req.Stop = buildStop(stop)
@@ -767,12 +807,13 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				if converted, convErr := converter.OllamaChatResponse2OpenAI(body, req.Model); convErr == nil {
 					var typed provider.ChatResponse
 					if json.Unmarshal(converted, &typed) == nil {
-						normalizeProviderSpecificToolCalls(&typed)
+						normalizeProviderSpecificToolCalls(&typed, allowedToolNames(req))
+						setResponseToolDiagnosticHeader(w, &typed)
 						s.cacheChatResponse(&typed)
 					}
 				}
 
-				body = normalizeDSMLToolCallsInOllamaJSON(body)
+				body = normalizeDSMLToolCallsInOllamaJSON(body, allowedToolNames(req))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				w.Write(ensureOllamaContentFromThinking(body))
@@ -790,7 +831,8 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			registry.RecordCandidateFailure(prov.Name(), err)
 			continue
 		}
-		normalizeProviderSpecificToolCalls(resp)
+		normalizeProviderSpecificToolCalls(resp, allowedToolNames(req))
+		setResponseToolDiagnosticHeader(w, resp)
 		s.cacheChatResponse(resp)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -843,13 +885,17 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		// VS Copilot 的 /v1/chat/completions stream=true 真实路径中，UseAI/New API
 		// 可能流式 503，但非流式同模型可用。尚未向下游写出 SSE 时，
 		// 尝试反向兜底：非流式拿到结果后合成为 OpenAI SSE，避免直接 502。
-		fallbackReq := cloneChatRequest(req)
-		fallbackReq.Stream = false
-		if resp, fallbackErr := prov.Chat(r.Context(), fallbackReq); fallbackErr == nil {
-			normalizeProviderSpecificToolCalls(resp)
-			s.cacheChatResponse(resp)
-			if writeErr := writeOpenAIChatResponseAsSSE(w, flusher, resp); writeErr == nil {
-				return nil
+		if canAttemptAlternateChatMode(r.Context(), err) {
+			fallbackReq := cloneChatRequest(req)
+			fallbackReq.Stream = false
+			if resp, fallbackErr := prov.Chat(r.Context(), fallbackReq); fallbackErr == nil {
+				setProxyFallbackMode(w, "stream-to-nonstream")
+				normalizeProviderSpecificToolCalls(resp, allowedToolNames(req))
+				setResponseToolDiagnosticHeader(w, resp)
+				s.cacheChatResponse(resp)
+				if writeErr := writeOpenAIChatResponseAsSSE(w, flusher, resp); writeErr == nil {
+					return nil
+				}
 			}
 		}
 		return fmt.Errorf("openai stream error: %w", err)
@@ -866,14 +912,29 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 
 	scanner := newStreamScanner(stream)
 	acc := newStreamReasoningAccumulator()
+	buffered, dsmlResp, detectedDSML, probeErr := probeOpenAIStreamForDSML(scanner, allowedToolNames(req))
+	if probeErr != nil {
+		return probeErr
+	}
+	if detectedDSML {
+		setProxyToolNormalization(w, "dsml")
+		fillMissingStreamResponseModel(dsmlResp, req.Model)
+		normalizeProviderSpecificToolCalls(dsmlResp, allowedToolNames(req))
+		setResponseToolDiagnosticHeader(w, dsmlResp)
+		s.cacheChatResponse(dsmlResp)
+		return writeOpenAIChatResponseAsSSE(w, flusher, dsmlResp)
+	}
+	if err := writeBufferedOpenAIStreamLinesWithTools(w, flusher, buffered, acc, allowedToolNames(req)); err != nil {
+		return err
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
-		acc.consumeOpenAISSELine(line)
 		// Visual Studio Copilot 适配：
 		// VS 的 OpenAI .NET SDK 在流式模式下会逐个解析 SSE chunk；
 		// 如果上游在任意 chunk 中返回 finish_reason:""，VS 会在客户端直接抛
 		// Unknown ChatFinishReason value。非流式响应归一化不能覆盖这里。
-		line = normalizeOpenAIStreamLineForVisualStudio(line)
+		line = normalizeOpenAIStreamLineForVisualStudioWithTools(line, allowedToolNames(req))
+		acc.consumeOpenAISSELine(line)
 		if _, writeErr := w.Write([]byte(line + "\n")); writeErr != nil {
 			return writeErr
 		}
@@ -888,6 +949,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		return err
 	}
 	s.cacheStreamAccumulator(acc)
+	setStreamToolDiagnosticHeader(w, acc)
 	return nil
 }
 
@@ -939,6 +1001,7 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 		return err
 	}
 	s.cacheStreamAccumulator(acc)
+	setStreamToolDiagnosticHeader(w, acc)
 	return nil
 }
 
@@ -975,6 +1038,7 @@ func (s *Server) streamOllamaPassthrough(w http.ResponseWriter, r *http.Request,
 		return err
 	}
 	s.cacheStreamAccumulator(acc)
+	setStreamToolDiagnosticHeader(w, acc)
 	return nil
 }
 
@@ -1036,6 +1100,7 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 		return err
 	}
 	s.cacheStreamAccumulator(acc)
+	setStreamToolDiagnosticHeader(w, acc)
 
 	out, err := buildOllamaStreamChunk(req.Model, "", nil, true, finishReason)
 	if err != nil {
@@ -1144,7 +1209,7 @@ func modelTimeoutSeconds(
 
 	modelCfg, ok := findModelConfig(cfg, requestedModel, upstreamModel, providerName)
 	if !ok || modelCfg.TimeoutSeconds == nil || *modelCfg.TimeoutSeconds <= 0 {
-		return 0
+		return 60
 	}
 	return *modelCfg.TimeoutSeconds
 }
@@ -1154,6 +1219,17 @@ func requestContextWithTimeout(parent context.Context, timeoutSeconds int) (cont
 		return parent, func() {}
 	}
 	return context.WithTimeout(parent, time.Duration(timeoutSeconds)*time.Second)
+}
+
+func canAttemptAlternateChatMode(ctx context.Context, err error) bool {
+	return ctx != nil && ctx.Err() == nil && provider.ShouldAttemptAlternateChatMode(err)
+}
+
+func isClientGoneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || strings.Contains(strings.ToLower(err.Error()), "client_gone")
 }
 
 func setCandidateDiagnosticHeaders(
