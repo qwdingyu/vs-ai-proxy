@@ -924,7 +924,8 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		s.cacheChatResponse(dsmlResp)
 		return writeOpenAIChatResponseAsSSE(w, flusher, dsmlResp)
 	}
-	if err := writeBufferedOpenAIStreamLinesWithTools(w, flusher, buffered, acc, allowedToolNames(req)); err != nil {
+	streamToolSanitizer := newOpenAIStreamToolSanitizer(allowedToolNames(req))
+	if err := writeBufferedOpenAIStreamLinesWithToolState(w, flusher, buffered, acc, streamToolSanitizer); err != nil {
 		return err
 	}
 	for scanner.Scan() {
@@ -933,7 +934,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		// VS 的 OpenAI .NET SDK 在流式模式下会逐个解析 SSE chunk；
 		// 如果上游在任意 chunk 中返回 finish_reason:""，VS 会在客户端直接抛
 		// Unknown ChatFinishReason value。非流式响应归一化不能覆盖这里。
-		line = normalizeOpenAIStreamLineForVisualStudioWithTools(line, allowedToolNames(req))
+		line = normalizeOpenAIStreamLineForVisualStudioWithToolState(line, streamToolSanitizer)
 		acc.consumeOpenAISSELine(line)
 		if _, writeErr := w.Write([]byte(line + "\n")); writeErr != nil {
 			return writeErr

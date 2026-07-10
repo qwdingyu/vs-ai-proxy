@@ -433,7 +433,18 @@ func normalizeOpenAIStreamLineForVisualStudio(line string) string {
 }
 
 func normalizeOpenAIStreamLineForVisualStudioWithTools(line string, allowedTools map[string]struct{}) string {
-	line = sanitizeOpenAIStreamLineToolCalls(line, allowedTools)
+	line = newOpenAIStreamToolSanitizer(allowedTools).normalizeLine(line)
+	return normalizeOpenAIStreamFinishReasonForVisualStudio(line)
+}
+
+func normalizeOpenAIStreamLineForVisualStudioWithToolState(line string, sanitizer *openAIStreamToolSanitizer) string {
+	if sanitizer != nil {
+		line = sanitizer.normalizeLine(line)
+	}
+	return normalizeOpenAIStreamFinishReasonForVisualStudio(line)
+}
+
+func normalizeOpenAIStreamFinishReasonForVisualStudio(line string) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, ":") || !strings.HasPrefix(trimmed, "data:") {
 		return line
@@ -455,8 +466,18 @@ func normalizeOpenAIStreamLineForVisualStudioWithTools(line string, allowedTools
 	return "data: " + string(normalized)
 }
 
-func sanitizeOpenAIStreamLineToolCalls(line string, allowedTools map[string]struct{}) string {
-	if len(allowedTools) == 0 {
+type openAIStreamToolSanitizer struct {
+	allowedTools              map[string]struct{}
+	blockedToolCallIndexes    map[int]struct{}
+	blockedLegacyFunctionCall bool
+}
+
+func newOpenAIStreamToolSanitizer(allowedTools map[string]struct{}) *openAIStreamToolSanitizer {
+	return &openAIStreamToolSanitizer{allowedTools: allowedTools, blockedToolCallIndexes: map[int]struct{}{}}
+}
+
+func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
+	if s == nil || len(s.allowedTools) == 0 {
 		return line
 	}
 	trimmed := strings.TrimSpace(line)
@@ -486,24 +507,27 @@ func sanitizeOpenAIStreamLineToolCalls(line string, allowedTools map[string]stru
 			continue
 		}
 		if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
-			kept, removed := sanitizeOpenAIStreamDeltaToolCalls(calls, allowedTools)
-			if len(removed) > 0 {
+			kept, removed, dropped := s.sanitizeDeltaToolCalls(calls)
+			if len(removed) > 0 || dropped {
 				if len(kept) > 0 {
 					delta["tool_calls"] = kept
-				} else {
+				} else if len(removed) > 0 {
 					delete(delta, "tool_calls")
 					delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), removed)
+				} else {
+					delete(delta, "tool_calls")
 				}
 				changed = true
 			}
 		}
 		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
-			name, _ := functionCall["name"].(string)
-			// OpenAI 流式 function_call 可能把 name 和 arguments 拆在不同 chunk；
-			// 只有当前 chunk 明确给出非法 name 时才能拦截，arguments 续片必须放行。
-			if strings.TrimSpace(name) != "" && !isAllowedDSMLTool(name, allowedTools) {
+			removed := s.sanitizeLegacyFunctionCall(functionCall)
+			if len(removed) > 0 {
 				delete(delta, "function_call")
-				delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), []string{name})
+				delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), removed)
+				changed = true
+			} else if _, stillPresent := delta["function_call"]; stillPresent && s.blockedLegacyFunctionCall {
+				delete(delta, "function_call")
 				changed = true
 			}
 		}
@@ -518,27 +542,63 @@ func sanitizeOpenAIStreamLineToolCalls(line string, allowedTools map[string]stru
 	return "data: " + string(normalized)
 }
 
-func sanitizeOpenAIStreamDeltaToolCalls(calls []any, allowedTools map[string]struct{}) ([]any, []string) {
+func (s *openAIStreamToolSanitizer) sanitizeDeltaToolCalls(calls []any) ([]any, []string, bool) {
 	kept := make([]any, 0, len(calls))
 	removed := []string{}
+	dropped := false
 	for _, raw := range calls {
 		call, _ := raw.(map[string]any)
+		index := openAIStreamToolCallIndex(call)
 		function, _ := call["function"].(map[string]any)
 		name, _ := function["name"].(string)
 		// OpenAI SSE 的 tool_calls 是增量协议：首片通常带 name，后续片经常只带
-		// index/arguments。续片没有独立语义，不能按“空工具名”拦截，否则会把
-		// get_file/grep_search/create_file 等合法工具的参数片段改写成普通文本。
+		// index/arguments。续片不能按“空工具名”拦截；但如果同一 index 的首片
+		// 已被判定为非法工具，后续参数续片也必须静默丢弃，避免孤儿参数泄露给客户端。
 		if strings.TrimSpace(name) == "" {
+			if _, blocked := s.blockedToolCallIndexes[index]; blocked {
+				dropped = true
+				continue
+			}
 			kept = append(kept, raw)
 			continue
 		}
-		if isAllowedDSMLTool(name, allowedTools) {
+		if isAllowedDSMLTool(name, s.allowedTools) {
+			delete(s.blockedToolCallIndexes, index)
 			kept = append(kept, raw)
 			continue
 		}
+		s.blockedToolCallIndexes[index] = struct{}{}
 		removed = append(removed, name)
 	}
-	return kept, removed
+	return kept, removed, dropped
+}
+
+func (s *openAIStreamToolSanitizer) sanitizeLegacyFunctionCall(functionCall map[string]any) []string {
+	name, _ := functionCall["name"].(string)
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	// OpenAI 流式 function_call 可能把 name 和 arguments 拆在不同 chunk；只有当前
+	// chunk 明确给出非法 name 时展示拦截提示，后续 arguments 续片按状态静默丢弃。
+	if isAllowedDSMLTool(name, s.allowedTools) {
+		s.blockedLegacyFunctionCall = false
+		return nil
+	}
+	s.blockedLegacyFunctionCall = true
+	return []string{name}
+}
+
+func openAIStreamToolCallIndex(call map[string]any) int {
+	if call == nil {
+		return 0
+	}
+	switch raw := call["index"].(type) {
+	case float64:
+		return int(raw)
+	case int:
+		return raw
+	}
+	return 0
 }
 
 func normalizeOpenAIFinishReason(choice map[string]any) bool {

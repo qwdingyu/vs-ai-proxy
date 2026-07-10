@@ -342,6 +342,64 @@ func TestStreamOpenAINormalizesBlankFinishReasonForVisualStudio(t *testing.T) {
 	}
 }
 
+func TestStreamOpenAIPreservesDeclaredToolCallContinuationChunks(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_grep","type":"function","function":{"name":"grep_search","arguments":"{\"query\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"needle\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	chatReq := &provider.ChatRequest{
+		Model: "gpt-test",
+		Tools: []provider.Tool{{Type: "function", Function: provider.ToolFunc{Name: "grep_search"}}},
+	}
+
+	if err := server.streamOpenAI(rec, req, prov, chatReq, rec); err != nil {
+		t.Fatalf("streamOpenAI returned error: %v", err)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "Proxy blocked undeclared tool calls") || strings.Contains(body, "<empty>") {
+		t.Fatalf("declared stream tool continuation was incorrectly blocked: %s", body)
+	}
+	if !strings.Contains(body, `"name":"grep_search"`) || !strings.Contains(body, `"arguments":"\"needle\"}"`) {
+		t.Fatalf("declared stream tool chunks were not preserved: %s", body)
+	}
+}
+
+func TestStreamOpenAIDropsContinuationAfterBlockedUndeclaredTool(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Remove-Item\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	chatReq := &provider.ChatRequest{
+		Model: "gpt-test",
+		Tools: []provider.Tool{{Type: "function", Function: provider.ToolFunc{Name: "grep_search"}}},
+	}
+
+	if err := server.streamOpenAI(rec, req, prov, chatReq, rec); err != nil {
+		t.Fatalf("streamOpenAI returned error: %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Proxy blocked undeclared tool calls: powershell") {
+		t.Fatalf("undeclared tool block notice missing: %s", body)
+	}
+	if strings.Contains(body, "Remove-Item") || strings.Contains(body, "<empty>") {
+		t.Fatalf("blocked tool continuation leaked to client: %s", body)
+	}
+}
+
 func TestStreamOpenAIConvertsSuccessfulDSMLStreamToToolCalls(t *testing.T) {
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,

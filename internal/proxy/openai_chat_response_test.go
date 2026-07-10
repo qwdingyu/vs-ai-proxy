@@ -188,6 +188,44 @@ func TestNormalizeOpenAIStreamLineAllowsLegacyFunctionCallArgumentChunks(t *test
 	}
 }
 
+func TestNormalizeOpenAIStreamLineDropsContinuationAfterBlockedToolCall(t *testing.T) {
+	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"grep_search": {}})
+	first := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":"}}]},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if strings.Contains(first, `"tool_calls"`) || !strings.Contains(first, "powershell") {
+		t.Fatalf("undeclared named chunk should be blocked with notice: %s", first)
+	}
+
+	second := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Remove-Item\"}"}}]},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if strings.Contains(second, `"tool_calls"`) || strings.Contains(second, "Remove-Item") || strings.Contains(second, "<empty>") {
+		t.Fatalf("continuation for blocked tool must be silently dropped: %s", second)
+	}
+}
+
+func TestNormalizeOpenAIStreamLineDropsLegacyContinuationAfterBlockedFunctionCall(t *testing.T) {
+	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"grep_search": {}})
+	first := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"delta":{"function_call":{"name":"powershell","arguments":"{\"command\":"}},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if strings.Contains(first, `"function_call"`) || !strings.Contains(first, "powershell") {
+		t.Fatalf("undeclared legacy named chunk should be blocked with notice: %s", first)
+	}
+
+	second := normalizeOpenAIStreamLineForVisualStudioWithToolState(
+		`data: {"choices":[{"delta":{"function_call":{"arguments":"\"Remove-Item\"}"}},"finish_reason":null}]}`,
+		sanitizer,
+	)
+	if strings.Contains(second, `"function_call"`) || strings.Contains(second, "Remove-Item") || strings.Contains(second, "<empty>") {
+		t.Fatalf("legacy continuation for blocked tool must be silently dropped: %s", second)
+	}
+}
+
 func TestVisualStudioFinishReasonPreservesKnownValues(t *testing.T) {
 	for _, value := range []string{"stop", "length", "tool_calls", "content_filter", "function_call"} {
 		if got := visualStudioFinishReason(value); got != value {

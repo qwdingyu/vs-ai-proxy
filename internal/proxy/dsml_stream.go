@@ -76,12 +76,16 @@ func isOpenAIStreamDoneLine(line string) bool {
 }
 
 func writeBufferedOpenAIStreamLines(w io.Writer, flusher interface{ Flush() }, lines []string, acc *streamReasoningAccumulator) error {
-	return writeBufferedOpenAIStreamLinesWithTools(w, flusher, lines, acc, nil)
+	return writeBufferedOpenAIStreamLinesWithToolState(w, flusher, lines, acc, nil)
 }
 
 func writeBufferedOpenAIStreamLinesWithTools(w io.Writer, flusher interface{ Flush() }, lines []string, acc *streamReasoningAccumulator, allowedTools map[string]struct{}) error {
+	return writeBufferedOpenAIStreamLinesWithToolState(w, flusher, lines, acc, newOpenAIStreamToolSanitizer(allowedTools))
+}
+
+func writeBufferedOpenAIStreamLinesWithToolState(w io.Writer, flusher interface{ Flush() }, lines []string, acc *streamReasoningAccumulator, sanitizer *openAIStreamToolSanitizer) error {
 	for _, line := range lines {
-		line = normalizeOpenAIStreamLineForVisualStudioWithTools(line, allowedTools)
+		line = normalizeOpenAIStreamLineForVisualStudioWithToolState(line, sanitizer)
 		acc.consumeOpenAISSELine(line)
 		if _, err := fmt.Fprintln(w, line); err != nil {
 			return err
