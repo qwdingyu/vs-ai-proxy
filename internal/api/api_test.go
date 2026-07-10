@@ -77,6 +77,67 @@ func TestConfigSaveHotUpdatesProxyRegistry(t *testing.T) {
 	}
 }
 
+func TestConfigSaveHotUpdatesDefenseMode(t *testing.T) {
+	apiSrv, proxySrv := newAPITestHarness(t)
+	calls := 0
+	var userAgent string
+	var requestedWith string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			calls++
+			userAgent = r.Header.Get("User-Agent")
+			requestedWith = r.Header.Get("X-Requested-With")
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"Service temporarily unavailable"}}`))
+	}))
+	defer upstream.Close()
+
+	disabled := false
+	payload := config.AppConfig{
+		Port:         11434,
+		DefaultModel: "gpt-5.5",
+		Defense:      config.DefenseConfig{Enabled: &disabled},
+		Providers: []config.ProviderConfig{{
+			ID:       "useai2",
+			Name:     "UseAI2",
+			Type:     "openai",
+			APIKey:   "sk-test",
+			BaseURL:  upstream.URL + "/v1",
+			Enabled:  true,
+			Priority: 1,
+		}},
+		Models: []config.ModelConfig{{
+			Name:       "gpt-5.5",
+			ProviderID: "useai2",
+			Provider:   "useai2",
+			Enabled:    true,
+		}},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/config", mustJSONBody(t, payload))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/config status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	chatRec := httptest.NewRecorder()
+	chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}]}`))
+	chatReq.Header.Set("Content-Type", "application/json")
+	proxySrv.Handler().ServeHTTP(chatRec, chatReq)
+
+	if chatRec.Code != http.StatusBadGateway {
+		t.Fatalf("chat status = %d, want %d; body=%s", chatRec.Code, http.StatusBadGateway, chatRec.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, disabled defense must not retry through hot-updated proxy", calls)
+	}
+	if strings.Contains(userAgent, "vs-ai-proxy") || requestedWith != "" {
+		t.Fatalf("defensive headers should be disabled after config save, user-agent=%q x-requested-with=%q", userAgent, requestedWith)
+	}
+}
+
 func TestManagementAPIResponsesAreNotCached(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 

@@ -59,8 +59,9 @@ func openAIStreamBodyToChatResponse(body []byte, model string) ([]byte, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(content.String()) == "" {
-		return nil, fmt.Errorf("SSE response has no text content")
+	contentText := content.String()
+	if strings.TrimSpace(contentText) == "" {
+		contentText = ""
 	}
 	resp := provider.ChatResponse{
 		ID:      fmt.Sprintf("chatcmpl-sse-%d", time.Now().Unix()),
@@ -69,7 +70,7 @@ func openAIStreamBodyToChatResponse(body []byte, model string) ([]byte, error) {
 		Model:   model,
 		Choices: []provider.Choice{{
 			Index:        0,
-			Message:      provider.Message{Role: "assistant", Content: content.String()},
+			Message:      provider.Message{Role: "assistant", Content: contentText},
 			FinishReason: visualStudioFinishReason(finishReason),
 		}},
 	}

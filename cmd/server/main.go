@@ -11,9 +11,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -98,10 +101,15 @@ func main() {
 	}
 
 	warnDeprecatedManagementEnv(logger)
+	listener, err := listenWithStartupPortRecovery(appAddr, logger)
+	if err != nil {
+		logger.Error("HTTP 服务启动失败: %v", err)
+		os.Exit(1)
+	}
 
 	// 后台启动单端口 HTTP 服务：/admin 是管理面板，其它路径保留代理协议。
 	go func() {
-		if err := appSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := appSrv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP 服务异常退出: %v", err)
 		}
 	}()
@@ -510,6 +518,186 @@ func resolveAppAddr(port int) string {
 
 func displayAddr(addr string) string {
 	return addr
+}
+
+func listenWithStartupPortRecovery(addr string, logger *log.Logger) (net.Listener, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err == nil {
+		return listener, nil
+	}
+	if !isPortBindError(err) {
+		return nil, err
+	}
+
+	port, portErr := portFromAddr(addr)
+	if portErr != nil {
+		return nil, err
+	}
+	pids, lookupErr := listeningPIDs(port)
+	if lookupErr != nil {
+		logger.Warn("端口 %d 监听失败，且无法查询占用进程: %v；原始错误: %v", port, lookupErr, err)
+		return nil, err
+	}
+	if len(pids) == 0 {
+		logger.Warn("端口 %d 监听失败，但未发现可清理的监听进程；可能是 Windows 端口保留/权限策略: %v", port, err)
+		return nil, err
+	}
+
+	killed := []int{}
+	for _, pid := range pids {
+		if pid == os.Getpid() || !isSafeProxyProcess(pid) {
+			logger.Warn("端口 %d 被 PID %d 占用，但进程名不是 vs-ai-proxy/server，跳过清理", port, pid)
+			continue
+		}
+		if killErr := killProcess(pid); killErr != nil {
+			logger.Warn("清理端口 %d 的旧代理进程 PID %d 失败: %v", port, pid, killErr)
+			continue
+		}
+		killed = append(killed, pid)
+	}
+	if len(killed) == 0 {
+		return nil, err
+	}
+	logger.Warn("端口 %d 被旧代理进程占用，已清理 PID: %v，正在重试监听", port, killed)
+	time.Sleep(500 * time.Millisecond)
+	return net.Listen("tcp", addr)
+}
+
+func isPortBindError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && strings.EqualFold(opErr.Op, "listen") {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "address already in use") ||
+		strings.Contains(lower, "only one usage of each socket address") ||
+		strings.Contains(lower, "access a socket in a way forbidden") ||
+		strings.Contains(lower, "permission denied")
+}
+
+func portFromAddr(addr string) (int, error) {
+	_, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, err
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("invalid port %q", portText)
+	}
+	return port, nil
+}
+
+func listeningPIDs(port int) ([]int, error) {
+	if runtime.GOOS == "windows" {
+		return listeningPIDsWindows(port)
+	}
+	return listeningPIDsUnix(port)
+}
+
+func listeningPIDsWindows(port int) ([]int, error) {
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", fmt.Sprintf(
+		"Get-NetTCPConnection -LocalPort %d -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique",
+		port,
+	))
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parsePIDLines(string(out)), nil
+}
+
+func listeningPIDsUnix(port int) ([]int, error) {
+	cmd := exec.Command("lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t")
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) == 0 && len(out) == 0 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parsePIDLines(string(out)), nil
+}
+
+func parsePIDLines(out string) []int {
+	seen := map[int]struct{}{}
+	pids := []int{}
+	for _, field := range strings.Fields(out) {
+		pid, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+func isSafeProxyProcess(pid int) bool {
+	name := strings.ToLower(processName(pid))
+	if name == "" {
+		return false
+	}
+	name = strings.TrimSuffix(name, ".exe")
+	return name == "vs-ai-proxy" || name == "server"
+}
+
+func processName(pid int) string {
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", fmt.Sprintf(
+			"(Get-Process -Id %d -ErrorAction SilentlyContinue).ProcessName",
+			pid,
+		)).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return ""
+	}
+	return filepath.Base(strings.TrimSpace(string(out)))
+}
+
+func killProcess(pid int) error {
+	if runtime.GOOS == "windows" {
+		return exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F").Run()
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	for i := 0; i < 20; i++ {
+		if !processAlive(pid) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return proc.Kill()
+}
+
+func processAlive(pid int) bool {
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", fmt.Sprintf(
+			"if (Get-Process -Id %d -ErrorAction SilentlyContinue) { '1' }",
+			pid,
+		)).Output()
+		return err == nil && strings.TrimSpace(string(out)) == "1"
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 func logPublicAccessHint(addr string, logger *log.Logger) {

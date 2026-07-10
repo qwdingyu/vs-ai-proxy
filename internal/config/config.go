@@ -54,8 +54,15 @@ type ModelConfig struct {
 type AppConfig struct {
 	Port         int              `json:"port"`          // 代理端口，供 Visual Studio / Ollama 客户端访问
 	DefaultModel string           `json:"default_model"` // 默认模型，请求未提供 model 时回退使用
+	Defense      DefenseConfig    `json:"defense"`       // 上游网关防御策略，默认开启以兼容 new-api/sub2api 等网关抖动
 	Providers    []ProviderConfig `json:"providers"`     // 提供商列表，启动时按此注册到代理服务
 	Models       []ModelConfig    `json:"models"`        // 模型配置，用于前端展示和默认参数兜底
+}
+
+// DefenseConfig 控制代理侧对 OpenAI-compatible 上游的防御行为。
+// Enabled 用指针是为了区分“旧配置没写该字段”和“用户明确关闭”：旧配置升级时默认开启。
+type DefenseConfig struct {
+	Enabled *bool `json:"enabled"` // 是否启用短重试、稳定 User-Agent、限流冷却和协议兜底
 }
 
 // DefaultConfigDir 返回本项目默认配置目录。
@@ -87,6 +94,7 @@ func DefaultConfig() *AppConfig {
 	cfg := &AppConfig{
 		Port:         12345,
 		DefaultModel: "deepseek-v4-pro",
+		Defense:      DefenseConfig{Enabled: boolPtr(true)},
 		Providers: []ProviderConfig{
 			DefaultUseAIProvider(),
 			{
@@ -212,6 +220,9 @@ func NormalizeModel(m ModelConfig) ModelConfig {
 func NormalizeForRuntime(cfg *AppConfig) {
 	if cfg == nil {
 		return
+	}
+	if cfg.Defense.Enabled == nil {
+		cfg.Defense.Enabled = boolPtr(true)
 	}
 	EnsureBuiltInProviders(cfg)
 	NormalizeModelProviderBindings(cfg.Models, cfg.Providers)
@@ -458,6 +469,10 @@ func CloneAppConfig(cfg *AppConfig) *AppConfig {
 		return nil
 	}
 	out := *cfg
+	if cfg.Defense.Enabled != nil {
+		v := *cfg.Defense.Enabled
+		out.Defense.Enabled = &v
+	}
 	out.Providers = append([]ProviderConfig(nil), cfg.Providers...)
 	out.Models = make([]ModelConfig, len(cfg.Models))
 	for i, model := range cfg.Models {

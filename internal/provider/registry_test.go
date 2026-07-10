@@ -161,6 +161,28 @@ func TestRegistryCoolsDownAnyUpstreamServerError(t *testing.T) {
 	}
 }
 
+func TestRegistryUsesRetryAfterForRateLimitCooldown(t *testing.T) {
+	registry := NewRegistry("shared", time.Minute)
+	limited := &fakeProvider{name: "limited", enabled: true, models: []string{"shared"}}
+	healthy := &fakeProvider{name: "healthy", enabled: true, models: []string{"shared"}}
+
+	registry.Add(&ProviderEntry{Provider: limited, Models: limited.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: healthy, Models: healthy.models, Priority: 1})
+	registry.SetModels("limited", limited.models)
+	registry.SetModels("healthy", healthy.models)
+	registry.RecordCandidateFailure("limited", fmt.Errorf("API 错误 429: rate limited; retry_after_seconds=120"))
+
+	health := registry.ProviderHealthSnapshot()["limited"]
+	remaining := time.Until(health.CooldownUntil)
+	if remaining < 110*time.Second || remaining > 130*time.Second {
+		t.Fatalf("cooldown remaining = %s, want about 120s", remaining)
+	}
+	candidates := registry.ResolveCandidates("shared")
+	if len(candidates) != 1 || candidates[0].Provider.Provider.Name() != "healthy" {
+		t.Fatalf("rate-limited provider should be skipped while healthy alternative exists, got %#v", candidates)
+	}
+}
+
 func TestRegistryReturnsCoolingCandidatesWhenAllAreCooling(t *testing.T) {
 	registry := NewRegistry("shared", time.Minute)
 	left := &fakeProvider{name: "left", enabled: true, models: []string{"shared"}}

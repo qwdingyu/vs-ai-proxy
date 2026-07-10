@@ -113,7 +113,7 @@ func (s *Server) buildRegistry(cfg *config.AppConfig) *provider.Registry {
 	registry := provider.NewRegistry(cfg.DefaultModel, 5*time.Minute)
 	for _, p := range cfg.Providers {
 		p = config.NormalizeProvider(p)
-		prov := s.providerFromConfig(p)
+		prov := s.providerFromConfig(cfg, p)
 		if prov == nil {
 			continue
 		}
@@ -159,9 +159,10 @@ func configuredModelsForProvider(cfg *config.AppConfig, p config.ProviderConfig)
 	return models
 }
 
-func (s *Server) providerFromConfig(p config.ProviderConfig) provider.Provider {
+func (s *Server) providerFromConfig(cfg *config.AppConfig, p config.ProviderConfig) provider.Provider {
 	p = config.NormalizeProvider(p)
 	timeout := 60 * time.Second
+	defenseEnabled := proxyDefenseEnabled(cfg)
 	id := config.ProviderKey(p)
 	// id 是 provider 实例名，参与日志/路由/model@provider_id；
 	// capability 是能力注册表名，决定 OpenAI/Ollama 路径、header 和参数过滤。
@@ -171,11 +172,29 @@ func (s *Server) providerFromConfig(p config.ProviderConfig) provider.Provider {
 	case "ollama":
 		return provider.NewOllamaProviderWithCapability(id, capability, p.BaseURL, p.Enabled, timeout)
 	case "openai", "custom":
-		return provider.NewOpenAIProviderWithCapability(id, capability, p.APIKey, p.BaseURL, p.Enabled, timeout)
+		prov := provider.NewOpenAIProviderWithCapability(id, capability, p.APIKey, p.BaseURL, p.Enabled, timeout)
+		prov.SetDefenseEnabled(defenseEnabled)
+		return prov
 	default:
 		s.logger.Warn("未知提供商类型: %s", p.Type)
 		return nil
 	}
+}
+
+func proxyDefenseEnabled(cfg *config.AppConfig) bool {
+	if cfg == nil || cfg.Defense.Enabled == nil {
+		return true
+	}
+	return *cfg.Defense.Enabled
+}
+
+func applyDefenseCandidatePolicy(cfg *config.AppConfig, candidates []provider.Candidate) []provider.Candidate {
+	// 防御关闭时只保留首选候选，目的是做精确诊断：
+	// 不跨 provider 自动兜底，也不把 new-api/sub2api 的真实错误掩盖成其他 provider 成功。
+	if proxyDefenseEnabled(cfg) || len(candidates) <= 1 {
+		return candidates
+	}
+	return candidates[:1]
 }
 
 func providerCapabilityNameFromConfig(p config.ProviderConfig) string {
@@ -485,7 +504,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var lastErr error
 	attempts := []attemptDiagnostic{}
-	candidates := registry.ResolveCandidates(modelName)
+	candidates := applyDefenseCandidatePolicy(cfg, registry.ResolveCandidates(modelName))
 	resolvedModel := registry.ResolveModel(modelName)
 	setCandidateDiagnosticHeaders(w, modelName, resolvedModel, candidates)
 	if len(candidates) == 0 {
@@ -560,7 +579,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					// VS Copilot 真实环境里，UseAI/gpt-5.5 非流式可能直接透出
 					// upstream_server_error，但同一 provider 的流式链路可用。
 					// 在还没写响应给下游时，尝试用流式聚合成非流式 JSON，避免 VS 端失败。
-					if canAttemptAlternateChatMode(ctx, err) {
+					if canAttemptAlternateChatMode(cfg, ctx, err) {
 						if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
 							cancel()
 							setProxyFallbackMode(w, "nonstream-to-stream")
@@ -605,7 +624,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		resp, err := prov.Chat(ctx, req)
 		if err != nil {
-			if canAttemptAlternateChatMode(ctx, err) {
+			if canAttemptAlternateChatMode(cfg, ctx, err) {
 				if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
 					cancel()
 					setProxyFallbackMode(w, "nonstream-to-stream")
@@ -676,7 +695,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 	if modelName == "" {
 		modelName = cfg.DefaultModel
 	}
-	candidates := registry.ResolveCandidates(modelName)
+	candidates := applyDefenseCandidatePolicy(cfg, registry.ResolveCandidates(modelName))
 	resolvedModel := registry.ResolveModel(modelName)
 	if len(candidates) == 0 {
 		if registry.HasAmbiguousModelAlias(modelName) {
@@ -887,7 +906,8 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		// VS Copilot 的 /v1/chat/completions stream=true 真实路径中，UseAI/New API
 		// 可能流式 503，但非流式同模型可用。尚未向下游写出 SSE 时，
 		// 尝试反向兜底：非流式拿到结果后合成为 OpenAI SSE，避免直接 502。
-		if canAttemptAlternateChatMode(r.Context(), err) {
+		cfg, _, _ := s.snapshot()
+		if canAttemptAlternateChatMode(cfg, r.Context(), err) {
 			fallbackReq := cloneChatRequest(req)
 			fallbackReq.Stream = false
 			if resp, fallbackErr := prov.Chat(r.Context(), fallbackReq); fallbackErr == nil {
@@ -1267,8 +1287,10 @@ func requestContextWithTimeout(parent context.Context, timeoutSeconds int) (cont
 	return context.WithTimeout(parent, time.Duration(timeoutSeconds)*time.Second)
 }
 
-func canAttemptAlternateChatMode(ctx context.Context, err error) bool {
-	return ctx != nil && ctx.Err() == nil && provider.ShouldAttemptAlternateChatMode(err)
+func canAttemptAlternateChatMode(cfg *config.AppConfig, ctx context.Context, err error) bool {
+	// 流式/非流式互相兜底可能产生第二次上游请求，必须受同一个防御开关控制。
+	// 客户端已取消时不兜底，避免用户离开后代理继续消耗上游额度。
+	return proxyDefenseEnabled(cfg) && ctx != nil && ctx.Err() == nil && provider.ShouldAttemptAlternateChatMode(err)
 }
 
 func isClientGoneError(err error) bool {

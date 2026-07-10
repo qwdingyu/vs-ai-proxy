@@ -375,6 +375,53 @@ func TestOpenAIProviderChatRawRetriesTransientServerErrors(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderCanDisableDefensiveRetriesAndHeaders(t *testing.T) {
+	calls := 0
+	var userAgent string
+	var requestedWith string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		userAgent = r.Header.Get("User-Agent")
+		requestedWith = r.Header.Get("X-Requested-With")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"Service temporarily unavailable"}}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	prov.SetDefenseEnabled(false)
+	_, err := prov.ChatRaw(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("ChatRaw should fail for upstream 503")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, disabled defense must not retry", calls)
+	}
+	if strings.Contains(userAgent, "vs-ai-proxy") || requestedWith != "" {
+		t.Fatalf("defensive headers should be disabled, user-agent=%q x-requested-with=%q", userAgent, requestedWith)
+	}
+}
+
+func TestOpenAIProviderSendsStableDefensiveUserAgent(t *testing.T) {
+	var userAgent string
+	var requestedWith string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userAgent = r.Header.Get("User-Agent")
+		requestedWith = r.Header.Get("X-Requested-With")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	if _, err := prov.ChatRaw(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatalf("ChatRaw returned error: %v", err)
+	}
+	if userAgent != "vs-ai-proxy" || requestedWith != "vs-ai-proxy" {
+		t.Fatalf("unexpected defensive headers, user-agent=%q x-requested-with=%q", userAgent, requestedWith)
+	}
+}
+
 func TestOpenAIProviderChatRawDoesNotRetryClientErrors(t *testing.T) {
 	calls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

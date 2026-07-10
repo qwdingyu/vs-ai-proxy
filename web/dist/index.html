@@ -194,7 +194,9 @@
           <div class="stack">
             <label>代理端口 <input type="number" id="cfgPort" /></label>
             <label>默认模型 <input id="cfgDefaultModel" /></label>
+            <label class="checkbox"><input type="checkbox" id="cfgDefenseEnabled" /> 启用上游防御模式</label>
             <div class="hint">端口变更保存后仍需重启进程生效；其它配置会立即热更新代理路由。</div>
+            <div class="hint">上游防御模式用于 new-api / sub2api 等网关：开启后会启用稳定 User-Agent、5xx/网络瞬断短重试、429 冷却和流式/非流式协议兜底。</div>
             <div class="hint">管理面板与代理共用同一端口；Web 管理路径固定为 `/admin`，端口变更保存后需重启进程生效。</div>
             <div class="hint">请求日志持久化路径由 `CONFIG_PATH` / `STORE_PATH` 环境变量控制，不在此页保存。</div>
             <div class="actions">
@@ -715,8 +717,9 @@
         currentConfig = cfg;
         $('cfgPort').value = cfg.port ?? 12345;
         $('cfgDefaultModel').value = cfg.default_model || '';
+        $('cfgDefenseEnabled').checked = cfg.defense?.enabled !== false;
         $('cfgHealth').textContent = cfg.port ? '已加载' : '-';
-        $('cfgSummary').textContent = `providers: ${(cfg.providers || []).length}, models: ${(cfg.models || []).length}`;
+        $('cfgSummary').textContent = `providers: ${(cfg.providers || []).length}, models: ${(cfg.models || []).length}, defense: ${cfg.defense?.enabled === false ? 'off' : 'on'}`;
       } catch (e) {
         console.error(e);
       }
@@ -1059,6 +1062,7 @@
           ...cfg,
           port: Number($('cfgPort').value || 12345),
           default_model: $('cfgDefaultModel').value.trim(),
+          defense: { ...(cfg.defense || {}), enabled: $('cfgDefenseEnabled').checked },
         };
         if (!await validateConfigPayload(payload)) return;
         await fetchJSON('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

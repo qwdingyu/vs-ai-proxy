@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -140,6 +141,7 @@ type OpenAIProvider struct {
 	APIKey         string
 	BaseURL        string
 	Enabled        bool
+	DefenseEnabled bool
 	Client         *http.Client
 	Timeout        time.Duration
 }
@@ -147,6 +149,7 @@ type OpenAIProvider struct {
 type providerHTTPError struct {
 	StatusCode int
 	Body       []byte
+	RetryAfter time.Duration
 	Message    string
 }
 
@@ -172,9 +175,14 @@ func NewOpenAIProviderWithCapability(name, capabilityName, apiKey, baseURL strin
 		APIKey:         apiKey,
 		BaseURL:        strings.TrimRight(baseURL, "/"),
 		Enabled:        enabled,
+		DefenseEnabled: true,
 		Client:         newProviderHTTPClient(timeout),
 		Timeout:        timeout,
 	}
+}
+
+func (p *OpenAIProvider) SetDefenseEnabled(enabled bool) {
+	p.DefenseEnabled = enabled
 }
 
 func (p *OpenAIProvider) Name() string {
@@ -284,16 +292,16 @@ func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	// New API 内部可能配置多个渠道，但实测单渠道 5xx/EOF 有时会直接透出。
-	// 代理侧只对瞬态错误做短重试，给上游网关重新选择渠道的机会；4xx 不重试，避免放大参数/鉴权错误。
+	// New API / sub2api 内部可能配置多个渠道，但实测单渠道 5xx/EOF 有时会直接透出。
+	// 防御开启时，代理侧只对瞬态错误做短重试，给上游网关重新选择渠道的机会；4xx 不重试，避免放大参数/鉴权错误。
 	var lastErr error
-	for attempt := 0; attempt < openAIProviderMaxAttempts; attempt++ {
+	for attempt := 0; attempt < p.openAIProviderMaxAttempts(); attempt++ {
 		respBody, err := p.doChatRaw(ctx, body)
 		if err == nil {
 			return respBody, nil
 		}
 		lastErr = err
-		if !shouldRetryOpenAIProviderError(err) || attempt == openAIProviderMaxAttempts-1 {
+		if !p.shouldRetryOpenAIProviderError(err) || attempt == p.openAIProviderMaxAttempts()-1 {
 			break
 		}
 		if delay := openAIProviderRetryDelay(attempt); delay > 0 {
@@ -327,10 +335,12 @@ func (p *OpenAIProvider) doChatRaw(ctx context.Context, body []byte) ([]byte, er
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		return nil, &providerHTTPError{
 			StatusCode: resp.StatusCode,
 			Body:       respBody,
-			Message:    fmt.Sprintf("API 错误 %d: %s", resp.StatusCode, responseBodyPreview(respBody)),
+			RetryAfter: retryAfter,
+			Message:    providerHTTPErrorMessage(resp.StatusCode, respBody, retryAfter),
 		}
 	}
 
@@ -343,7 +353,21 @@ func openAIProviderRetryDelay(attempt int) time.Duration {
 	return time.Duration(attempt+1) * 200 * time.Millisecond
 }
 
-func shouldRetryOpenAIProviderError(err error) bool {
+func (p *OpenAIProvider) openAIProviderMaxAttempts() int {
+	// 防御关闭用于排查上游原始行为，此时不能在代理侧额外重试，
+	// 否则用户看到的请求次数、耗时和错误会与真实上游表现不一致。
+	if p == nil || !p.DefenseEnabled {
+		return 1
+	}
+	return openAIProviderMaxAttempts
+}
+
+func (p *OpenAIProvider) shouldRetryOpenAIProviderError(err error) bool {
+	// 只重试可恢复的传输/服务端瞬态错误；400/401/403/404/429 都不在这里重试，
+	// 避免把参数错误、鉴权错误、模型不存在或限流放大成更多上游请求。
+	if p == nil || !p.DefenseEnabled {
+		return false
+	}
 	if err == nil {
 		return false
 	}
@@ -407,13 +431,13 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	// 流式路径同样要短重试。管理测试页和 VS 流式下游都会走这里，
 	// 若首个 New API 渠道短暂 503，重试可避免用户看到一次性失败。
 	var lastErr error
-	for attempt := 0; attempt < openAIProviderMaxAttempts; attempt++ {
+	for attempt := 0; attempt < p.openAIProviderMaxAttempts(); attempt++ {
 		stream, err := p.doChatStream(ctx, body)
 		if err == nil {
 			return &cancelReadCloser{ReadCloser: stream, cancel: cancel}, nil
 		}
 		lastErr = err
-		if !shouldRetryOpenAIProviderError(err) || attempt == openAIProviderMaxAttempts-1 {
+		if !p.shouldRetryOpenAIProviderError(err) || attempt == p.openAIProviderMaxAttempts()-1 {
 			break
 		}
 		if delay := openAIProviderRetryDelay(attempt); delay > 0 {
@@ -501,10 +525,12 @@ func (p *OpenAIProvider) doChatStream(ctx context.Context, body []byte) (io.Read
 		if readErr != nil {
 			return nil, fmt.Errorf("API 错误 %d，且读取错误响应失败: %w", resp.StatusCode, readErr)
 		}
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		return nil, &providerHTTPError{
 			StatusCode: resp.StatusCode,
 			Body:       respBody,
-			Message:    fmt.Sprintf("API 错误 %d: %s", resp.StatusCode, responseBodyPreview(respBody)),
+			RetryAfter: retryAfter,
+			Message:    providerHTTPErrorMessage(resp.StatusCode, respBody, retryAfter),
 		}
 	}
 
@@ -578,6 +604,12 @@ func newProviderHTTPClient(timeout time.Duration) *http.Client {
 }
 
 func (p *OpenAIProvider) applyOpenAIRequestHeaders(req *http.Request, accept string) {
+	// 部分 new-api / sub2api 部署前面有 WAF，默认 Go/Python UA 可能被拦。
+	// 防御模式下统一发送稳定 UA；关闭防御时保留 Go 默认行为，便于复现原始问题。
+	if p == nil || p.DefenseEnabled {
+		req.Header.Set("User-Agent", providerUserAgent())
+		req.Header.Set("X-Requested-With", "vs-ai-proxy")
+	}
 	if strings.TrimSpace(p.APIKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
 	}
@@ -590,6 +622,41 @@ func (p *OpenAIProvider) applyOpenAIRequestHeaders(req *http.Request, accept str
 	if strings.EqualFold(p.capabilityName(), "openrouter") || strings.EqualFold(p.NameStr, "openrouter") {
 		applyOpenRouterHeaders(req)
 	}
+}
+
+func providerUserAgent() string {
+	if value := firstEnv("VS_AI_PROXY_USER_AGENT", "PROVIDER_USER_AGENT", "OPENAI_COMPAT_USER_AGENT"); value != "" {
+		return value
+	}
+	return "vs-ai-proxy"
+}
+
+func providerHTTPErrorMessage(statusCode int, body []byte, retryAfter time.Duration) string {
+	message := fmt.Sprintf("API 错误 %d: %s", statusCode, responseBodyPreview(body))
+	if retryAfter > 0 {
+		message = fmt.Sprintf("%s; retry_after_seconds=%d", message, int(retryAfter.Seconds()))
+	}
+	return message
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	// Retry-After 既可能是秒数，也可能是 HTTP date。这里只解析为冷却预算，
+	// 不在 provider 内部等待重试，避免长时间占用 VS/Copilot 的请求链路。
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	return when.Sub(now).Round(time.Second)
 }
 
 func applyOpenRouterHeaders(req *http.Request) {

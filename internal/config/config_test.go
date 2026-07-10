@@ -229,6 +229,27 @@ func TestManagerReloadMigratesModelNamespaceProviderBinding(t *testing.T) {
 	}
 }
 
+func TestNormalizeForRuntimeDefaultsDefenseEnabledForOldConfigs(t *testing.T) {
+	cfg := &AppConfig{Providers: []ProviderConfig{DefaultUseAIProvider()}}
+
+	NormalizeForRuntime(cfg)
+
+	if cfg.Defense.Enabled == nil || !*cfg.Defense.Enabled {
+		t.Fatalf("defense.enabled should default to true for old configs: %#v", cfg.Defense.Enabled)
+	}
+}
+
+func TestNormalizeForRuntimePreservesExplicitDefenseDisabled(t *testing.T) {
+	disabled := false
+	cfg := &AppConfig{Defense: DefenseConfig{Enabled: &disabled}, Providers: []ProviderConfig{DefaultUseAIProvider()}}
+
+	NormalizeForRuntime(cfg)
+
+	if cfg.Defense.Enabled == nil || *cfg.Defense.Enabled {
+		t.Fatalf("explicit defense.enabled=false should be preserved: %#v", cfg.Defense.Enabled)
+	}
+}
+
 func TestNewManagerMigratesModelNamespaceProviderBinding(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := DefaultConfig()

@@ -287,6 +287,30 @@ func TestDisplayAddrKeepsWildcardBindVisible(t *testing.T) {
 	}
 }
 
+func TestPortFromAddrParsesValidPort(t *testing.T) {
+	port, err := portFromAddr("127.0.0.1:12345")
+	if err != nil {
+		t.Fatalf("portFromAddr returned error: %v", err)
+	}
+	if port != 12345 {
+		t.Fatalf("port = %d, want 12345", port)
+	}
+}
+
+func TestParsePIDLinesDeduplicatesPIDs(t *testing.T) {
+	pids := parsePIDLines("123\nabc\n456\n123\n")
+	if len(pids) != 2 || pids[0] != 123 || pids[1] != 456 {
+		t.Fatalf("pids = %#v, want [123 456]", pids)
+	}
+}
+
+func TestIsPortBindErrorRecognizesWindowsForbiddenSocket(t *testing.T) {
+	err := errors.New("listen tcp 127.0.0.1:12345: bind: An attempt was made to access a socket in a way forbidden by its access permissions.")
+	if !isPortBindError(err) {
+		t.Fatalf("expected Windows forbidden socket bind error to be recognized")
+	}
+}
+
 func TestWatchConfigLoopReloadsProxyConfigFromDisk(t *testing.T) {
 	t.Setenv("PORT", "")
 	t.Setenv("PROXY_PORT", "")

@@ -437,6 +437,9 @@ func (r *Registry) fallbackCandidatesLocked(model string) []Candidate {
 }
 
 func (r *Registry) rankCandidatesLocked(candidates []Candidate) []Candidate {
+	// 静态配置和动态 /models catalog 可能同时把同一个 provider/model 放入候选。
+	// 先去重再排序，避免一次用户请求在同一 provider 上被重复发送。
+	candidates = dedupeCandidates(candidates)
 	if len(candidates) <= 1 {
 		return candidates
 	}
@@ -463,6 +466,21 @@ func (r *Registry) rankCandidatesLocked(candidates []Candidate) []Candidate {
 
 	sortCandidatesByHealth(cooling, r.health)
 	return cooling
+}
+
+func dedupeCandidates(candidates []Candidate) []Candidate {
+	out := make([]Candidate, 0, len(candidates))
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		name := providerCandidateName(candidate)
+		key := name + "\x00" + strings.TrimSpace(candidate.ModelID) + "\x00" + strings.TrimSpace(candidate.UpstreamID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func sortCandidatesByHealth(candidates []Candidate, health map[string]ProviderHealth) {
@@ -531,6 +549,13 @@ func providerCooldownDuration(consecutiveFailures int, lastError string) time.Du
 
 	lower := strings.ToLower(lastError)
 	status := providerErrorStatus(lastError)
+	if status == 429 {
+		// 429 是上游明确要求降速。优先尊重 Retry-After，把 provider 临时移到候选末尾，
+		// 但不在当前请求里阻塞等待，避免拖死 Visual Studio 的交互请求。
+		if retryAfter := providerRetryAfterDuration(lastError); retryAfter > 0 {
+			return minDuration(retryAfter, 10*time.Minute)
+		}
+	}
 	switch {
 	case strings.Contains(lower, "401") || strings.Contains(lower, "403") || strings.Contains(lower, "unauthorized"):
 		return 5 * time.Minute
@@ -541,6 +566,34 @@ func providerCooldownDuration(consecutiveFailures int, lastError string) time.Du
 	default:
 		return 0
 	}
+}
+
+func providerRetryAfterDuration(message string) time.Duration {
+	lower := strings.ToLower(message)
+	const key = "retry_after_seconds="
+	idx := strings.Index(lower, key)
+	if idx < 0 {
+		return 0
+	}
+	value := lower[idx+len(key):]
+	end := strings.IndexFunc(value, func(r rune) bool {
+		return r < '0' || r > '9'
+	})
+	if end >= 0 {
+		value = value[:end]
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func providerErrorStatus(message string) int {
