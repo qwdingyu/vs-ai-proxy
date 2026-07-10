@@ -24,6 +24,7 @@ func (s *Server) cacheRawOpenAIChatResponse(body []byte) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return
 	}
+	normalizeProviderSpecificToolCalls(&resp)
 	s.cacheChatResponse(&resp)
 }
 
@@ -123,11 +124,19 @@ func collectOpenAIStreamReader(stream io.Reader, model string) (*provider.ChatRe
 	if calls := buildProviderToolCalls(toolChunks); len(calls) > 0 {
 		message.ToolCalls = calls
 	}
+	if len(message.ToolCalls) == 0 {
+		calls, cleaned := parseDSMLToolCalls(message.Content)
+		if len(calls) > 0 {
+			message.Content = cleaned
+			message.ToolCalls = calls
+			finishReason = "tool_calls"
+		}
+	}
 	if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.Reasoning) == "" && len(message.ToolCalls) == 0 {
 		return nil, fmt.Errorf("SSE response has no content or tool calls")
 	}
 
-	return &provider.ChatResponse{
+	resp := &provider.ChatResponse{
 		ID:      fmt.Sprintf("chatcmpl-sse-%d", time.Now().Unix()),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
@@ -137,7 +146,55 @@ func collectOpenAIStreamReader(stream io.Reader, model string) (*provider.ChatRe
 			Message:      message,
 			FinishReason: visualStudioFinishReason(finishReason),
 		}},
-	}, nil
+	}
+	normalizeProviderSpecificToolCalls(resp)
+	return resp, nil
+}
+
+func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse) {
+	normalizeDSMLToolCallsInChatResponse(resp)
+}
+
+func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte) []byte {
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return body
+	}
+	choices, ok := root["choices"].([]any)
+	if !ok {
+		return body
+	}
+	changed := false
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]any)
+		if choice == nil {
+			continue
+		}
+		message, _ := choice["message"].(map[string]any)
+		if message == nil {
+			continue
+		}
+		if calls, ok := message["tool_calls"].([]any); ok && len(calls) > 0 {
+			continue
+		}
+		content, _ := message["content"].(string)
+		toolCalls, cleaned := parseDSMLToolCalls(content)
+		if len(toolCalls) == 0 {
+			continue
+		}
+		message["content"] = cleaned
+		message["tool_calls"] = toolCalls
+		choice["finish_reason"] = "tool_calls"
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, resp *provider.ChatResponse) error {

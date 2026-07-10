@@ -531,6 +531,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					// 在还没写响应给下游时，尝试用流式聚合成非流式 JSON，避免 VS 端失败。
 					if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
 						cancel()
+						normalizeProviderSpecificToolCalls(fallbackResp)
 						s.cacheChatResponse(fallbackResp)
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusOK)
@@ -556,6 +557,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				// raw OpenAI 响应直接透传能最大化保留上游扩展字段，但 VS 对
 				// finish_reason 比 Web/ curl 更严格，写回前需要做最小兼容归一化。
 				body = normalizeOpenAIChatResponseForVisualStudio(body)
+				body = normalizeProviderSpecificToolCallsInOpenAIJSON(body)
 				s.cacheRawOpenAIChatResponse(body)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
@@ -569,6 +571,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
 				cancel()
+				normalizeProviderSpecificToolCalls(fallbackResp)
 				s.cacheChatResponse(fallbackResp)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
@@ -584,6 +587,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		cancel()
+		normalizeProviderSpecificToolCalls(resp)
 		s.cacheChatResponse(resp)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -763,10 +767,12 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				if converted, convErr := converter.OllamaChatResponse2OpenAI(body, req.Model); convErr == nil {
 					var typed provider.ChatResponse
 					if json.Unmarshal(converted, &typed) == nil {
+						normalizeProviderSpecificToolCalls(&typed)
 						s.cacheChatResponse(&typed)
 					}
 				}
 
+				body = normalizeDSMLToolCallsInOllamaJSON(body)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				w.Write(ensureOllamaContentFromThinking(body))
@@ -784,6 +790,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			registry.RecordCandidateFailure(prov.Name(), err)
 			continue
 		}
+		normalizeProviderSpecificToolCalls(resp)
 		s.cacheChatResponse(resp)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -839,6 +846,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		fallbackReq := cloneChatRequest(req)
 		fallbackReq.Stream = false
 		if resp, fallbackErr := prov.Chat(r.Context(), fallbackReq); fallbackErr == nil {
+			normalizeProviderSpecificToolCalls(resp)
 			s.cacheChatResponse(resp)
 			if writeErr := writeOpenAIChatResponseAsSSE(w, flusher, resp); writeErr == nil {
 				return nil

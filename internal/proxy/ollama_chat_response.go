@@ -76,6 +76,9 @@ func buildOllamaChatResponse(model string, resp *provider.ChatResponse) map[stri
 		"message":    message,
 		"done":       true,
 	}
+	if _, ok := message["tool_calls"]; ok {
+		out["done_reason"] = "tool_calls"
+	}
 	if resp != nil && resp.Usage != nil {
 		out["prompt_eval_count"] = resp.Usage.PromptTokens
 		out["eval_count"] = resp.Usage.CompletionTokens

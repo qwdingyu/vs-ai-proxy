@@ -451,6 +451,36 @@ func TestOpenAIChatConvertsNonStreamSSEBodyToJSON(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatConvertsDSMLTextToToolCalls(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"step-router-v1"}, &fakeChatResponse{Model: "step-router-v1", Content: dsmlAdvisorSample}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"step-router-v1",
+		"messages":[{"role":"user","content":"review files"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body provider.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response should be JSON: %v; body=%s", err, rec.Body.String())
+	}
+	if len(body.Choices) != 1 || body.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("finish reason/tool choice missing: %s", rec.Body.String())
+	}
+	if len(body.Choices[0].Message.ToolCalls) != 4 || body.Choices[0].Message.ToolCalls[0].Function.Name != "get_file" {
+		t.Fatalf("tool calls missing: %s", rec.Body.String())
+	}
+}
+
 func TestOpenAIChatFallsBackToStreamWhenNonStreamUpstreamFails(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, strings.Join([]string{
 		`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
@@ -513,6 +543,55 @@ func TestOpenAIStreamFallsBackToNonStreamWhenStreamUpstreamFails(t *testing.T) {
 	}
 	if prov.streamCalls != 1 || prov.chatCalls != 1 {
 		t.Fatalf("streamCalls=%d chatCalls=%d, want one stream failure and one non-stream fallback", prov.streamCalls, prov.chatCalls)
+	}
+}
+
+func TestOpenAIStreamFallbackConvertsDSMLToToolCalls(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"step-router-v1"}, &fakeChatResponse{Model: "step-router-v1", Content: dsmlAdvisorSample}, "")
+	prov.streamErr = errors.New(`API 错误 503: {"error":{"message":"Service temporarily unavailable"}}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"step-router-v1",
+		"messages":[{"role":"user","content":"review files"}],
+		"stream":true
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"tool_calls"`) || !strings.Contains(body, `"name":"get_file"`) || !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("expected SSE tool call fallback body, got: %s", body)
+	}
+}
+
+func TestOllamaChatConvertsDSMLTextToToolCalls(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"step-router-v1"}, &fakeChatResponse{Model: "step-router-v1", Content: dsmlAdvisorSample}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/chat", server.handleOllamaChat)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{
+		"model":"step-router-v1",
+		"messages":[{"role":"user","content":"review files"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"tool_calls"`) || !strings.Contains(body, `"name":"get_file"`) || !strings.Contains(body, `"done_reason":"tool_calls"`) {
+		t.Fatalf("expected Ollama tool call body, got: %s", body)
 	}
 }
 
