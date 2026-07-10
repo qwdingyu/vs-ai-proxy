@@ -451,6 +451,43 @@ func TestOpenAIChatConvertsNonStreamSSEBodyToJSON(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatRawBlocksUndeclaredToolCallsAndStops(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
+	prov.rawBody = []byte(`{
+		"id":"chatcmpl-tools",
+		"object":"chat.completion",
+		"model":"gpt-5.5",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_ps","type":"function","function":{"name":"powershell","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]
+	}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"search only"}],
+		"tools":[{"type":"function","function":{"name":"grep_search","description":"Search","parameters":{"type":"object"}}}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"tool_calls"`) || strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("undeclared tool call should be removed with stop finish: %s", body)
+	}
+	if !strings.Contains(body, "Proxy blocked undeclared tool calls: powershell") || !strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Fatalf("blocked tool notice/stop finish missing: %s", body)
+	}
+	if got := rec.Header().Get("X-Proxy-Response-Tools"); got != "" {
+		t.Fatalf("response tool diagnostic should not report blocked tools: %q", got)
+	}
+}
+
 func TestOpenAIChatConvertsDSMLTextToToolCalls(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"step-router-v1"}, &fakeChatResponse{Model: "step-router-v1", Content: dsmlAdvisorSample}, "")
 	server := newOpenServer(prov)
@@ -600,6 +637,79 @@ func TestOpenAIStreamFallbackConvertsDSMLToToolCalls(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `"tool_calls"`) || !strings.Contains(body, `"name":"get_file"`) || !strings.Contains(body, `"finish_reason":"tool_calls"`) {
 		t.Fatalf("expected SSE tool call fallback body, got: %s", body)
+	}
+}
+
+func TestOpenAIStreamHandlesLegacyFunctionCallContinuationAtHandler(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"function_call":{"name":"grep_search","arguments":"{\"query\":"}},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"function_call":{"arguments":"\"needle\"}"}},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, stream)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"search"}],
+		"tools":[{"type":"function","function":{"name":"grep_search","description":"Search","parameters":{"type":"object"}}}],
+		"stream":true
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "Proxy blocked undeclared tool calls") || strings.Contains(body, "<empty>") {
+		t.Fatalf("declared legacy function_call stream was incorrectly blocked: %s", body)
+	}
+	if !strings.Contains(body, `"function_call"`) || !strings.Contains(body, `"name":"grep_search"`) || !strings.Contains(body, `"arguments":"\"needle\"}"`) {
+		t.Fatalf("legacy function_call stream chunks were not preserved: %s", body)
+	}
+}
+
+func TestOpenAIStreamBlocksLegacyFunctionCallContinuationAtHandler(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"function_call":{"name":"powershell","arguments":"{\"command\":"}},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"function_call":{"arguments":"\"Remove-Item\"}"}},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, stream)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"search"}],
+		"tools":[{"type":"function","function":{"name":"grep_search","description":"Search","parameters":{"type":"object"}}}],
+		"stream":true
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Proxy blocked undeclared tool calls: powershell") {
+		t.Fatalf("legacy undeclared function_call block notice missing: %s", body)
+	}
+	if strings.Contains(body, `"function_call"`) || strings.Contains(body, "Remove-Item") || strings.Contains(body, "<empty>") {
+		t.Fatalf("blocked legacy function_call continuation leaked: %s", body)
+	}
+	if strings.Contains(body, `"finish_reason":"tool_calls"`) || !strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Fatalf("legacy blocked stream should finish with stop: %s", body)
 	}
 }
 
