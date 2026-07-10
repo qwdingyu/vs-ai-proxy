@@ -1,18 +1,24 @@
 package provider
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
 
 var chatRequestKnownFields = map[string]struct{}{
-	"model":            {},
-	"messages":         {},
-	"temperature":      {},
-	"top_p":            {},
-	"top_k":            {},
-	"max_tokens":       {},
-	"reasoning_effort": {},
-	"stream":           {},
-	"tools":            {},
-	"stop":             {},
+	"model":                 {},
+	"messages":              {},
+	"temperature":           {},
+	"top_p":                 {},
+	"top_k":                 {},
+	"max_tokens":            {},
+	"max_completion_tokens": {},
+	"max_output_tokens":     {},
+	"reasoning_effort":      {},
+	"stream":                {},
+	"tools":                 {},
+	"stop":                  {},
 }
 
 var messageKnownFields = map[string]struct{}{
@@ -47,11 +53,18 @@ var toolFuncKnownFields = map[string]struct{}{
 }
 
 var ollamaOptionKnownFields = map[string]struct{}{
-	"temperature":      {},
-	"top_p":            {},
-	"top_k":            {},
-	"max_tokens":       {},
-	"reasoning_effort": {},
+	"temperature":           {},
+	"top_p":                 {},
+	"top_k":                 {},
+	"max_tokens":            {},
+	"max_completion_tokens": {},
+	"max_output_tokens":     {},
+	"reasoning_effort":      {},
+}
+
+var tokenBudgetAliasFields = map[string]struct{}{
+	"max_completion_tokens": {},
+	"max_output_tokens":     {},
 }
 
 type chatRequestAlias ChatRequest
@@ -77,6 +90,9 @@ func (r *ChatRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	if req.MaxTokens == nil {
+		req.MaxTokens = firstIntFromRawJSON(raw, "max_completion_tokens", "max_output_tokens")
+	}
 	for field := range chatRequestKnownFields {
 		delete(raw, field)
 	}
@@ -88,6 +104,37 @@ func (r *ChatRequest) UnmarshalJSON(data []byte) error {
 		r.Extra = map[string]json.RawMessage{}
 	}
 	return nil
+}
+
+func firstIntFromRawJSON(raw map[string]json.RawMessage, keys ...string) *int {
+	for _, key := range keys {
+		if value := intFromRawJSON(raw[key]); value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func intFromRawJSON(raw json.RawMessage) *int {
+	trimmed := strings.TrimSpace(string(raw))
+	if len(raw) == 0 || trimmed == "null" || strings.HasPrefix(trimmed, "\"") {
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value json.Number
+	if err := decoder.Decode(&value); err != nil {
+		return nil
+	}
+	int64Value, err := value.Int64()
+	if err != nil {
+		return nil
+	}
+	intValue := int(int64Value)
+	if int64(intValue) != int64Value {
+		return nil
+	}
+	return &intValue
 }
 
 func (r ChatRequest) MarshalJSON() ([]byte, error) {
@@ -102,6 +149,12 @@ func (r ChatRequest) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	for key, value := range r.Extra {
+		if _, isTokenBudgetAlias := tokenBudgetAliasFields[key]; isTokenBudgetAlias {
+			if _, hasMaxTokens := out["max_tokens"]; !hasMaxTokens && intFromRawJSON(value) != nil {
+				out["max_tokens"] = append(json.RawMessage(nil), value...)
+			}
+			continue
+		}
 		if _, exists := chatRequestKnownFields[key]; exists || len(value) == 0 {
 			continue
 		}

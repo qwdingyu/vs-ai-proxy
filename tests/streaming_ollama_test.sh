@@ -118,9 +118,10 @@ for i in {1..40}; do
   sleep 0.25
 done
 
-python3 - <<'PYCLIENT'
+ROOT_DIR="$ROOT_DIR" python3 - <<'PYCLIENT'
 import urllib.request
 import json
+import os
 
 req = urllib.request.Request(
     'http://127.0.0.1:11436/v1/chat/completions',
@@ -131,16 +132,16 @@ req = urllib.request.Request(
 with urllib.request.urlopen(req, timeout=10) as resp:
     body = resp.read().decode('utf-8')
 
-with open('/Users/dingyuwang/0-X/0-x/vs-ai-proxy/.bin/streaming-ollama-output.txt', 'w') as f:
+with open(os.path.join(os.environ['ROOT_DIR'], '.bin', 'streaming-ollama-output.txt'), 'w') as f:
     f.write(body)
 
 print(body)
 PYCLIENT
 
-if grep -q 'data: {"id":' /Users/dingyuwang/0-X/0-x/vs-ai-proxy/.bin/streaming-ollama-output.txt; then
+if grep -q '^data: {' "$ROOT_DIR/.bin/streaming-ollama-output.txt" && grep -q '^data: \[DONE\]' "$ROOT_DIR/.bin/streaming-ollama-output.txt"; then
   echo "STREAMING_OLLAMA_OK"
 else
   echo "STREAMING_OLLAMA_FAIL"
-  cat /Users/dingyuwang/0-X/0-x/vs-ai-proxy/.bin/streaming-ollama-output.txt
+  cat "$ROOT_DIR/.bin/streaming-ollama-output.txt"
   exit 1
 fi

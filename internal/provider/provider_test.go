@@ -195,6 +195,41 @@ func TestOpenAIProviderChatStreamConvertsMaxOutputTokensForChatCompletions(t *te
 	}
 }
 
+func TestOpenAIProviderConvertsMaxCompletionTokensForChatCompletions(t *testing.T) {
+	var captured map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	req := ChatRequest{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: "user", Content: "create files"}},
+		Extra: map[string]json.RawMessage{
+			"max_completion_tokens": []byte(`6144`),
+			"tool_choice":           []byte(`"auto"`),
+		},
+	}
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	if _, err := prov.ChatRaw(context.Background(), &req); err != nil {
+		t.Fatalf("ChatRaw returned error: %v", err)
+	}
+	if _, leaked := captured["max_completion_tokens"]; leaked {
+		t.Fatalf("max_completion_tokens must not be sent to /chat/completions: %#v", captured)
+	}
+	if captured["max_tokens"] != float64(6144) {
+		t.Fatalf("max_tokens = %#v, want 6144; body=%#v", captured["max_tokens"], captured)
+	}
+	if captured["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice should remain preserved: %#v", captured)
+	}
+}
+
 func TestOpenAIProviderChatRawPreservesCommonToolMatrix(t *testing.T) {
 	var captured map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

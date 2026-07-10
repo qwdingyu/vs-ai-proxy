@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -968,6 +969,18 @@ func TestStreamingMatrixReturnsCorrectFormats(t *testing.T) {
 		t.Fatalf("openai body prefix = %q, want data: {", rec.Body.String())
 	}
 
+	ollamaToOpenAIRec := httptest.NewRecorder()
+	if err := server.streamOllamaToOpenAI(ollamaToOpenAIRec, req, ollamaProv, &provider.ChatRequest{Model: "llama"}, ollamaToOpenAIRec); err != nil {
+		t.Fatalf("streamOllamaToOpenAI returned error: %v", err)
+	}
+	if ct := ollamaToOpenAIRec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("ollama-to-openai content type = %q, want text/event-stream", ct)
+	}
+	ollamaToOpenAIBody := ollamaToOpenAIRec.Body.String()
+	if !strings.HasPrefix(strings.TrimSpace(ollamaToOpenAIBody), "data: {") || !strings.Contains(ollamaToOpenAIBody, "data: [DONE]") {
+		t.Fatalf("ollama-to-openai body should be SSE with DONE, got %q", ollamaToOpenAIBody)
+	}
+
 	ollamaRec := httptest.NewRecorder()
 	if err := server.streamOllamaPassthrough(ollamaRec, req, ollamaProv, &provider.ChatRequest{Model: "llama"}, ollamaRec); err != nil {
 		t.Fatalf("streamOllamaPassthrough returned error: %v", err)
@@ -1797,6 +1810,135 @@ func TestBuildRegistrySeedsConfiguredProviderModelsBeforeDiscovery(t *testing.T)
 	}
 	if candidates[0].UpstreamID != "z-ai/glm-5.2" {
 		t.Fatalf("upstream = %q, want z-ai/glm-5.2", candidates[0].UpstreamID)
+	}
+}
+
+func TestChatCompletionsNormalizesTokenBudgetAliasesBeforeUpstream(t *testing.T) {
+	tests := []struct {
+		name      string
+		stream    bool
+		fieldName string
+		fieldWant float64
+	}{
+		{name: "stream max_output_tokens", stream: true, fieldName: "max_output_tokens", fieldWant: 8192},
+		{name: "nonstream max_completion_tokens", stream: false, fieldName: "max_completion_tokens", fieldWant: 6144},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var captured map[string]any
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/models":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.5"}]}`))
+				case "/v1/chat/completions":
+					if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+						t.Fatalf("decode upstream request: %v", err)
+					}
+					if tt.stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = w.Write([]byte(strings.Join([]string{
+							`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`,
+							`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+							`data: [DONE]`,
+							``,
+						}, "\n")))
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+				default:
+					t.Fatalf("unexpected path: %s", r.URL.Path)
+				}
+			}))
+			defer upstream.Close()
+
+			cfg := &config.AppConfig{
+				Port:         8080,
+				DefaultModel: "gpt-5.5",
+				Providers: []config.ProviderConfig{{
+					ID:      "useai2",
+					Name:    "UseAI2",
+					Type:    "openai",
+					BaseURL: upstream.URL + "/v1",
+					APIKey:  "sk-test",
+					Enabled: true,
+				}},
+				Models: []config.ModelConfig{{Name: "gpt-5.5", ProviderID: "useai2", Enabled: true}},
+			}
+			server := &Server{config: cfg, logger: log.New(nil, log.LevelError, false), store: store.New(10)}
+			server.registry = server.buildRegistry(cfg)
+			handler := withMux(server, func(mux *http.ServeMux) {
+				mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+			})
+
+			body := fmt.Sprintf(`{
+				"model":"gpt-5.5",
+				"stream":%t,
+				%q:%0.f,
+				"messages":[{"role":"user","content":"create a file"}],
+				"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}],
+				"tool_choice":"auto"
+			}`, tt.stream, tt.fieldName, tt.fieldWant)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			if _, leaked := captured["max_output_tokens"]; leaked {
+				t.Fatalf("max_output_tokens leaked to upstream: %#v", captured)
+			}
+			if _, leaked := captured["max_completion_tokens"]; leaked {
+				t.Fatalf("max_completion_tokens leaked to upstream: %#v", captured)
+			}
+			if captured["max_tokens"] != tt.fieldWant || captured["stream"] != tt.stream {
+				t.Fatalf("upstream request not normalized: %#v", captured)
+			}
+			if tools, _ := captured["tools"].([]any); len(tools) != 1 {
+				t.Fatalf("declared tools should be preserved: %#v", captured)
+			}
+		})
+	}
+}
+
+func TestOllamaChatNormalizesTokenBudgetAliasesBeforeProvider(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, &fakeChatResponse{Model: "gpt-5.5", Content: "ok"}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/chat", server.handleOllamaChat)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"stream":false,
+		"messages":[{"role":"user","content":"create a file"}],
+		"options":{"max_output_tokens":8192,"temperature":0.2,"provider_option":true},
+		"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if prov.lastReq == nil || prov.lastReq.MaxTokens == nil || *prov.lastReq.MaxTokens != 8192 {
+		t.Fatalf("max_tokens = %#v, want 8192", prov.lastReq)
+	}
+	if _, leaked := prov.lastReq.OptionsExtra["max_output_tokens"]; leaked {
+		t.Fatalf("max_output_tokens leaked to OptionsExtra: %#v", prov.lastReq.OptionsExtra)
+	}
+	if _, ok := prov.lastReq.OptionsExtra["provider_option"]; !ok {
+		t.Fatalf("provider option should remain preserved: %#v", prov.lastReq.OptionsExtra)
+	}
+	if len(prov.lastReq.Tools) != 1 {
+		t.Fatalf("tools should be preserved: %#v", prov.lastReq)
 	}
 }
 

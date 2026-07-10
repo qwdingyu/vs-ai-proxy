@@ -2,6 +2,7 @@ package converter
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,23 @@ func TestParseOllamaStreamChunkAcceptsSSEDataLine(t *testing.T) {
 	}
 	if chunk["model"] != "llama" {
 		t.Fatalf("unexpected model: %#v", chunk["model"])
+	}
+}
+
+func TestConvertOllamaChunkToOpenAISSEWritesDataLine(t *testing.T) {
+	out, err := ConvertOllamaChunkToOpenAISSE(map[string]any{
+		"model": "llama",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": "hi",
+		},
+		"done": false,
+	}, "llama")
+	if err != nil {
+		t.Fatalf("ConvertOllamaChunkToOpenAISSE returned error: %v", err)
+	}
+	if !strings.HasPrefix(string(out), "data: {") || !strings.HasSuffix(string(out), "\n") {
+		t.Fatalf("converted OpenAI stream chunk must be SSE data line, got %q", string(out))
 	}
 }
 

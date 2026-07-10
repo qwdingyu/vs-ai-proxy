@@ -738,8 +738,8 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				topK := int(v)
 				req.TopK = &topK
 			}
-			if v, ok := options["max_tokens"].(float64); ok {
-				maxTokens := int(v)
+			if v, ok := firstIntOption(options, "max_tokens", "max_completion_tokens", "max_output_tokens"); ok {
+				maxTokens := v
 				req.MaxTokens = &maxTokens
 			}
 			if v, ok := options["reasoning_effort"].(string); ok {
@@ -1003,6 +1003,10 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 	}
 	s.cacheStreamAccumulator(acc)
 	setStreamToolDiagnosticHeader(w, acc)
+	if _, writeErr := io.WriteString(w, "data: [DONE]\n\n"); writeErr != nil {
+		return writeErr
+	}
+	flusher.Flush()
 	return nil
 }
 
@@ -1446,12 +1450,43 @@ func rawMessagesFromMap(src map[string]any, known map[string]struct{}) map[strin
 	return out
 }
 
+func firstIntOption(src map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		value, ok := intOption(src[key])
+		if ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func intOption(value any) (int, bool) {
+	switch typed := value.(type) {
+	case float64:
+		intValue := int(typed)
+		return intValue, typed == float64(intValue)
+	case int:
+		return typed, true
+	case json.Number:
+		int64Value, err := typed.Int64()
+		if err != nil {
+			return 0, false
+		}
+		intValue := int(int64Value)
+		return intValue, int64(intValue) == int64Value
+	default:
+		return 0, false
+	}
+}
+
 func providerOllamaOptionKnownFields() map[string]struct{} {
 	return map[string]struct{}{
-		"temperature":      {},
-		"top_p":            {},
-		"top_k":            {},
-		"max_tokens":       {},
-		"reasoning_effort": {},
+		"temperature":           {},
+		"top_p":                 {},
+		"top_k":                 {},
+		"max_tokens":            {},
+		"max_completion_tokens": {},
+		"max_output_tokens":     {},
+		"reasoning_effort":      {},
 	}
 }

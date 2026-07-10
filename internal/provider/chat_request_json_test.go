@@ -68,6 +68,78 @@ func TestChatRequestKnownFieldsOverrideExtraFields(t *testing.T) {
 	}
 }
 
+func TestChatRequestNormalizesTokenBudgetAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "max_output_tokens",
+			body: `{"model":"gpt-5.5","messages":[],"max_output_tokens":8192}`,
+			want: 8192,
+		},
+		{
+			name: "max_completion_tokens",
+			body: `{"model":"gpt-5.5","messages":[],"max_completion_tokens":6144}`,
+			want: 6144,
+		},
+		{
+			name: "max_tokens wins over aliases",
+			body: `{"model":"gpt-5.5","messages":[],"max_tokens":2048,"max_output_tokens":8192,"max_completion_tokens":6144}`,
+			want: 2048,
+		},
+		{
+			name: "max_completion_tokens wins over max_output_tokens",
+			body: `{"model":"gpt-5.5","messages":[],"max_completion_tokens":6144,"max_output_tokens":8192}`,
+			want: 6144,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req ChatRequest
+			if err := json.Unmarshal([]byte(tt.body), &req); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if req.MaxTokens == nil || *req.MaxTokens != tt.want {
+				t.Fatalf("max_tokens = %v, want %d", req.MaxTokens, tt.want)
+			}
+			if _, leaked := req.Extra["max_output_tokens"]; leaked {
+				t.Fatalf("max_output_tokens should not remain in Extra: %#v", req.Extra)
+			}
+			if _, leaked := req.Extra["max_completion_tokens"]; leaked {
+				t.Fatalf("max_completion_tokens should not remain in Extra: %#v", req.Extra)
+			}
+		})
+	}
+}
+
+func TestChatRequestDropsInvalidTokenBudgetAliases(t *testing.T) {
+	var req ChatRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-5.5",
+		"messages":[],
+		"max_output_tokens":"8192",
+		"max_completion_tokens":8192.5,
+		"provider_option":true
+	}`), &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if req.MaxTokens != nil {
+		t.Fatalf("invalid token aliases should not set max_tokens: %v", *req.MaxTokens)
+	}
+	if _, leaked := req.Extra["max_output_tokens"]; leaked {
+		t.Fatalf("invalid max_output_tokens should not leak through Extra: %#v", req.Extra)
+	}
+	if _, leaked := req.Extra["max_completion_tokens"]; leaked {
+		t.Fatalf("invalid max_completion_tokens should not leak through Extra: %#v", req.Extra)
+	}
+	if _, ok := req.Extra["provider_option"]; !ok {
+		t.Fatalf("unrelated provider extension should be preserved: %#v", req.Extra)
+	}
+}
+
 func TestMessagePreservesUnknownFields(t *testing.T) {
 	var msg Message
 	if err := json.Unmarshal([]byte(`{

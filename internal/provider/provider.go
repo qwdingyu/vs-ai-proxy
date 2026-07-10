@@ -442,11 +442,19 @@ func normalizeOpenAIChatCompletionsRequestBody(body []byte) ([]byte, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
-	if maxOutput, ok := raw["max_output_tokens"]; ok {
+	// OpenAI-compatible 网关（New API、sub2api 等）普遍以 /v1/chat/completions
+	// 接收请求，最稳妥的输出 token 字段是 max_tokens。VS / Copilot 或
+	// 新式 Responses 风格客户端可能发送 max_output_tokens / max_completion_tokens；
+	// 这些别名必须在出 provider 前统一收敛，否则 strict 上游会直接 400。
+	for _, alias := range []string{"max_completion_tokens", "max_output_tokens"} {
+		maxOutput, ok := raw[alias]
+		if !ok {
+			continue
+		}
 		if _, hasMaxTokens := raw["max_tokens"]; !hasMaxTokens {
 			raw["max_tokens"] = maxOutput
 		}
-		delete(raw, "max_output_tokens")
+		delete(raw, alias)
 	}
 	return json.Marshal(raw)
 }

@@ -81,11 +81,11 @@ func ConvertOllamaChunkToOpenAISSE(chunk map[string]any, requestModel string) ([
 		}
 	}
 
-	out, err := json.Marshal(streamChunk)
+	payload, err := json.Marshal(streamChunk)
 	if err != nil {
 		return nil, fmt.Errorf("convert ollama stream chunk to openai failed: %w", err)
 	}
-	return out, nil
+	return []byte("data: " + string(payload) + "\n"), nil
 }
 
 // OpenAI2OllamaChatRequest 将 OpenAI 聊天请求转换为 Ollama chat 请求。
