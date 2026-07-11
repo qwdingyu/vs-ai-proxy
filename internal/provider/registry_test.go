@@ -262,7 +262,7 @@ func TestRegistryResolvesVisualStudioDisplayModelName(t *testing.T) {
 		models:  []string{"deepseek-v4-flash"},
 	}
 
-	registry.Add(&ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 1})
+	registry.Add(&ProviderEntry{Provider: usecpa, Models: usecpa.models, Priority: 1, Aliases: []string{"DEEPSEEK"}})
 	registry.SetModels("usecpa", usecpa.models)
 
 	candidates := registry.ResolveCandidates("DEEPSEEK - deepseek-v4-flash:latest")
@@ -277,6 +277,77 @@ func TestRegistryResolvesVisualStudioDisplayModelName(t *testing.T) {
 	}
 	if got := registry.ResolveModel("DEEPSEEK - deepseek-v4-flash:latest"); got != "deepseek-v4-flash" {
 		t.Fatalf("ResolveModel() = %q, want deepseek-v4-flash", got)
+	}
+}
+
+func TestRegistryDisplayNamePrefersExactProviderModelBeforeBasename(t *testing.T) {
+	registry := NewRegistry("deepseek-v4-flash", time.Minute)
+	deepseek := &fakeProvider{
+		name:    "deepseek",
+		enabled: true,
+		models:  []string{"deepseek/deepseek-v4-flash", "deepseek-v4-flash"},
+	}
+
+	registry.Add(&ProviderEntry{Provider: deepseek, Models: deepseek.models, Priority: 1, Aliases: []string{"deepseek"}})
+	registry.SetModels("deepseek", deepseek.models)
+
+	candidates := registry.ResolveCandidates("deepseek - deepseek-v4-flash")
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].UpstreamID != "deepseek-v4-flash" {
+		t.Fatalf("upstream = %q, want deepseek-v4-flash", candidates[0].UpstreamID)
+	}
+}
+
+func TestRegistryProviderHintPrefersExactBareModelBeforeNamespacedModel(t *testing.T) {
+	registry := NewRegistry("deepseek-v4-flash", time.Minute)
+	deepseek := &fakeProvider{
+		name:    "deepseek",
+		enabled: true,
+		models:  []string{"deepseek/deepseek-v4-flash", "deepseek-v4-flash"},
+	}
+
+	registry.Add(&ProviderEntry{Provider: deepseek, Models: deepseek.models, Priority: 1})
+	registry.SetModels("deepseek", deepseek.models)
+
+	candidates := registry.ResolveCandidates("deepseek/deepseek-v4-flash")
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].UpstreamID != "deepseek-v4-flash" {
+		t.Fatalf("upstream = %q, want exact bare deepseek-v4-flash", candidates[0].UpstreamID)
+	}
+}
+
+func TestRegistryCatalogMappingPrefersExactUpstreamBeforeBasename(t *testing.T) {
+	registry := NewRegistry("deepseek-v4-flash", time.Minute)
+	deepseek := &fakeProvider{name: "deepseek", enabled: true, models: []string{"deepseek/deepseek-v4-flash", "deepseek-v4-flash"}}
+
+	registry.Add(&ProviderEntry{Provider: deepseek, Models: deepseek.models, Priority: 1})
+	registry.SetModels("deepseek", deepseek.models)
+	entry := registry.entries["deepseek"]
+	registry.UpdateModelMappingsWithUpstream(
+		map[string]*ProviderEntry{
+			"deepseek/deepseek-v4-flash": entry,
+			"deepseek-v4-flash":          entry,
+		},
+		map[string]string{
+			"deepseek/deepseek-v4-flash": "deepseek/deepseek-v4-flash",
+			"deepseek-v4-flash":          "deepseek-v4-flash",
+		},
+		map[string][]*ProviderEntry{
+			"deepseek/deepseek-v4-flash": {entry},
+			"deepseek-v4-flash":          {entry},
+		},
+	)
+
+	candidates := registry.ResolveCandidates("deepseek - deepseek-v4-flash")
+	if len(candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1: %#v", len(candidates), candidates)
+	}
+	if candidates[0].UpstreamID != "deepseek-v4-flash" {
+		t.Fatalf("upstream = %q, want exact upstream deepseek-v4-flash", candidates[0].UpstreamID)
 	}
 }
 
@@ -332,7 +403,25 @@ func TestRegistryDisplayNamePrefixPinsProviderWhenModelShared(t *testing.T) {
 	}
 }
 
-func TestRegistryDisplayNamePrefixDoesNotFallbackToAnotherProvider(t *testing.T) {
+func TestRegistryMergeModelsKeepsConfiguredAndDiscoveredModels(t *testing.T) {
+	registry := NewRegistry("", time.Minute)
+	useai := &fakeProvider{name: "useai", enabled: true, models: []string{"gpt-5.5"}}
+
+	registry.Add(&ProviderEntry{Provider: useai, Models: []string{"deepseek-v4-flash"}, Priority: 1, Aliases: []string{"UseAI"}})
+	registry.MergeModels("useai", []string{"gpt-5.5", "step-3.7-flash"})
+
+	for _, requested := range []string{"UseAI - deepseek-v4-flash", "UseAI - gpt-5.5", "UseAI - step-3.7-flash"} {
+		candidates := registry.ResolveCandidates(requested)
+		if len(candidates) != 1 {
+			t.Fatalf("%s candidates len = %d, want 1: %#v", requested, len(candidates), candidates)
+		}
+		if candidates[0].Provider.Provider.Name() != "useai" {
+			t.Fatalf("%s provider = %q, want useai", requested, candidates[0].Provider.Provider.Name())
+		}
+	}
+}
+
+func TestRegistryDisplayNamePrefixFallsBackOnlyToPinnedProvider(t *testing.T) {
 	registry := NewRegistry("step-3.7-flash", time.Minute)
 	useai := &fakeProvider{name: "useai", enabled: true, models: []string{"step-3.7-flash"}}
 	usecpa := &fakeProvider{name: "usecpa", enabled: true, models: []string{"other-model"}}
@@ -343,8 +432,27 @@ func TestRegistryDisplayNamePrefixDoesNotFallbackToAnotherProvider(t *testing.T)
 	registry.SetModels("usecpa", usecpa.models)
 
 	candidates := registry.ResolveCandidates("UseCpa - step-3.7-flash:latest")
+	if len(candidates) != 1 {
+		t.Fatalf("display provider prefix should still pin one provider, got %#v", candidates)
+	}
+	if candidates[0].Provider.Provider.Name() != "usecpa" {
+		t.Fatalf("display provider prefix must not fallback to useai, got %q", candidates[0].Provider.Provider.Name())
+	}
+	if candidates[0].UpstreamID != "step-3.7-flash" {
+		t.Fatalf("upstream = %q, want step-3.7-flash", candidates[0].UpstreamID)
+	}
+}
+
+func TestRegistryUnknownDisplayNamePrefixDoesNotFallbackToOtherProvider(t *testing.T) {
+	registry := NewRegistry("deepseek-v4-flash", time.Minute)
+	deepseek := &fakeProvider{name: "deepseek", enabled: true, models: []string{"deepseek-v4-flash"}}
+
+	registry.Add(&ProviderEntry{Provider: deepseek, Models: deepseek.models, Priority: 1})
+	registry.SetModels("deepseek", deepseek.models)
+
+	candidates := registry.ResolveCandidates("UnknownProvider - deepseek-v4-flash")
 	if len(candidates) != 0 {
-		t.Fatalf("display provider prefix must not fallback to useai when usecpa lacks model: %#v", candidates)
+		t.Fatalf("unknown display provider must not fallback to deepseek: %#v", candidates)
 	}
 }
 

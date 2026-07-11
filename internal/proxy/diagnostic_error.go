@@ -83,8 +83,12 @@ func allCandidatesFailedDiagnostic(requestedModel, resolvedModel string, candida
 	if len(attempts) > 0 {
 		category = attempts[len(attempts)-1].Category
 	}
+	message := "所有候选提供商请求均失败"
+	if candidateCount == 1 {
+		message = "当前提供商请求失败"
+	}
 	return proxyDiagnosticError{
-		Message: "所有候选提供商请求均失败",
+		Message: message,
 		Type:    "upstream_error",
 		Code:    category,
 		Details: proxyDiagnosticDetails{
@@ -92,8 +96,33 @@ func allCandidatesFailedDiagnostic(requestedModel, resolvedModel string, candida
 			ResolvedModel:  resolvedModel,
 			CandidateCount: candidateCount,
 			Attempts:       attempts,
-			Hint:           diagnosticHint(category),
+			Hint:           diagnosticHintForAttempts(category, attempts),
 		},
+	}
+}
+
+func diagnosticHintForAttempts(category string, attempts []attemptDiagnostic) string {
+	hint := diagnosticHint(category)
+	if category != "upstream_payload_too_large" || len(attempts) == 0 {
+		return hint
+	}
+	last := attempts[len(attempts)-1]
+	providerName := strings.TrimSpace(last.Provider)
+	upstreamModel := strings.TrimSpace(last.Upstream)
+	if providerName == "" && upstreamModel == "" {
+		return hint
+	}
+	return hint + " 如果同一请求在其他 provider 可成功，这通常不是代理或 nginx 全局限制，而是当前 provider/channel 对该模型的上下文、工具声明或请求体大小限制；请优先检查 " + providerModelLabel(providerName, upstreamModel) + " 在上游网关中的模型映射、渠道组和 body/context 限制。"
+}
+
+func providerModelLabel(providerName, upstreamModel string) string {
+	switch {
+	case providerName != "" && upstreamModel != "":
+		return providerName + "/" + upstreamModel
+	case providerName != "":
+		return providerName
+	default:
+		return upstreamModel
 	}
 }
 

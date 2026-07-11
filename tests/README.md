@@ -1,0 +1,354 @@
+# 测试脚本说明与使用边界
+
+本文档说明 `tests/` 目录下脚本的目的、适用场景、输出解释和注意事项，避免后续把不同测试混用或误解为“所有场景都已覆盖”。
+
+## 1. 测试分层
+
+本项目目前测试分为四层：
+
+| 层级 | 入口 | 目的 | 是否访问真实上游 |
+| --- | --- | --- | --- |
+| 单元/集成测试 | `go test ./...` | 验证路由、转换、错误分类、API 行为 | 否 |
+| Race 核心测试 | `go test -race ./cmd/server ./internal/proxy ./internal/provider ./internal/config` | 验证核心包并发安全 | 否 |
+| 本地流式冒烟 | `tests/streaming_test.sh`、`tests/streaming_ollama_test.sh` | 验证本地代理流式协议、工具分片、Ollama 兼容流 | 否，脚本启动本地 mock 上游 |
+| 真实上游大请求诊断 | `tests/useai_large_request_diagnostic.sh`、`tests/large_request_matrix_diagnostic.sh` | 验证真实 provider 在 VS/Copilot 风格大上下文工具请求下的行为 | 是 |
+
+不要用某一层测试替代另一层测试：
+
+- Web 管理页小请求成功，不代表 VS/Copilot 大工具请求成功。
+- `go test` 成功，不代表真实上游 key/group/channel 没有限制。
+- 大请求真实上游脚本失败，不一定代表代理 bug，必须看 `request_bytes`、`upstream_bytes` 和 direct/proxy 对照。
+
+## 2. 脚本清单
+
+### 2.1 `streaming_test.sh`
+
+用途：
+
+- 构建当前 `cmd/server`。
+- 启动本地 mock OpenAI-compatible 上游。
+- 启动本地 vs-ai-proxy。
+- 发起流式 `POST /v1/chat/completions`。
+- 验证代理能正确转发 SSE chunk，并以 `STREAMING_OK` 结束。
+
+适用场景：
+
+- 修改 OpenAI 流式代理代码后。
+- 修改 `ChatStream`、SSE 解析、工具调用流式透传后。
+- 发布前基础冒烟。
+
+不适用场景：
+
+- 不能证明真实 `useai`、`deepseek`、`usecpa` 上游可用。
+- 不能证明大上下文请求不会触发上游 413。
+
+运行：
+
+```bash
+bash tests/streaming_test.sh
+```
+
+成功标志：
+
+```text
+STREAMING_OK
+```
+
+### 2.2 `streaming_ollama_test.sh`
+
+用途：
+
+- 构建当前 `cmd/server`。
+- 启动本地 mock Ollama 上游。
+- 验证 Ollama 风格 `/api/chat` 流式响应转换为 OpenAI-compatible SSE。
+- 验证最终 `[DONE]`、usage 和流式内容结构。
+
+适用场景：
+
+- 修改 Ollama provider、Ollama/OpenAI 转换层后。
+- 修改流式输出统一逻辑后。
+- 发布前基础冒烟。
+
+运行：
+
+```bash
+bash tests/streaming_ollama_test.sh
+```
+
+成功标志：
+
+```text
+STREAMING_OLLAMA_OK
+```
+
+### 2.3 `useai_large_request_diagnostic.sh`
+
+用途：
+
+- 生成一个 VS/Copilot 风格的大请求体。
+- 请求体包含工具声明，例如 `create_file`、`apply_patch`、`git`、`powershell`、`get_file` 等。
+- 使用同一个请求分别测试：
+  1. 直连真实上游 provider。
+  2. 经过本地 vs-ai-proxy。
+- 输出 direct/proxy 状态码和代理日志中的 `request_bytes`、`upstream_bytes`、`delta_bytes`。
+
+适用场景：
+
+- 排查“Web 测试页成功，但 VS/Copilot 真实使用失败”。
+- 排查 `413`、`502`、`client_gone`、`context canceled`。
+- 判断代理是否异常放大请求体。
+- 判断是代理 bug，还是上游 provider/channel 限制。
+
+默认参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CONFIG_SOURCE` | `$HOME/.config/vs-ai-proxy/config.json` | 真实配置来源，只读复制到 `.bin` |
+| `PROVIDER_ID` | `useai` | provider 实例 ID |
+| `DISPLAY_PROVIDER` | `UseAI` | VS 展示名前缀 |
+| `MODEL` | `deepseek-v4-flash` | 上游模型名 |
+| `TARGET_BYTES` | `1060000` | 目标请求体大小 |
+| `INJECT_MODEL_BINDING` | `1` | 是否在临时 config 中注入模型绑定；正式对照建议设为 `0` |
+| `PROXY_PORT` | `12346` | 临时代理端口 |
+| `DIRECT_TIMEOUT_SECONDS` | `90` | 直连上游超时 |
+| `PROXY_TIMEOUT_SECONDS` | `120` | 代理请求超时 |
+
+示例：官方 DeepSeek 1.06MB 对照：
+
+```bash
+INJECT_MODEL_BINDING=0 \
+PROVIDER_ID=deepseek \
+DISPLAY_PROVIDER=deepseek \
+MODEL=deepseek-v4-flash \
+TARGET_BYTES=1060000 \
+DIRECT_TIMEOUT_SECONDS=140 \
+PROXY_TIMEOUT_SECONDS=160 \
+tests/useai_large_request_diagnostic.sh
+```
+
+示例：UseAI 1.06MB 对照：
+
+```bash
+INJECT_MODEL_BINDING=0 \
+PROVIDER_ID=useai \
+DISPLAY_PROVIDER=UseAI \
+MODEL=deepseek-v4-flash \
+TARGET_BYTES=1060000 \
+DIRECT_TIMEOUT_SECONDS=140 \
+PROXY_TIMEOUT_SECONDS=160 \
+tests/useai_large_request_diagnostic.sh
+```
+
+输出文件：
+
+```text
+.bin/useai-large-diagnostic/result.json
+.bin/useai-large-diagnostic/logs.json
+.bin/useai-large-diagnostic/direct.out
+.bin/useai-large-diagnostic/proxy.out
+```
+
+关键字段解释：
+
+| 字段 | 含义 | 如何判断 |
+| --- | --- | --- |
+| `direct_status` | 直连上游状态码 | 如果直连失败，优先查上游 provider/channel |
+| `proxy_status` | 经过代理状态码 | 与 direct 对比判断代理是否引入差异 |
+| `request_bytes` | 客户端进入代理的请求体大小 | VS/Copilot 真实大上下文通常显著大于 Web 测试页 |
+| `upstream_bytes` | 代理发给上游的 JSON 请求体大小 | 用于判断代理是否异常膨胀 |
+| `delta_bytes` | `upstream_bytes - request_bytes` | 很小表示代理没有明显放大 |
+| `error_code` | 代理分类后的错误 | 例如 `upstream_payload_too_large`、`client_deadline_reached` |
+
+判断规则：
+
+- `direct=200` 且 `proxy=200`：代理和上游都可承载该请求。
+- `direct=413/502` 且 `proxy=502`，同时 `delta_bytes` 很小：优先判定为上游链路限制，不是代理体积膨胀。
+- `direct=200` 但 `proxy!=200`：重点排查代理路由、参数转换、模型名映射、stream 处理。
+- `upstream_bytes` 明显大于 `request_bytes`：重点排查 request transformer、reasoning 注入、参数覆盖。
+
+### 2.4 `large_request_matrix_diagnostic.sh`
+
+用途：
+
+- 批量复用 `useai_large_request_diagnostic.sh`。
+- 一次性比较多个 provider、多个模型、多个请求体大小。
+- 避免每次临时写一堆 curl/Python，降低误判和漂移。
+
+默认矩阵：
+
+```text
+deepseek|deepseek|deepseek-v4-flash
+useai|UseAI|deepseek-v4-flash
+```
+
+默认大小：
+
+```text
+50000 200000 500000 800000 1060000
+```
+
+运行默认矩阵：
+
+```bash
+tests/large_request_matrix_diagnostic.sh
+```
+
+只跑关键 1.06MB：
+
+```bash
+SIZES='1060000' tests/large_request_matrix_diagnostic.sh
+```
+
+自定义真实配置矩阵：
+
+```bash
+SIZES='50000' \
+CASES=$'deepseek|deepseek|deepseek-v4-flash\nuseai|UseAI|deepseek-v4-flash\nusecpa|UseCpa|step-3.7-flash\nuseai2|UseAI2|gpt-5.5' \
+tests/large_request_matrix_diagnostic.sh
+```
+
+结果文件：
+
+```text
+.bin/large-request-matrix/results.jsonl
+.bin/large-request-matrix/summary.json
+```
+
+摘要示例：
+
+```text
+deepseek deepseek-v4-flash 1060000 direct=200 proxy=200 code=- req=1077092 up=1077127 delta=35
+useai    deepseek-v4-flash 1060000 direct=502 proxy=502 code=upstream_payload_too_large req=1077089 up=1077099 delta=10
+```
+
+## 3. 典型使用场景
+
+### 3.1 发布前本地基础验证
+
+```bash
+go test ./... -count=1
+go test -race ./cmd/server ./internal/proxy ./internal/provider ./internal/config -count=1
+bash tests/streaming_test.sh
+bash tests/streaming_ollama_test.sh
+```
+
+适合每次 release 前执行。
+
+### 3.2 排查工具调用异常
+
+先跑：
+
+```bash
+go test ./internal/provider ./internal/proxy -count=1
+bash tests/streaming_test.sh
+```
+
+如果真实 VS/Copilot 仍失败，再跑大请求：
+
+```bash
+SIZES='50000 800000 1060000' \
+CASES=$'deepseek|deepseek|deepseek-v4-flash\nuseai|UseAI|deepseek-v4-flash' \
+tests/large_request_matrix_diagnostic.sh
+```
+
+### 3.3 排查 provider/model 张冠李戴
+
+观察矩阵输出中的 `provider` 和 `upstream`：
+
+- `deepseek|deepseek|deepseek-v4-flash` 应该 upstream=`deepseek-v4-flash`。
+- `useai|UseAI|deepseek-v4-flash` 应该 upstream=`deepseek-v4-flash`。
+- `usecpa|UseCpa|step-3.7-flash` 应该 upstream=`step-3.7-flash`。
+- `useai2|UseAI2|gpt-5.5` 应该 upstream=`gpt-5.5`。
+
+如果 `upstream` 变成 `deepseek/deepseek-v4-flash`、`z-ai/...` 或其他非预期值，说明模型解析链路可能回归。
+
+### 3.4 排查 413 / 大上下文失败
+
+至少比较小、中、大三个档位：
+
+```bash
+SIZES='50000 800000 1060000' tests/large_request_matrix_diagnostic.sh
+```
+
+结论示例：
+
+- 50KB 成功，800KB 成功，1.06MB 失败：通常是上游链路大小阈值。
+- 官方 provider 1.06MB 成功，聚合 provider 1.06MB 失败：优先查聚合网关的 body/context/channel 限制。
+- direct 失败且 proxy 失败，`delta_bytes` 很小：不要优先怀疑代理体积膨胀。
+
+## 4. 代理相对直连的负担与效率评估
+
+### 4.1 客观结论
+
+vs-ai-proxy 一定会比直连多一层本地 HTTP 转发和 JSON 处理，因此理论上不可能比直连更快。但在真实 VS/Copilot 场景中，主要耗时通常来自：
+
+1. 上游模型首 token 延迟。
+2. 上游推理时间。
+3. 网络链路和聚合网关排队。
+4. 大上下文上传时间。
+5. 客户端等待上限。
+
+本地代理自身的额外开销通常很小，更多是毫秒级到几十毫秒级；对几秒到几十秒的模型请求来说，通常不是主要瓶颈。
+
+### 4.2 从当前观测数据看
+
+本轮大请求脚本显示：
+
+- 官方 deepseek 1.06MB：`request_bytes=1077092`，`upstream_bytes=1077127`，`delta_bytes=35`。
+- UseAI 1.06MB：`request_bytes=1077089`，`upstream_bytes=1077099`，`delta_bytes=10`。
+- 小请求矩阵中代理正常返回，`delta_bytes` 约 `9~35` 字节。
+
+这说明：
+
+- 代理没有明显放大请求体。
+- 代理没有给大请求额外增加大量 payload。
+- 当前大请求失败的主要矛盾不是“代理太重”，而是上游 provider/channel 对大请求的限制或波动。
+
+### 4.3 代理会增加哪些成本
+
+| 成本 | 说明 | 大致影响 |
+| --- | --- | --- |
+| 本地 HTTP 入站/出站 | VS -> proxy -> upstream | 通常很小 |
+| JSON 解码/编码 | 需要读取请求、治理参数、记录日志 | 与请求体大小相关，1MB 请求也通常远低于模型耗时 |
+| 流式转发 | 读取上游 SSE 并写回客户端 | 主要是 I/O 转发，通常不是瓶颈 |
+| 日志记录 | 记录请求状态、字节数、错误分类 | 可控，必要的可观测性成本 |
+| 参数治理 | 过滤/转换不兼容参数 | 换来兼容性，成本小 |
+
+### 4.4 代理带来的收益
+
+| 收益 | 说明 |
+| --- | --- |
+| 模型展示名适配 | 支持 VS/Copilot 的 `Provider - model` 模型名 |
+| 多 provider 管理 | 同一端口聚合官方、UseAI、UseCpa、Ollama 等 |
+| 工具调用兼容 | 治理 OpenAI tool_calls、legacy function_call、流式工具分片、DSML 方言 |
+| 参数兼容 | 处理 `max_tokens`、`max_output_tokens`、`reasoning_effort` 等模型差异 |
+| 错误分类 | 区分 413、429、client_gone、client_deadline、upstream_server_error |
+| 可观测性 | 记录 provider、upstream、request_bytes、upstream_bytes、tools |
+| 防误路由 | provider 展示名前缀固定路由，避免跨 provider 张冠李戴 |
+
+### 4.5 是否“加重负担”的评判
+
+客观评判：
+
+- 如果只是普通 OpenAI-compatible 单 provider、小请求聊天，直连最轻，代理不是必要路径。
+- 如果目标是 Visual Studio Copilot BYOM、工具调用、多 provider、new-api/sub2api 兼容、错误可观测，代理带来的收益明显大于本地转发开销。
+- 当前已观测的主要失败点不是代理性能开销，而是上游 provider/channel 的大请求限制、超时、网关波动和模型参数兼容。
+- 对用户体验来说，代理最重要的职责不是“零开销”，而是“稳定、可诊断、少误路由、工具调用正确”。
+
+### 4.6 后续性能观测建议
+
+如果后续要量化“比直连慢多少”，建议增加固定基准：
+
+1. 同一 provider、同一模型、同一请求体。
+2. 分别测 direct 和 proxy。
+3. 记录：
+   - total elapsed
+   - time to first byte / first SSE chunk
+   - request_bytes
+   - upstream_bytes
+   - status code
+   - error_code
+4. 每组至少跑 5 次，取中位数，不要用单次结果判断。
+5. 对小请求和大请求分别统计。
+
+现有 `useai_large_request_diagnostic.sh` 已具备 direct/proxy 对照能力，但它目前主要用于功能和限制诊断，不是严格性能 benchmark。若要做严谨性能结论，应新增专门 benchmark 脚本，避免和故障诊断混用。

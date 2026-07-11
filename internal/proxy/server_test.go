@@ -100,6 +100,18 @@ func TestLoggingMiddlewareCapturesProviderAndModelHeaders(t *testing.T) {
 	}
 }
 
+func TestSetUpstreamRequestBytesRecordsSerializedProviderBodySize(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &responseWriter{ResponseWriter: rec}
+	req := &provider.ChatRequest{Model: "gpt-test", Messages: []provider.Message{{Role: "user", Content: "hi"}}, Stream: true}
+
+	setUpstreamRequestBytes(rw, req)
+
+	if rw.upstreamBytes <= 0 {
+		t.Fatalf("upstream bytes = %d, want positive", rw.upstreamBytes)
+	}
+}
+
 func TestLoggingMiddlewareMarksClientGoneAfterPartialStream(t *testing.T) {
 	st := store.New(10)
 	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}

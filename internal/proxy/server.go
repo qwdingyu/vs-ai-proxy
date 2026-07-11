@@ -224,9 +224,51 @@ func (s *Server) refreshModels(prov provider.Provider, entry *provider.ProviderE
 		return
 	}
 
-	s.registry.SetModels(prov.Name(), models)
+	// /models 是运行态发现结果，不应覆盖用户在 config.json / Web 导入中明确绑定的模型。
+	// 一些上游网关会按 key/group/User-Agent 返回不同模型列表；若直接覆盖，VS 已选择的
+	// “Provider - model” 会在启动后突然无法路由，导致大请求还没到上游就失败。
+	models = mergeProviderModels(s.configuredModelsForProviderName(prov.Name()), models)
+	s.registry.MergeModels(prov.Name(), models)
 
 	s.logger.Info("提供商 %s 发现 %d 个模型", prov.Name(), len(models))
+}
+
+func (s *Server) configuredModelsForProviderName(providerName string) []string {
+	cfg, _, _ := s.snapshot()
+	if cfg == nil {
+		return nil
+	}
+	for _, p := range cfg.Providers {
+		p = config.NormalizeProvider(p)
+		if strings.EqualFold(config.ProviderKey(p), providerName) || strings.EqualFold(strings.TrimSpace(p.Name), providerName) {
+			return configuredModelsForProvider(cfg, p)
+		}
+	}
+	return nil
+}
+
+func mergeProviderModels(configured []string, discovered []string) []string {
+	out := make([]string, 0, len(configured)+len(discovered))
+	seen := map[string]struct{}{}
+	appendModel := func(model string) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	for _, model := range configured {
+		appendModel(model)
+	}
+	for _, model := range discovered {
+		appendModel(model)
+	}
+	return out
 }
 
 // Handler 返回代理协议处理器。
@@ -340,6 +382,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			Model:         model,
 			Upstream:      upstream,
 			RequestBytes:  r.ContentLength,
+			UpstreamBytes: ww.upstreamBytes,
 			StatusCode:    ww.statusCode,
 			ElapsedMs:     elapsed,
 			IsSuccess:     ww.statusCode < 400,
@@ -418,6 +461,7 @@ type responseWriter struct {
 	provider      string
 	model         string
 	upstream      string
+	upstreamBytes int64
 	requestTools  string
 	responseTools string
 	fallbackMode  string
@@ -460,6 +504,14 @@ func setResponseLogFields(w http.ResponseWriter, provider, model, upstream strin
 		}
 		if upstream != "" {
 			rw.upstream = upstream
+		}
+	}
+}
+
+func setUpstreamRequestBytes(w http.ResponseWriter, req *provider.ChatRequest) {
+	if rw, ok := w.(*responseWriter); ok && req != nil {
+		if n, err := provider.OpenAIChatCompletionsRequestBytes(req); err == nil {
+			rw.upstreamBytes = int64(n)
 		}
 	}
 }
@@ -577,6 +629,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				s.applyProfileDefaults(req, profile, prov)
 			}
 		}
+		setUpstreamRequestBytes(w, req)
 		ctx, cancel := requestContextWithTimeout(
 			r.Context(),
 			modelTimeoutSeconds(cfg, modelName, modelID, prov.Name(), profile, hasProfile),
@@ -833,6 +886,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				s.applyProfileDefaults(req, profile, prov)
 			}
 		}
+		setUpstreamRequestBytes(w, req)
 		ctx, cancel := requestContextWithTimeout(
 			r.Context(),
 			modelTimeoutSeconds(cfg, modelName, modelID, prov.Name(), profile, hasProfile),

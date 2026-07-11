@@ -146,7 +146,7 @@ func (r *Registry) resolveDisplayNameCandidatesLocked(model string) ([]Candidate
 	}
 	entry := r.entryByNameLocked(providerDisplay)
 	if entry == nil || entry.Provider == nil {
-		return nil, false
+		return nil, true
 	}
 	if !entry.Provider.IsEnabled() {
 		return nil, true
@@ -154,7 +154,16 @@ func (r *Registry) resolveDisplayNameCandidatesLocked(model string) ([]Candidate
 	if candidate, ok := r.candidateForEntryModelLocked(entry, displayModel); ok {
 		return []Candidate{candidate}, true
 	}
-	return nil, true
+
+	// VS/Copilot 的模型名已经带有 provider 展示前缀时，用户意图是“固定使用该 provider”。
+	// 本地模型缓存可能尚未完成 /models 刷新，或者网关按 key/group 返回动态模型列表；此时不能
+	// 因本地未缓存就改路由到其他 provider，也不应直接判定不可路由。安全做法是只向被点名的
+	// provider 透传展示名前缀后的模型名，让上游给出权威结果。
+	upstream := StripModelTag(strings.TrimSpace(displayModel))
+	if upstream == "" {
+		return nil, true
+	}
+	return []Candidate{{Provider: entry, UpstreamID: upstream, ModelID: upstream, Priority: entry.Priority}}, true
 }
 
 // RecordCandidateSuccess 记录 provider 成功请求，用于同优先级内健康排序。
@@ -361,13 +370,13 @@ func (r *Registry) resolveProviderHintLocked(clean string) (*ProviderEntry, stri
 		return nil, "", false
 	}
 
-	if owner := r.modelToProvider[clean]; owner != nil && sameProvider(owner, entry) {
-		return entry, clean, true
-	}
-
 	bare := clean[slash+1:]
 	if owner := r.modelToProvider[bare]; owner != nil && sameProvider(owner, entry) {
 		return entry, bare, true
+	}
+
+	if owner := r.modelToProvider[clean]; owner != nil && sameProvider(owner, entry) {
+		return entry, clean, true
 	}
 
 	for model, owner := range r.modelToProvider {
@@ -391,7 +400,16 @@ func (r *Registry) candidateForEntryModelLocked(entry *ProviderEntry, requested 
 		if upstream == "" {
 			continue
 		}
-		if strings.EqualFold(upstream, requested) || strings.EqualFold(ModelBasename(upstream), requested) {
+		if strings.EqualFold(upstream, requested) {
+			return Candidate{Provider: entry, UpstreamID: upstream, ModelID: upstream, Priority: entry.Priority}, true
+		}
+	}
+	for _, model := range entry.Models {
+		upstream := strings.TrimSpace(model)
+		if upstream == "" {
+			continue
+		}
+		if strings.EqualFold(ModelBasename(upstream), requested) {
 			return Candidate{Provider: entry, UpstreamID: upstream, ModelID: upstream, Priority: entry.Priority}, true
 		}
 	}
@@ -403,7 +421,19 @@ func (r *Registry) candidateForEntryModelLocked(entry *ProviderEntry, requested 
 		if upstream == "" {
 			upstream = strings.TrimSpace(model)
 		}
-		if strings.EqualFold(model, requested) || strings.EqualFold(upstream, requested) || strings.EqualFold(ModelBasename(upstream), requested) {
+		if strings.EqualFold(model, requested) || strings.EqualFold(upstream, requested) {
+			return Candidate{Provider: entry, UpstreamID: upstream, ModelID: upstream, Priority: entry.Priority}, true
+		}
+	}
+	for model, owner := range r.modelToProvider {
+		if owner == nil || !sameProvider(owner, entry) {
+			continue
+		}
+		upstream := strings.TrimSpace(r.modelToUpstream[model])
+		if upstream == "" {
+			upstream = strings.TrimSpace(model)
+		}
+		if strings.EqualFold(ModelBasename(upstream), requested) {
 			return Candidate{Provider: entry, UpstreamID: upstream, ModelID: upstream, Priority: entry.Priority}, true
 		}
 	}
@@ -705,6 +735,23 @@ func (r *Registry) SetModels(providerName string, models []string) {
 	r.modelsLastRefresh = time.Now()
 }
 
+// MergeModels 更新指定 provider 的模型列表，同时保留启动时由 config.json 注入的种子模型。
+// 某些网关的 /models 会按 key/group/WAF 返回不完整列表；刷新结果只能补充，不能抹掉
+// 用户已导入并绑定到 provider 的模型，否则 VS 已保存的展示模型会突然无法路由。
+func (r *Registry) MergeModels(providerName string, models []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.entries[providerName]
+	if !ok {
+		return
+	}
+
+	entry.Models = mergeModels(entry.Models, models)
+	r.rebuildModelMappingsLocked()
+	r.modelsLastRefresh = time.Now()
+}
+
 // NeedRefresh 判断是否需要刷新模型
 func (r *Registry) NeedRefresh() bool {
 	r.mu.RLock()
@@ -816,7 +863,31 @@ func (r *Registry) refreshModels(entry *ProviderEntry) {
 		return
 	}
 
-	r.SetModels(entry.Provider.Name(), models)
+	r.MergeModels(entry.Provider.Name(), models)
+}
+
+func mergeModels(existing []string, discovered []string) []string {
+	out := make([]string, 0, len(existing)+len(discovered))
+	seen := map[string]struct{}{}
+	appendModel := func(model string) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	for _, model := range existing {
+		appendModel(model)
+	}
+	for _, model := range discovered {
+		appendModel(model)
+	}
+	return out
 }
 
 func (r *Registry) rebuildModelMappingsLocked() {

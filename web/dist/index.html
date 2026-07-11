@@ -590,7 +590,8 @@
       const message = escapeHTML(log.error_message || '请求失败');
       const hint = log.error_hint ? `&#10;建议: ${escapeHTML(log.error_hint)}` : '';
       const requestSize = Number(log.request_bytes || 0) > 0 ? `&#10;请求体: ${formatBytes(log.request_bytes)}` : '';
-      return `<span class="badge warn" title="${message}${hint}${requestSize}">${code}</span>`;
+      const upstreamSize = Number(log.upstream_bytes || 0) > 0 ? `&#10;上游体: ${formatBytes(log.upstream_bytes)}` : '';
+      return `<span class="badge warn" title="${message}${hint}${requestSize}${upstreamSize}">${code}</span>`;
     };
     const formatBytes = (bytes) => {
       const n = Number(bytes || 0);

@@ -70,3 +70,22 @@ func TestDiagnosticHintCoversSpecificUpstreamCategories(t *testing.T) {
 		}
 	}
 }
+
+func TestPayloadTooLargeHintMentionsProviderSpecificLimit(t *testing.T) {
+	diag := allCandidatesFailedDiagnostic("UseAI - deepseek-v4-flash", "deepseek-v4-flash", 1, []attemptDiagnostic{{
+		Provider: "useai",
+		Upstream: "deepseek-v4-flash",
+		Category: "upstream_payload_too_large",
+		Message:  "API 错误 413",
+	}})
+
+	if diag.Message != "当前提供商请求失败" {
+		t.Fatalf("single-candidate message = %q, want 当前提供商请求失败", diag.Message)
+	}
+	if !strings.Contains(diag.Details.Hint, "不是代理或 nginx 全局限制") {
+		t.Fatalf("hint should avoid global nginx misdiagnosis: %q", diag.Details.Hint)
+	}
+	if !strings.Contains(diag.Details.Hint, "useai/deepseek-v4-flash") {
+		t.Fatalf("hint should identify provider/model: %q", diag.Details.Hint)
+	}
+}

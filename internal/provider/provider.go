@@ -461,6 +461,14 @@ func marshalOpenAIChatCompletionsRequest(req *ChatRequest) ([]byte, error) {
 	return normalizeOpenAIChatCompletionsRequestBody(body)
 }
 
+func OpenAIChatCompletionsRequestBytes(req *ChatRequest) (int, error) {
+	body, err := marshalOpenAIChatCompletionsRequest(req)
+	if err != nil {
+		return 0, err
+	}
+	return len(body), nil
+}
+
 func normalizeOpenAIChatCompletionsRequestBody(body []byte) ([]byte, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {

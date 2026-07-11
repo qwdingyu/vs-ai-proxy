@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
@@ -204,6 +205,53 @@ func TestInjectCachedReasoningByToolCallKey(t *testing.T) {
 
 	if req.Messages[0].Reasoning != "tool reasoning" {
 		t.Fatalf("reasoning = %q, want tool reasoning", req.Messages[0].Reasoning)
+	}
+}
+
+func TestTransformRequestDoesNotInjectCachedReasoningForUseAIGateway(t *testing.T) {
+	server := &Server{config: &config.AppConfig{}, reasoningCache: newReasoningCache()}
+	server.reasoningCache.Set("assistant:0", "cached reasoning")
+	req := &provider.ChatRequest{Model: "deepseek-v4-flash", Messages: []provider.Message{{Role: "assistant"}}}
+	prov := provider.NewOpenAIProviderWithCapability("useai", "useai", "sk-test", "https://api.eforge.xyz/v1", true, 0)
+
+	server.transformRequest(server.config, req, "UseAI - deepseek-v4-flash", prov)
+
+	if req.Messages[0].Reasoning != "" {
+		t.Fatalf("useai gateway must not receive cached reasoning_content, got %q", req.Messages[0].Reasoning)
+	}
+}
+
+func TestTransformRequestInjectsCachedReasoningForDirectReasoningProvider(t *testing.T) {
+	server := &Server{config: &config.AppConfig{}, reasoningCache: newReasoningCache()}
+	server.reasoningCache.Set("assistant:0", "cached reasoning")
+	req := &provider.ChatRequest{Model: "deepseek-v4-flash", Messages: []provider.Message{{Role: "assistant"}}}
+	prov := provider.NewOpenAIProviderWithCapability("deepseek", "deepseek", "sk-test", "https://api.deepseek.com", true, 0)
+
+	server.transformRequest(server.config, req, "deepseek - deepseek-v4-flash", prov)
+
+	if req.Messages[0].Reasoning != "cached reasoning" {
+		t.Fatalf("direct reasoning provider should keep cached reasoning_content, got %q", req.Messages[0].Reasoning)
+	}
+}
+
+func TestTransformRequestAvoidsBodyGrowthFromCachedReasoningOnUseAI(t *testing.T) {
+	server := &Server{config: &config.AppConfig{}, reasoningCache: newReasoningCache()}
+	server.reasoningCache.Set("assistant:0", strings.Repeat("reasoning ", 10_000))
+	req := &provider.ChatRequest{Model: "deepseek-v4-flash", Messages: []provider.Message{{Role: "assistant"}}}
+	prov := provider.NewOpenAIProviderWithCapability("useai", "useai", "sk-test", "https://api.eforge.xyz/v1", true, 0)
+
+	before, err := provider.OpenAIChatCompletionsRequestBytes(req)
+	if err != nil {
+		t.Fatalf("before bytes: %v", err)
+	}
+	server.transformRequest(server.config, req, "UseAI - deepseek-v4-flash", prov)
+	after, err := provider.OpenAIChatCompletionsRequestBytes(req)
+	if err != nil {
+		t.Fatalf("after bytes: %v", err)
+	}
+
+	if after-before > 1024 {
+		t.Fatalf("useai request grew by %d bytes after transform; cached reasoning should not be injected", after-before)
 	}
 }
 

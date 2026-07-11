@@ -1771,7 +1771,7 @@ func TestChatCompletionsAcceptsVisualStudioDisplayModelName(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		strings.NewReader(`{"model":"DEEPSEEK - deepseek-v4-flash:latest","messages":[{"role":"user","content":"ping"}]}`))
+		strings.NewReader(`{"model":"usecpa - deepseek-v4-flash:latest","messages":[{"role":"user","content":"ping"}]}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -1788,6 +1788,28 @@ func TestChatCompletionsAcceptsVisualStudioDisplayModelName(t *testing.T) {
 	}
 	if prov.lastReq == nil || prov.lastReq.Model != "deepseek-v4-flash" {
 		t.Fatalf("provider request model = %#v, want deepseek-v4-flash", prov.lastReq)
+	}
+}
+
+func TestChatCompletionsRejectsUnknownVisualStudioDisplayProvider(t *testing.T) {
+	prov := newFakeProvider("usecpa", true, []string{"deepseek-v4-flash"}, &fakeChatResponse{Model: "deepseek-v4-flash", Content: "pong"}, "")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"UnknownProvider - deepseek-v4-flash:latest","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if prov.lastReq != nil {
+		t.Fatalf("unknown display provider must not call usecpa: %#v", prov.lastReq)
 	}
 }
 
@@ -1878,6 +1900,18 @@ func TestBuildRegistrySeedsConfiguredProviderModelsBeforeDiscovery(t *testing.T)
 	}
 	if candidates[0].UpstreamID != "z-ai/glm-5.2" {
 		t.Fatalf("upstream = %q, want z-ai/glm-5.2", candidates[0].UpstreamID)
+	}
+}
+
+func TestMergeProviderModelsKeepsConfiguredModelsAfterDiscovery(t *testing.T) {
+	merged := mergeProviderModels(
+		[]string{"deepseek-v4-flash", "z-ai/glm-5.2"},
+		[]string{"gpt-5.5", "DEEPSEEK-V4-FLASH", "step-3.7-flash"},
+	)
+
+	want := []string{"deepseek-v4-flash", "z-ai/glm-5.2", "gpt-5.5", "step-3.7-flash"}
+	if strings.Join(merged, ",") != strings.Join(want, ",") {
+		t.Fatalf("merged = %#v, want %#v", merged, want)
 	}
 }
 
