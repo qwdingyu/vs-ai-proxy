@@ -56,6 +56,19 @@ func TestParseDSMLToolCallsRejectsUndeclaredTools(t *testing.T) {
 	}
 }
 
+func TestParseDSMLToolCallsCanonicalizesRunTestsWhenTerminalToolDeclared(t *testing.T) {
+	content := `<｜DSML｜tool_calls><｜DSML｜invoke name="run_tests"><｜DSML｜parameter name="command">go test ./...</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`
+
+	calls, cleaned := parseDSMLToolCalls(content, map[string]struct{}{"powershell": {}})
+
+	if len(calls) != 1 || calls[0].Function.Name != "powershell" {
+		t.Fatalf("run_tests should canonicalize to declared powershell tool: %#v", calls)
+	}
+	if strings.Contains(cleaned, "DSML") {
+		t.Fatalf("DSML block should be removed after conversion: %q", cleaned)
+	}
+}
+
 func TestParseDSMLToolCallsRejectsWholeBlockWhenAnyToolIsUndeclared(t *testing.T) {
 	content := `<｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_file"><｜DSML｜parameter name="filename">a.cs</｜DSML｜parameter></｜DSML｜invoke>

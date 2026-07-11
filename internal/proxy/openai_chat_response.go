@@ -152,6 +152,13 @@ func collectOpenAIStreamReader(stream io.Reader, model string, allowedTools map[
 }
 
 func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse, allowedTools map[string]struct{}) {
+	if resp != nil {
+		for i := range resp.Choices {
+			msg := &resp.Choices[i].Message
+			canonicalizeProviderToolCallNames(msg.ToolCalls, allowedTools)
+			canonicalizeFunctionCallName(msg.FunctionCall, allowedTools)
+		}
+	}
 	normalizeDSMLToolCallsInChatResponse(resp, allowedTools)
 }
 
@@ -175,6 +182,9 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 			continue
 		}
 		if calls, ok := message["tool_calls"].([]any); ok && len(calls) > 0 {
+			if canonicalizeRawToolCallNames(calls, allowedTools) {
+				changed = true
+			}
 			kept, removed := sanitizeRawToolCalls(calls, allowedTools)
 			if len(removed) > 0 {
 				if len(kept) > 0 {
@@ -189,6 +199,9 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 			continue
 		}
 		if functionCall, ok := message["function_call"].(map[string]any); ok && functionCall != nil {
+			if canonicalizeRawLegacyFunctionCall(functionCall, allowedTools) {
+				changed = true
+			}
 			name, _ := functionCall["name"].(string)
 			if !isAllowedDSMLTool(name, allowedTools) {
 				delete(message, "function_call")
@@ -512,6 +525,9 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 			continue
 		}
 		if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
+			if canonicalizeRawToolCallNames(calls, s.allowedTools) {
+				changed = true
+			}
 			kept, removed, dropped := s.sanitizeDeltaToolCalls(choiceIndex, calls)
 			if len(removed) > 0 || dropped {
 				if len(kept) > 0 {
@@ -526,6 +542,9 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 			}
 		}
 		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
+			if canonicalizeRawLegacyFunctionCall(functionCall, s.allowedTools) {
+				changed = true
+			}
 			removed := s.sanitizeLegacyFunctionCall(choiceIndex, functionCall)
 			if len(removed) > 0 {
 				delete(delta, "function_call")

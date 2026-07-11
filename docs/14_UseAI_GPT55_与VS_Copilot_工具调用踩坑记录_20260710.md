@@ -611,14 +611,14 @@ VS Copilot 的真实请求可能同时覆盖以下形态：
 
 ### 当前最终策略
 
-当前实现采用统一的安全边界：**响应里只有当前请求显式声明过的工具，才允许继续以可执行工具调用形式透传给下游。**
+当前实现采用统一的稳定策略：**标准 OpenAI `tool_calls` / legacy `function_call` 默认透传，不再因为代理识别不到声明而删除工具；DSML 文本方言和工具别名归一化只会转换到当前请求已声明的真实工具。**
 
 允许工具来源只有两个：
 
 1. OpenAI `tools[].function.name`
 2. legacy `functions[].name`
 
-如果请求没有声明任何工具，则响应里的标准 `tool_calls`、legacy `function_call`、DSML 可执行转换结果都不得透传为可执行工具。
+如果请求没有声明任何工具，标准 `tool_calls` / legacy `function_call` 仍保持原样透传，避免代理误删；但 DSML 文本方言不会被转换为可执行工具，工具别名也不会被映射到不存在的目标工具。
 
 ### v0.2.27 修复点
 
@@ -853,3 +853,85 @@ Windows 后台替换脚本启动成功后，主进程必须主动退出，让脚
 - `.bak-*` 只有替换真正发生后才会生成。
 - `.new` 存在只代表新版已暂存，不代表替换已完成。
 - 自动更新不应只提示“当前进程退出后替换”，而必须在自动更新路径主动触发退出，否则脚本会一直等待。
+
+## 2026-07-11 追加：`run_tests` 等非 VS 原生工具名的兼容策略
+
+### 现象
+
+用户反馈 VS Studio Copilot 开发过程中提示“无法运行 `run_tests`”。这类问题与之前 `create_file`、`powershell`、`git` 不完全相同：
+
+- `create_file`、`powershell`、`git` 通常是 VS/Copilot 请求里已经声明的真实工具。
+- `run_tests` 更像模型从其他 Agent/IDE 方言中学到的“语义工具名”，VS/Copilot 真实工具列表里未必存在同名工具。
+- 如果代理盲目把 `run_tests` 加入请求工具声明，等于伪造客户端能力，VS 端仍可能无法执行，甚至造成更难排查的问题。
+
+### 最佳实践
+
+不能把所有常见命令名都直接补进 `tools`。代理应遵循三条原则：
+
+1. **不扩权**：只使用客户端请求中已经声明的工具，不能凭空新增可执行工具。
+2. **语义别名**：当模型返回 `run_tests`、`shell`、`write_file` 等非 VS 原生名字时，只在目标工具已声明时归一化到真实工具。
+3. **稳定透传**：如果没有可匹配的真实工具，保留原始 tool call，不在代理层删除或改成 `<empty>`，让日志和客户端能看到真实问题。
+
+### 当前实现
+
+新增安全工具别名层：
+
+| 模型可能返回 | 仅当已声明以下工具时才映射 |
+| --- | --- |
+| `run_tests` / `run_test` / `test` | `powershell`、`terminal`、`run_in_terminal` |
+| `run_command` / `execute_command` / `exec` | `powershell`、`terminal`、`run_in_terminal` |
+| `shell` / `bash` / `cmd` / `command_prompt` / `execute_shell` | `powershell`、`terminal`、`run_in_terminal` |
+| `terminal_command` / `run_terminal_cmd` | `powershell`、`terminal`、`run_in_terminal` |
+| `install_package` / `build_project` / `run_build` | `powershell`、`terminal`、`run_in_terminal` |
+| `dotnet_build` / `dotnet_test` | `powershell`、`terminal`、`run_in_terminal` |
+| `npm_install` / `npm_test` / `npm_run` | `powershell`、`terminal`、`run_in_terminal` |
+| `run_lint` / `run_formatter` / `format_code` | `powershell`、`terminal`、`run_in_terminal` |
+| `git_command` / `git_status` / `git_diff` / `git_log` | `git`、`powershell`、`terminal`、`run_in_terminal` |
+| `write_file` / `save_file` | `create_file`、`edit_file`、`apply_patch` |
+| `replace_file` / `modify_file` / `update_file` | `edit_file`、`apply_patch` |
+| `patch_file` | `apply_patch`、`edit_file` |
+| `read_file` / `open_file` / `view_file` / `cat_file` | `get_file`、`file_search` |
+| `list_files` / `find_file` | `file_search`、`grep_search`、`code_search` |
+| `search_code` / `search_files` / `grep` / `ripgrep` | `code_search`、`grep_search`、`file_search` |
+
+覆盖路径：
+
+- 标准 OpenAI `tool_calls`
+- legacy `function_call`
+- 流式增量 `tool_calls`
+- DSML 方言 `<｜DSML｜invoke name="...">`
+
+### 关键取舍
+
+`run_tests` 不被作为独立工具加入 VS 请求。原因：代理不知道 VS 当前会话是否真的提供该工具，也不知道它的参数 schema。最安全的做法是：
+
+- 如果 VS 声明了 `powershell`，则把 `run_tests` 归一为 `powershell`，保留原参数。
+- 如果 VS 声明了 `terminal`，则把 `run_tests` 归一为 `terminal`。
+- 如果只声明了 `get_file` / `code_search` 等非执行类工具，则不改名。
+
+这样既能修复“模型误叫常见语义工具名”的问题，又不会扩大工具权限。
+
+刻意不做的映射：
+
+- 不把 `delete_file`、`remove_file`、`rm` 这类高风险破坏性别名泛化映射到文件编辑工具。
+- 不把真实工具名 `find_symbol` 降级映射到 `code_search`，避免语义变弱后误导 VS 执行错误工具。
+- 不在请求里新增客户端没有声明的工具，只修正模型返回的工具名。
+
+### 新增验证
+
+新增/强化测试覆盖：
+
+- OpenAI JSON 响应中 `run_tests -> powershell`。
+- OpenAI 流式 chunk 中 `run_tests -> powershell`。
+- legacy `function_call` 中 `run_tests -> powershell`。
+- DSML 方言中 `run_tests -> powershell`。
+- 未声明 `powershell` / `terminal` 时，不把 `run_tests` 错误映射到不存在的工具。
+
+### 后续排障标准
+
+如果仍提示无法运行某个工具：
+
+1. 先看请求日志 `request_tools`，确认 VS 当前请求到底声明了哪些工具。
+2. 再看 `response_tools`，确认模型实际返回了什么工具名。
+3. 如果 `response_tools` 里是未声明工具名，优先判断为模型方言漂移，而不是代理拦截。
+4. 如发现新的稳定别名，应加入别名表并补四类测试：标准、legacy、流式、DSML。

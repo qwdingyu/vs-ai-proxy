@@ -11,25 +11,30 @@ import (
 
 // RequestLog 单条请求日志
 type RequestLog struct {
-	ID            string    `json:"id"`
-	Timestamp     time.Time `json:"timestamp"`
-	Method        string    `json:"method"`
-	Path          string    `json:"path"`
-	Provider      string    `json:"provider,omitempty"`
-	Model         string    `json:"model,omitempty"`
-	Upstream      string    `json:"upstream,omitempty"`
-	RequestBytes  int64     `json:"request_bytes,omitempty"`
-	UpstreamBytes int64     `json:"upstream_bytes,omitempty"`
-	StatusCode    int       `json:"status_code"`
-	ElapsedMs     float64   `json:"elapsed_ms"`
-	IsSuccess     bool      `json:"is_success"`
-	ErrorCode     string    `json:"error_code,omitempty"`
-	ErrorMessage  string    `json:"error_message,omitempty"`
-	ErrorHint     string    `json:"error_hint,omitempty"`
-	RequestTools  string    `json:"request_tools,omitempty"`
-	ResponseTools string    `json:"response_tools,omitempty"`
-	FallbackMode  string    `json:"fallback_mode,omitempty"`
-	Normalization string    `json:"normalization,omitempty"`
+	ID                       string    `json:"id"`
+	Timestamp                time.Time `json:"timestamp"`
+	Method                   string    `json:"method"`
+	Path                     string    `json:"path"`
+	Provider                 string    `json:"provider,omitempty"`
+	Model                    string    `json:"model,omitempty"`
+	Upstream                 string    `json:"upstream,omitempty"`
+	RequestBytes             int64     `json:"request_bytes,omitempty"`
+	UpstreamBytes            int64     `json:"upstream_bytes,omitempty"`
+	ConfiguredTimeoutSeconds int       `json:"configured_timeout_seconds,omitempty"`
+	EffectiveTimeoutSeconds  int       `json:"effective_timeout_seconds,omitempty"`
+	StatusCode               int       `json:"status_code"`
+	ElapsedMs                float64   `json:"elapsed_ms"`
+	IsSuccess                bool      `json:"is_success"`
+	ErrorCode                string    `json:"error_code,omitempty"`
+	ErrorMessage             string    `json:"error_message,omitempty"`
+	ErrorHint                string    `json:"error_hint,omitempty"`
+	CancelReason             string    `json:"cancel_reason,omitempty"`
+	NetworkPeer              string    `json:"network_peer,omitempty"`
+	StreamState              string    `json:"stream_state,omitempty"`
+	RequestTools             string    `json:"request_tools,omitempty"`
+	ResponseTools            string    `json:"response_tools,omitempty"`
+	FallbackMode             string    `json:"fallback_mode,omitempty"`
+	Normalization            string    `json:"normalization,omitempty"`
 }
 
 // Statistics 统计数据

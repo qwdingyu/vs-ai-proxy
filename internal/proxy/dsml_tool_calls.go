@@ -93,7 +93,7 @@ func parseDSMLToolCalls(content string, allowedTools map[string]struct{}) ([]pro
 			return nil, content
 		}
 		for _, invoke := range invokes {
-			name := strings.TrimSpace(invoke[1])
+			name := canonicalToolName(strings.TrimSpace(invoke[1]), allowedTools)
 			if name == "" || !isAllowedDSMLTool(name, allowedTools) {
 				return nil, content
 			}

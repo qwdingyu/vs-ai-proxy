@@ -153,7 +153,7 @@ API_KEY="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["api_key"]
 printf '\n== 1. direct upstream: %s/chat/completions ==\n' "$BASE_URL"
 DIRECT_STATUS="000"
 set +e
-DIRECT_BODY="$(curl -sS --max-time "$DIRECT_TIMEOUT_SECONDS" -w '\n__HTTP_STATUS__:%{http_code}\n' \
+DIRECT_BODY="$(curl -sS --max-time "$DIRECT_TIMEOUT_SECONDS" -w '\n__HTTP_STATUS__:%{http_code}\n__TIME_TOTAL__:%{time_total}\n' \
   -H 'Content-Type: application/json' \
   -H 'User-Agent: VS-AI-Proxy-Diagnostic/1.0' \
   -H "Authorization: Bearer $API_KEY" \
@@ -163,7 +163,15 @@ DIRECT_RC=$?
 set -e
 printf '%s\n' "$DIRECT_BODY" > "$DIRECT_OUTPUT"
 DIRECT_STATUS="$(printf '%s\n' "$DIRECT_BODY" | awk -F: '/__HTTP_STATUS__/{print $2}' | tail -1 | tr -d '\r')"
-printf 'direct rc=%s status=%s\n' "$DIRECT_RC" "${DIRECT_STATUS:-unknown}"
+DIRECT_TIME_TOTAL="$(printf '%s\n' "$DIRECT_BODY" | awk -F: '/__TIME_TOTAL__/{print $2}' | tail -1 | tr -d '\r')"
+printf 'direct rc=%s status=%s elapsed_ms=%s\n' "$DIRECT_RC" "${DIRECT_STATUS:-unknown}" "$(python3 - "$DIRECT_TIME_TOTAL" <<'PY'
+import sys
+try:
+    print(f"{float(sys.argv[1]) * 1000:.0f}")
+except Exception:
+    print("unknown")
+PY
+)"
 DIRECT_PREVIEW_LIMIT=800 DIRECT_PREVIEW_BODY="$DIRECT_BODY" python3 - <<'PY'
 import os
 limit = int(os.environ.get('DIRECT_PREVIEW_LIMIT', '800'))
@@ -197,7 +205,7 @@ PY
 printf '\n== 3. proxy request: /v1/chat/completions ==\n'
 PROXY_STATUS="000"
 set +e
-PROXY_BODY="$(curl -sS --max-time "$PROXY_TIMEOUT_SECONDS" -w '\n__HTTP_STATUS__:%{http_code}\n' \
+PROXY_BODY="$(curl -sS --max-time "$PROXY_TIMEOUT_SECONDS" -w '\n__HTTP_STATUS__:%{http_code}\n__TIME_TOTAL__:%{time_total}\n' \
   -H 'Content-Type: application/json' \
   --data-binary "@$PROXY_REQUEST_PATH" \
   "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" 2>&1)"
@@ -205,7 +213,15 @@ PROXY_RC=$?
 set -e
 printf '%s\n' "$PROXY_BODY" > "$PROXY_OUTPUT"
 PROXY_STATUS="$(printf '%s\n' "$PROXY_BODY" | awk -F: '/__HTTP_STATUS__/{print $2}' | tail -1 | tr -d '\r')"
-printf 'proxy rc=%s status=%s\n' "$PROXY_RC" "${PROXY_STATUS:-unknown}"
+PROXY_TIME_TOTAL="$(printf '%s\n' "$PROXY_BODY" | awk -F: '/__TIME_TOTAL__/{print $2}' | tail -1 | tr -d '\r')"
+printf 'proxy rc=%s status=%s elapsed_ms=%s\n' "$PROXY_RC" "${PROXY_STATUS:-unknown}" "$(python3 - "$PROXY_TIME_TOTAL" <<'PY'
+import sys
+try:
+    print(f"{float(sys.argv[1]) * 1000:.0f}")
+except Exception:
+    print("unknown")
+PY
+)"
 PROXY_PREVIEW_LIMIT=1200 PROXY_PREVIEW_BODY="$PROXY_BODY" python3 - <<'PY'
 import os
 limit = int(os.environ.get('PROXY_PREVIEW_LIMIT', '1200'))
@@ -216,11 +232,16 @@ PY
 stop_proxy
 
 printf '\n== 4. proxy logs: request_bytes vs upstream_bytes ==\n'
-python3 - "$CONFIG_PATH" "$RESULT_PATH" "$DIRECT_STATUS" "$PROXY_STATUS" "$DIRECT_RC" "$PROXY_RC" <<'PY'
+python3 - "$CONFIG_PATH" "$RESULT_PATH" "$DIRECT_STATUS" "$PROXY_STATUS" "$DIRECT_RC" "$PROXY_RC" "$DIRECT_TIME_TOTAL" "$PROXY_TIME_TOTAL" <<'PY'
 import json
 import os
 import sys
-config_path, result_path, direct_status, proxy_status, direct_rc, proxy_rc = sys.argv[1:]
+config_path, result_path, direct_status, proxy_status, direct_rc, proxy_rc, direct_time_total, proxy_time_total = sys.argv[1:]
+def elapsed_ms(value):
+    try:
+        return round(float(value) * 1000, 3)
+    except Exception:
+        return None
 log_path = os.path.join(os.path.dirname(config_path), 'logs.json')
 logs = []
 if os.path.exists(log_path):
@@ -231,8 +252,10 @@ last = chat_logs[-1] if chat_logs else (logs[-1] if logs else {})
 result = {
     'direct_status': direct_status,
     'direct_rc': int(direct_rc),
+    'direct_elapsed_ms': elapsed_ms(direct_time_total),
     'proxy_status': proxy_status,
     'proxy_rc': int(proxy_rc),
+    'proxy_elapsed_ms': elapsed_ms(proxy_time_total),
     'last_proxy_log': last,
     'request_bytes': last.get('request_bytes'),
     'upstream_bytes': last.get('upstream_bytes'),

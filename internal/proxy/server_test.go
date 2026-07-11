@@ -160,6 +160,18 @@ func TestEnrichClientGoneDiagnosticsKeepsShortCancelAsClientGone(t *testing.T) {
 	}
 }
 
+func TestRequestCancelReasonDistinguishesDeadlineAndShortCancel(t *testing.T) {
+	if got := requestCancelReason(499, 100_043, "client_deadline_reached", context.Canceled); got != "client_deadline_reached" {
+		t.Fatalf("deadline reason = %q", got)
+	}
+	if got := requestCancelReason(499, 18_000, "client_gone", context.Canceled); got != "client_canceled" {
+		t.Fatalf("short cancel reason = %q", got)
+	}
+	if got := requestCancelReason(502, 18_000, "network_error", nil); got != "" {
+		t.Fatalf("non-499 reason = %q, want empty", got)
+	}
+}
+
 func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) {
 	st := store.New(10)
 	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
@@ -168,6 +180,9 @@ func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) 
 		setProxyDiagnosticHeader(w, "X-Proxy-Response-Tools", "returned: powershell")
 		setProxyFallbackMode(w, "stream-to-nonstream")
 		setProxyToolNormalization(w, "dsml")
+		setProxyStreamState(w, "upstream_connected")
+		setProxyDiagnosticHeader(w, "X-Proxy-Network-Peer", "104.21.57.81:443")
+		setTimeoutDiagnostic(w, 300, 90)
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -185,6 +200,12 @@ func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) 
 	}
 	if logEntry.FallbackMode != "stream-to-nonstream" || logEntry.Normalization != "dsml" {
 		t.Fatalf("recovery diagnostics missing: %#v", logEntry)
+	}
+	if logEntry.StreamState != "upstream_connected" || logEntry.NetworkPeer != "104.21.57.81:443" {
+		t.Fatalf("transport diagnostics missing: %#v", logEntry)
+	}
+	if logEntry.ConfiguredTimeoutSeconds != 300 || logEntry.EffectiveTimeoutSeconds != 90 {
+		t.Fatalf("timeout diagnostics missing: %#v", logEntry)
 	}
 	if strings.Contains(logEntry.RequestTools+logEntry.ResponseTools, "Get-ChildItem") {
 		t.Fatalf("tool diagnostics must not include command arguments: %#v", logEntry)
@@ -239,8 +260,39 @@ func TestServerConfigDirFollowsConfigManagerPath(t *testing.T) {
 }
 
 func TestModelTimeoutSecondsUsesSafeDefaultBudget(t *testing.T) {
-	if got := modelTimeoutSeconds(&config.AppConfig{}, "gpt-test", "gpt-test", "useai", provider.ModelProfile{}, false); got != defaultModelTimeoutSeconds {
-		t.Fatalf("default timeout = %d, want %d seconds", got, defaultModelTimeoutSeconds)
+	configured, effective := modelTimeoutSeconds(&config.AppConfig{}, "gpt-test", "gpt-test", "useai", provider.ModelProfile{}, false)
+	if configured != defaultModelTimeoutSeconds || effective != config.DefaultClientTimeoutBudgetSeconds {
+		t.Fatalf("timeout = configured:%d effective:%d, want configured:%d effective:%d", configured, effective, defaultModelTimeoutSeconds, config.DefaultClientTimeoutBudgetSeconds)
+	}
+}
+
+func TestModelTimeoutSecondsCapsLongProfileBeforeClientDeadline(t *testing.T) {
+	longTimeout := 300
+	profile := provider.ModelProfile{TimeoutSeconds: &longTimeout}
+
+	configured, effective := modelTimeoutSeconds(&config.AppConfig{}, "gpt-5.5", "gpt-5.5", "useai2", profile, true)
+	if configured != longTimeout || effective != config.DefaultClientTimeoutBudgetSeconds {
+		t.Fatalf("timeout = configured:%d effective:%d, want configured:%d effective:%d", configured, effective, longTimeout, config.DefaultClientTimeoutBudgetSeconds)
+	}
+}
+
+func TestModelTimeoutSecondsPreservesShortModelOverride(t *testing.T) {
+	shortTimeout := 25
+	cfg := &config.AppConfig{Models: []config.ModelConfig{{Name: "step-router-v1", ProviderID: "useai", TimeoutSeconds: &shortTimeout, Enabled: true}}}
+
+	configured, effective := modelTimeoutSeconds(cfg, "step-router-v1", "step-router-v1", "useai", provider.ModelProfile{}, false)
+	if configured != shortTimeout || effective != shortTimeout {
+		t.Fatalf("timeout = configured:%d effective:%d, want %d", configured, effective, shortTimeout)
+	}
+}
+
+func TestModelTimeoutSecondsUsesConfiguredClientBudget(t *testing.T) {
+	budget := 60
+	cfg := &config.AppConfig{Defense: config.DefenseConfig{ClientTimeoutBudgetSeconds: &budget}}
+
+	configured, effective := modelTimeoutSeconds(cfg, "gpt-5.5", "gpt-5.5", "useai", provider.ModelProfile{}, false)
+	if configured != defaultModelTimeoutSeconds || effective != budget {
+		t.Fatalf("timeout = configured:%d effective:%d, want configured:%d effective:%d", configured, effective, defaultModelTimeoutSeconds, budget)
 	}
 }
 

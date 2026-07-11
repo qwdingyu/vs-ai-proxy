@@ -671,3 +671,359 @@ tests/large_request_matrix_diagnostic.sh
 3. 不要随意恢复“未知展示名前缀 fallback”，这会重新引入误路由。
 4. basename 兼容只能作为最后手段，且必须做歧义检测。
 5. 任何涉及 `ResolveCandidates`、`ResolveModel`、`ModelBasename`、`DisplayNameParts` 的改动，都必须跑 registry 全量测试和真实配置矩阵脚本。
+
+## 14. `context canceled` / `use of closed network connection` 专项优化补充
+
+### 14.1 现象
+
+真实日志示例：
+
+```text
+模型 gpt-5.5 在提供商 useai2 流式失败: openai stream error: 请求失败: Post "https://api.eforge.xyz/v1/chat/completions": context canceled
+POST /v1/chat/completions - 499 (100043 ms)
+client_deadline_reached 499 97918 ms
+```
+
+另一个网络断连示例：
+
+```text
+write tcp 192.168.1.11:57874->104.21.57.81:443: use of closed network connection
+```
+
+### 14.2 结论
+
+这两类问题和 `413 Request Entity Too Large` 不同：
+
+- `413` 是明确的请求体/上下文过大，通常由 nginx、CDN、new-api 或渠道限制返回。
+- `client_deadline_reached` 是客户端接近等待上限时取消请求，典型耗时约 98-100 秒。
+- `use of closed network connection` 是连接生命周期异常，可能发生在本机网络、Cloudflare/CDN、反代、源站或上游任意一层。
+
+`104.21.57.81` 这类 IP 通常是 Cloudflare 边缘节点 IP，不是 new-api 源站 IP。看到该 IP 只能说明客户端当前连接到了 CDN/边缘节点，不能说明源站 IP 暴露或 new-api 机器就是这个地址。
+
+### 14.3 本轮优化
+
+为避免继续把这些错误混成普通 502，本轮增加了两类日志字段：
+
+```json
+{
+  "error_code": "client_deadline_reached",
+  "cancel_reason": "client_deadline_reached",
+  "network_peer": "104.21.57.81:443"
+}
+```
+
+字段含义：
+
+| 字段 | 说明 |
+| --- | --- |
+| `cancel_reason` | 细化 499/取消类请求原因，例如 `client_deadline_reached`、`client_canceled`、`server_timeout` |
+| `network_peer` | 从 Go 网络错误中提取的远端 `IP:port`，用于识别 CDN/边缘节点或直连源站 |
+
+同时增强错误提示：
+
+- `client_deadline_reached` 会提示检查 new-api/sub2api 渠道首 token、单渠道超时和重试策略。
+- `network_error` 会提示检查 DNS/CDN、代理网络、防火墙、连接重置，并在能解析时展示远端 peer。
+- 诊断脚本会额外记录 `direct_elapsed_ms` 和 `proxy_elapsed_ms`，用于判断直连与代理路径耗时是否同时接近 VS/Copilot 等待上限。
+
+### 14.4 判断规则
+
+| 现象 | 优先判断 | 建议 |
+| --- | --- | --- |
+| `499` 且 `elapsed_ms≈100000` | VS/Copilot 客户端等待上限 | 检查上游首 token、渠道排队、new-api 单渠道超时 |
+| `context canceled` 且耗时很短 | 用户取消、客户端断开或网络瞬断 | 看是否可重试成功，结合本地网络和客户端状态 |
+| `use of closed network connection` | 连接写入或流式过程中被关闭 | 看 `network_peer`，若为 Cloudflare IP，检查 CDN/源站链路 |
+| 小请求快、大请求 100 秒 | 大上下文导致上游慢或排队 | 降低上下文、减少文件内容或切换更稳 provider |
+| direct 和 proxy 都慢/断 | 上游链路问题概率高 | 优先查 provider/channel，而不是代理转换 |
+| direct 快、proxy 慢很多 | 代理或本机网络才是优先嫌疑 | 保留 result.json，重点看日志与本机资源 |
+
+### 14.5 不做的事
+
+本轮没有加入“流式中途自动重试”。原因：
+
+- 流式响应一旦已经向 VS/Copilot 写出 chunk，自动重试会破坏协议顺序。
+- 工具调用请求可能不是幂等的，盲目重试会让上游重复计费或重复生成工具调用。
+- 当前更安全的做法是增强分类和观测，让用户/运维能定位是客户端 deadline、CDN 断连还是上游限制。
+
+如后续要做重试，只能限制在“尚未向客户端写任何响应之前”，且必须受防御开关控制，并记录 `fallback_mode`。
+
+## 15. VS/Copilot 100 秒等待上限与代理有效超时预算
+
+### 15.1 新现象
+
+真实日志：
+
+```text
+模型 step-router-v1 在提供商 useai 流式失败: openai stream error: 请求失败: Post "https://api.eforge.xyz/v1/chat/completions": context canceled
+POST /v1/chat/completions - 499 (100011 ms)
+```
+
+这类日志和工具调用格式、模型路由、`max_output_tokens` 参数错误、`413` 都不是同一个问题。它的关键特征是：
+
+- HTTP 状态是 `499`。
+- `elapsed_ms` 接近 `100000`。
+- Go 错误通常表现为 `context canceled`。
+- 发生在 VS/Copilot 真实流式请求里，尤其是大上下文、多工具声明或上游首 token 波动时。
+
+### 15.2 根因判断
+
+这是客户端等待窗口先耗尽：VS/Copilot 在约 100 秒仍没有得到可接受结果时取消请求。代理之前允许模型/profile 配置使用 `180`、`240`、`300` 秒超时，这对普通 HTTP 客户端可能合理，但对 VS/Copilot 没有意义：
+
+- 代理还在等待上游时，VS/Copilot 已经断开。
+- 最终日志只能记录 `client_deadline_reached` / `499`。
+- 用户看到的是“卡很久后失败”，而不是明确的上游超时。
+- new-api/sub2api 如果单渠道超时过长，也来不及在客户端窗口内完成渠道轮换。
+
+因此，这不是简单把超时调大能解决的问题；对 VS/Copilot 场景，超时必须小于客户端等待上限。
+
+### 15.3 本轮代码策略
+
+新增可配置的 `defense.client_timeout_budget_seconds`，并将 `modelTimeoutSeconds` 的返回值裁剪到客户端安全预算内：
+
+- 配置或模型 profile 小于当前客户端预算：保留用户更短的超时。
+- 配置或模型 profile 大于当前客户端预算：有效请求超时裁剪到预算值，默认 90 秒。
+- 默认 180 秒不再直接用于 VS/Copilot 上游请求。
+
+这样做的目标不是“让慢上游变快”，而是避免代理继续等待到 VS/Copilot 必然取消的 100 秒，让失败在客户端断开前转为明确的 `timeout` 诊断。
+
+### 15.4 为什么不是继续调大超时
+
+调大超时只能让代理在客户端断开后继续消耗资源，不能让 VS/Copilot 接收结果。最佳实践是分层预算：
+
+| 层级 | 建议预算 | 说明 |
+| --- | --- | --- |
+| new-api/sub2api 单渠道 | 20-30 秒 | 给内部渠道轮换留时间 |
+| vs-ai-proxy 有效上游请求 | 默认 90 秒，可配置 15-95 秒 | 低于 VS/Copilot 约 100 秒等待上限 |
+| VS/Copilot 客户端 | 约 100 秒 | 客户端行为，不由代理控制 |
+| 服务端 WriteTimeout | 大于代理预算 | 避免服务端提前关闭正常流 |
+
+如果 new-api 内部某个渠道首 token 接近或超过客户端等待窗口，代理无法把它变成可用体验；应在 new-api 内部缩短单渠道超时、启用健康度/优先级/失败切换，或者把该模型路由到更稳定的渠道组。
+
+### 15.5 本轮验证
+
+新增/调整测试：
+
+- `TestModelTimeoutSecondsUsesSafeDefaultBudget`：默认有效超时为 90 秒，而不是 180 秒。
+- `TestModelTimeoutSecondsCapsLongProfileBeforeClientDeadline`：300 秒 profile 会被裁剪到 90 秒。
+- `TestModelTimeoutSecondsPreservesShortModelOverride`：25 秒模型级配置不会被放大。
+- `TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments`：日志记录 `stream_state`、`network_peer`，并确认不会泄露工具参数。
+
+已执行验证：
+
+```bash
+go test ./internal/proxy -count=1
+go test ./... -count=1
+go test -race ./cmd/server ./internal/proxy ./internal/provider ./internal/config -count=1
+bash tests/streaming_test.sh
+bash tests/streaming_ollama_test.sh
+bash -n tests/useai_large_request_diagnostic.sh
+bash -n tests/large_request_matrix_diagnostic.sh
+make build
+./vs-ai-proxy --version
+git diff --check
+```
+
+### 15.6 后续观测重点
+
+上线后重点看这些字段：
+
+| 字段/现象 | 期望变化 |
+| --- | --- |
+| `499` + `elapsed_ms≈100000` | 应显著减少 |
+| `error_code=timeout` + `elapsed_ms≈90000` | 说明代理在客户端断开前主动结束慢上游 |
+| `stream_state=upstream_connecting` | 上游连接/首 token 前超时，优先查 new-api 渠道首 token |
+| `stream_state=upstream_connected` | 已连上但读取 chunk 慢或中途断，优先查上游流式稳定性/CDN |
+| `network_peer=104.21.x.x` / `172.67.x.x` | Cloudflare/CDN 边缘节点，不是源站 IP |
+
+### 15.7 注意事项
+
+1. 不要把 `timeout_seconds` 盲目调到 180/300 秒来“解决” VS/Copilot 超时；这会重新制造 100 秒 499。
+2. 不要在已经向下游写出流式 chunk 后自动重试；这会破坏 Copilot 流式协议，并可能重复工具调用。
+3. 大请求、工具声明很多时，优先减少上下文或优化上游渠道组，而不是在代理层无限重试。
+4. 如果确实需要更长请求，应确认客户端不是 VS/Copilot，或者未来增加明确的客户端类型/预算配置，而不是全局放开。
+
+## 16. 客户端超时预算配置化与可观测性补充
+
+### 16.1 为什么继续优化
+
+仅把 VS/Copilot 安全预算写死为 90 秒虽然能避免多数 `499 (100000ms)`，但从顶层设计看仍有两个不足：
+
+1. 不同客户端或用户环境可能存在不同等待上限，硬编码不利于灰度和排障。
+2. 日志只有最终错误，不知道模型/profile 原始配置是多少、代理实际使用多少，容易误以为 `timeout_seconds=300` 没生效。
+
+因此本轮把“客户端预算”升级为配置项和日志观测项。
+
+### 16.2 新配置
+
+`config.json` 新增：
+
+```json
+{
+  "defense": {
+    "enabled": true,
+    "client_timeout_budget_seconds": 90
+  }
+}
+```
+
+约束：
+
+| 配置项 | 默认 | 最小 | 最大 | 说明 |
+| --- | --- | --- | --- | --- |
+| `defense.client_timeout_budget_seconds` | 90 | 15 | 95 | VS/Copilot 客户端预算；更长的模型/profile 超时会被裁剪到该值 |
+
+最大值限制为 95 秒，是为了避免重新逼近 VS/Copilot 约 100 秒客户端取消窗口。低于该值的模型级 `timeout_seconds` 仍会保留，不会被放大。
+
+### 16.3 新日志字段
+
+请求日志新增：
+
+```json
+{
+  "configured_timeout_seconds": 300,
+  "effective_timeout_seconds": 90
+}
+```
+
+含义：
+
+| 字段 | 说明 |
+| --- | --- |
+| `configured_timeout_seconds` | 模型配置、profile 或默认值计算出的原始上游超时 |
+| `effective_timeout_seconds` | 实际传入 provider 请求 context 的有效超时，已考虑客户端预算裁剪 |
+
+后台日志 tooltip 也会显示“有效超时 / 配置超时”，便于直接判断是否发生裁剪。
+
+### 16.4 Web 后台
+
+`/admin#/config` 增加“客户端超时预算（秒）”输入框：
+
+- 默认 90。
+- 建议 15-95。
+- 保存后热更新，端口仍需重启。
+- 该配置属于防御策略的一部分，但即使防御开关关闭，也不建议让 VS/Copilot 请求超过客户端等待窗口；否则问题会退化为 100 秒 499。
+
+### 16.5 验证点
+
+新增/强化测试：
+
+- 旧配置自动补 `client_timeout_budget_seconds=90`。
+- 过高预算裁剪到 95，过低预算裁剪到 15。
+- `modelTimeoutSeconds` 返回 configured/effective 两个值。
+- 300 秒 profile 在默认预算下实际为 90 秒。
+- 25 秒模型配置仍保持 25 秒。
+- 自定义预算 60 秒时，默认 180 秒会裁剪为 60 秒。
+- 日志记录 `configured_timeout_seconds` 与 `effective_timeout_seconds`。
+
+## 17. `client_timeout_budget_seconds=90` 与 499 的匹配关系决策
+
+### 17.1 先明确 499 的含义
+
+在本项目日志里，下面这种形态通常不是代理主动失败：
+
+```text
+POST /v1/chat/completions - 499 (100011 ms)
+openai stream error: ... context canceled
+```
+
+它表示 VS/Copilot 客户端在接近自身等待上限时取消了请求。代理继续等待上游不会改变结果，因为客户端已经不再接收响应。
+
+因此，`defense.client_timeout_budget_seconds` 的目标不是让慢上游变快，而是让代理在客户端取消前给出明确的 `timeout` 诊断，避免用户等到 `499`。
+
+### 17.2 分层预算模型
+
+行业最佳实践是分层 timeout budget，而不是所有层都设置为同一个值：
+
+| 层级 | 推荐值 | 目标 |
+| --- | --- | --- |
+| new-api/sub2api 单渠道超时 | 20-30 秒 | 让上游网关有机会在客户端窗口内轮换渠道 |
+| vs-ai-proxy 有效上游请求预算 | 默认 90 秒 | 在 VS/Copilot 约 100 秒取消前主动失败并记录诊断 |
+| vs-ai-proxy 最大可配置预算 | 95 秒 | 给高延迟环境留少量空间，但避免贴近 100 秒临界点 |
+| VS/Copilot 客户端等待上限 | 约 98-100 秒 | 客户端行为，代理无法控制 |
+| HTTP server WriteTimeout | 大于代理预算 | 避免服务端先于代理预算关闭正常流 |
+
+关键逻辑：
+
+```text
+new-api 单渠道 timeout < new-api 总体切换窗口 < proxy effective timeout < VS/Copilot client deadline
+```
+
+如果 proxy timeout 大于或等于 VS/Copilot deadline，最终会退化为 `499 client_deadline_reached`。如果 proxy timeout 明显小于 deadline，则能得到可解释的 `timeout`，日志也能显示 `configured_timeout_seconds` 与 `effective_timeout_seconds`。
+
+### 17.3 为什么默认选 90 秒
+
+默认值经历过三个候选：
+
+| 候选 | 优点 | 问题 | 结论 |
+| --- | --- | --- | --- |
+| 85 秒 | 距离 100 秒更安全，几乎不会撞客户端 deadline | 对本来 86-90 秒可成功的慢响应过早失败，用户体感偏保守 | 可作为网络差环境的手动配置，不适合默认 |
+| 90 秒 | 距离 100 秒仍有约 8-10 秒安全余量，同时减少过早失败 | 极差网络或客户端更短 deadline 时仍可能接近边界 | 当前默认最优折中 |
+| 95 秒 | 最大化等待上游返回 | 安全余量过小，遇到网络抖动、调度延迟、日志 flush、上游最后一跳慢时容易重新变 499 | 仅作为高级可配上限，不作为默认 |
+| 100 秒及以上 | 看似给上游更多时间 | 与 VS/Copilot 客户端 deadline 冲突，代理无法把结果交给已取消的客户端 | 禁止作为默认，不建议配置 |
+
+因此，默认 `90` 是为了在“成功机会”和“避免 499”之间取平衡；`95` 是最大上限，不是推荐值。
+
+### 17.4 为什么范围是 15-95 秒
+
+- **最小 15 秒**：避免用户误填 1-5 秒导致所有请求大量误超时。真实模型首 token、工具请求、大上下文请求不应被过短预算杀死。
+- **默认 90 秒**：贴合 VS/Copilot 约 100 秒等待窗口，保留约 8-10 秒安全余量。
+- **最大 95 秒**：允许特殊网络/模型场景略微放宽，但仍低于客户端取消窗口。
+
+不允许超过 95 秒，是为了防止用户把模型/profile 的 `180`、`240`、`300` 秒重新带回 VS/Copilot 路径，制造 `499 (100000ms)`。
+
+### 17.5 与日志字段的关系
+
+新日志字段用于判断预算是否按预期生效：
+
+```json
+{
+  "configured_timeout_seconds": 300,
+  "effective_timeout_seconds": 90,
+  "error_code": "timeout",
+  "elapsed_ms": 90000
+}
+```
+
+判断规则：
+
+| 日志形态 | 含义 | 处理建议 |
+| --- | --- | --- |
+| `499` + `elapsed_ms≈98000-100000` | 客户端先取消，proxy 没来得及主动结束 | 检查预算是否被设置过高、是否出现客户端更短 deadline |
+| `timeout` + `elapsed_ms≈effective_timeout_seconds*1000` | proxy 在客户端取消前主动结束慢上游 | 检查上游首 token、new-api 渠道超时/轮换策略 |
+| `configured_timeout_seconds > effective_timeout_seconds` | 发生预算裁剪 | 正常，说明模型/profile 原始超时被客户端预算保护 |
+| `effective_timeout_seconds < configured_timeout_seconds` 且请求仍 499 | 客户端 deadline 可能小于预期，或下游连接提前断开 | 可把预算临时下调到 80-85 并观察 |
+| 小请求成功、大请求 timeout/499 | 大上下文、工具声明或文件内容导致上游慢 | 优化上下文、减少附件/历史、切换更稳渠道 |
+
+### 17.6 推荐配置
+
+默认推荐：
+
+```json
+{
+  "defense": {
+    "enabled": true,
+    "client_timeout_budget_seconds": 90
+  }
+}
+```
+
+不同场景建议：
+
+| 场景 | 建议值 | 原因 |
+| --- | --- | --- |
+| 普通 VS/Copilot Windows 用户 | 90 | 默认最佳折中 |
+| 网络质量差、经常 499 | 80-85 | 提前失败，避免撞客户端 deadline |
+| 上游较慢但偶尔 90 秒内能成功 | 90 | 保持默认，不要过早失败 |
+| 明确知道客户端等待窗口更长 | 95 | 只能作为高级调优，仍不建议超过 95 |
+| 想解决慢上游 | 不建议调高 proxy 预算 | 应调整 new-api/sub2api 单渠道超时和渠道健康策略 |
+
+### 17.7 最终建议
+
+当前最佳实践配置是：
+
+- 默认值：`90`
+- 可配置范围：`15-95`
+- 常规用户不需要修改。
+- 如果仍出现 `499≈100s`，优先把预算降到 `85` 观察，而不是升高。
+- 如果出现 `timeout≈90s`，说明代理已正确工作；下一步应治理上游渠道首 token、排队、单渠道超时和上下文大小。
+
+这套方案的核心价值是把“客户端无意义取消”转化为“代理可解释超时”，并通过日志告诉用户：原始模型超时是多少、实际执行预算是多少、问题发生在哪一层。

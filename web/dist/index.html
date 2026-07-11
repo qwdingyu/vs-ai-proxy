@@ -195,8 +195,10 @@
             <label>代理端口 <input type="number" id="cfgPort" /></label>
             <label>默认模型 <input id="cfgDefaultModel" /></label>
             <label class="checkbox"><input type="checkbox" id="cfgDefenseEnabled" /> 启用上游防御模式</label>
+            <label>客户端超时预算（秒） <input type="number" id="cfgClientTimeoutBudget" min="15" max="95" step="1" /></label>
             <div class="hint">端口变更保存后仍需重启进程生效；其它配置会立即热更新代理路由。</div>
             <div class="hint">上游防御模式用于 new-api / sub2api 等网关：开启后会启用稳定 User-Agent、5xx/网络瞬断短重试、429 冷却和流式/非流式协议兜底。</div>
+            <div class="hint">客户端超时预算用于 VS/Copilot：代理会把更长的模型 timeout_seconds 裁剪到该值，默认 90 秒，建议保持 15-95 秒。</div>
             <div class="hint">管理面板与代理共用同一端口；Web 管理路径固定为 `/admin`，端口变更保存后需重启进程生效。</div>
             <div class="hint">请求日志持久化路径由 `CONFIG_PATH` / `STORE_PATH` 环境变量控制，不在此页保存。</div>
             <div class="actions">
@@ -591,7 +593,11 @@
       const hint = log.error_hint ? `&#10;建议: ${escapeHTML(log.error_hint)}` : '';
       const requestSize = Number(log.request_bytes || 0) > 0 ? `&#10;请求体: ${formatBytes(log.request_bytes)}` : '';
       const upstreamSize = Number(log.upstream_bytes || 0) > 0 ? `&#10;上游体: ${formatBytes(log.upstream_bytes)}` : '';
-      return `<span class="badge warn" title="${message}${hint}${requestSize}${upstreamSize}">${code}</span>`;
+      const timeoutBudget = Number(log.effective_timeout_seconds || 0) > 0 ? `&#10;有效超时: ${escapeHTML(log.effective_timeout_seconds)}s${Number(log.configured_timeout_seconds || 0) > 0 ? ` / 配置 ${escapeHTML(log.configured_timeout_seconds)}s` : ''}` : '';
+      const cancelReason = log.cancel_reason ? `&#10;取消原因: ${escapeHTML(log.cancel_reason)}` : '';
+      const networkPeer = log.network_peer ? `&#10;远端: ${escapeHTML(log.network_peer)}` : '';
+      const streamState = log.stream_state ? `&#10;流状态: ${escapeHTML(log.stream_state)}` : '';
+      return `<span class="badge warn" title="${message}${hint}${requestSize}${upstreamSize}${timeoutBudget}${cancelReason}${networkPeer}${streamState}">${code}</span>`;
     };
     const formatBytes = (bytes) => {
       const n = Number(bytes || 0);
@@ -606,6 +612,8 @@
       if (log.response_tools) parts.push(`响应 ${log.response_tools}`);
       if (log.fallback_mode) parts.push(`恢复 ${log.fallback_mode}`);
       if (log.normalization) parts.push(`归一化 ${log.normalization}`);
+      if (log.stream_state) parts.push(`流 ${log.stream_state}`);
+      if (log.effective_timeout_seconds) parts.push(`超时 ${log.effective_timeout_seconds}s`);
       if (!parts.length) return '-';
       const text = parts.join(' | ');
       const escaped = escapeHTML(text);
@@ -727,8 +735,9 @@
         $('cfgPort').value = cfg.port ?? 12345;
         $('cfgDefaultModel').value = cfg.default_model || '';
         $('cfgDefenseEnabled').checked = cfg.defense?.enabled !== false;
+        $('cfgClientTimeoutBudget').value = cfg.defense?.client_timeout_budget_seconds || 90;
         $('cfgHealth').textContent = cfg.port ? '已加载' : '-';
-        $('cfgSummary').textContent = `providers: ${(cfg.providers || []).length}, models: ${(cfg.models || []).length}, defense: ${cfg.defense?.enabled === false ? 'off' : 'on'}`;
+        $('cfgSummary').textContent = `providers: ${(cfg.providers || []).length}, models: ${(cfg.models || []).length}, defense: ${cfg.defense?.enabled === false ? 'off' : 'on'}, client budget: ${cfg.defense?.client_timeout_budget_seconds || 90}s`;
       } catch (e) {
         console.error(e);
       }
@@ -1071,7 +1080,7 @@
           ...cfg,
           port: Number($('cfgPort').value || 12345),
           default_model: $('cfgDefaultModel').value.trim(),
-          defense: { ...(cfg.defense || {}), enabled: $('cfgDefenseEnabled').checked },
+          defense: { ...(cfg.defense || {}), enabled: $('cfgDefenseEnabled').checked, client_timeout_budget_seconds: Number($('cfgClientTimeoutBudget').value || 90) },
         };
         if (!await validateConfigPayload(payload)) return;
         await fetchJSON('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

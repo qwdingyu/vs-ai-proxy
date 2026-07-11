@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
@@ -151,6 +152,19 @@ func setProxyToolNormalization(w http.ResponseWriter, mode string) {
 	setProxyDiagnosticHeader(w, "X-Proxy-Tool-Call-Normalization", mode)
 }
 
+func setProxyStreamState(w http.ResponseWriter, state string) {
+	setProxyDiagnosticHeader(w, "X-Proxy-Stream-State", state)
+}
+
+func setTimeoutDiagnostic(w http.ResponseWriter, configuredTimeoutSeconds, effectiveTimeoutSeconds int) {
+	if configuredTimeoutSeconds > 0 {
+		setProxyDiagnosticHeader(w, "X-Proxy-Configured-Timeout-Seconds", strconv.Itoa(configuredTimeoutSeconds))
+	}
+	if effectiveTimeoutSeconds > 0 {
+		setProxyDiagnosticHeader(w, "X-Proxy-Effective-Timeout-Seconds", strconv.Itoa(effectiveTimeoutSeconds))
+	}
+}
+
 func setProxyDiagnosticHeader(w http.ResponseWriter, key, value string) {
 	value = strings.TrimSpace(value)
 	if value == "" || w == nil {
@@ -172,8 +186,22 @@ func setResponseWriterDiagnosticField(w http.ResponseWriter, key, value string) 
 			target.fallbackMode = value
 		case "X-Proxy-Tool-Call-Normalization":
 			target.normalization = value
+		case "X-Proxy-Stream-State":
+			target.streamState = value
+		case "X-Proxy-Configured-Timeout-Seconds":
+			target.configuredTimeoutSeconds = positiveAtoi(value)
+		case "X-Proxy-Effective-Timeout-Seconds":
+			target.effectiveTimeoutSeconds = positiveAtoi(value)
 		}
 	case *streamAttemptWriter:
 		setResponseWriterDiagnosticField(target.ResponseWriter, key, value)
 	}
+}
+
+func positiveAtoi(value string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
 }

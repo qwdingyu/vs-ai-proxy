@@ -24,6 +24,7 @@ type attemptDiagnostic struct {
 	Upstream string `json:"upstream_model"`
 	Category string `json:"category"`
 	Message  string `json:"message"`
+	Peer     string `json:"network_peer,omitempty"`
 }
 
 type proxyDiagnosticDetails struct {
@@ -46,6 +47,9 @@ func writeProxyDiagnosticError(w http.ResponseWriter, status int, diag proxyDiag
 	w.Header().Set("X-Proxy-Error-Code", diag.Code)
 	w.Header().Set("X-Proxy-Error-Message", sanitizeDiagnosticMessage(diag.Message))
 	w.Header().Set("X-Proxy-Error-Hint", sanitizeDiagnosticMessage(diag.Details.Hint))
+	if peer := firstAttemptNetworkPeer(diag.Details.Attempts); peer != "" {
+		w.Header().Set("X-Proxy-Network-Peer", peer)
+	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": diag})
 }
@@ -103,10 +107,19 @@ func allCandidatesFailedDiagnostic(requestedModel, resolvedModel string, candida
 
 func diagnosticHintForAttempts(category string, attempts []attemptDiagnostic) string {
 	hint := diagnosticHint(category)
-	if category != "upstream_payload_too_large" || len(attempts) == 0 {
+	if len(attempts) == 0 {
 		return hint
 	}
 	last := attempts[len(attempts)-1]
+	if category == "network_error" {
+		if last.Peer != "" {
+			return hint + " 本次连接的远端 peer 为 " + last.Peer + "；如果这是 Cloudflare/CDN IP（如 104.21.x.x 或 172.67.x.x），说明错误发生在客户端到 CDN/边缘节点或边缘到源站链路，不能直接等同于 new-api 源站 IP。"
+		}
+		return hint
+	}
+	if category != "upstream_payload_too_large" {
+		return hint
+	}
 	providerName := strings.TrimSpace(last.Provider)
 	upstreamModel := strings.TrimSpace(last.Upstream)
 	if providerName == "" && upstreamModel == "" {
@@ -136,7 +149,17 @@ func newAttemptDiagnostic(providerName, upstreamModel string, err error) attempt
 		Upstream: upstreamModel,
 		Category: classifyProxyErrorFromErr(err, message),
 		Message:  message,
+		Peer:     networkPeerFromMessage(message),
 	}
+}
+
+func firstAttemptNetworkPeer(attempts []attemptDiagnostic) string {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if peer := strings.TrimSpace(attempts[i].Peer); peer != "" {
+			return peer
+		}
+	}
+	return ""
 }
 
 func sanitizeDiagnosticMessage(message string) string {
@@ -175,6 +198,9 @@ func classifyProxyErrorFromErr(err error, message string) string {
 		strings.Contains(lower, "no such host") ||
 		strings.Contains(lower, "network is unreachable") ||
 		strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "use of closed network connection") ||
+		strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "broken pipe") ||
 		strings.Contains(lower, "eof") ||
 		strings.Contains(lower, "请求失败"):
 		return "network_error"
@@ -204,7 +230,7 @@ func diagnosticHint(category string) string {
 	case "client_gone":
 		return "客户端已取消或断开连接；代理不会继续重试或切换 provider，避免把一次取消放大为多次上游请求。"
 	case "network_error":
-		return "检查 provider base_url、DNS、代理网络、云主机防火墙，或上游连接是否被重置。"
+		return "网络或连接生命周期异常；检查 provider base_url、DNS/CDN、代理网络、云主机防火墙、上游连接是否被重置，以及客户端/上游是否在写入过程中关闭连接。"
 	case "upstream_auth_error":
 		return "请求已到达上游但鉴权失败；检查 API key 是否正确、是否过期，以及 provider 是否要求额外鉴权头。"
 	case "upstream_rate_limit":
@@ -218,10 +244,33 @@ func diagnosticHint(category string) string {
 	case "upstream_api_error":
 		return "请求已到达上游；检查 API key、余额、模型名是否被该 provider 支持，以及上游错误正文。"
 	case "timeout":
-		return "上游响应超时；可检查网络延迟、provider 状态，或在模型配置中调整 timeout_seconds。"
+		return "上游在客户端可等待窗口内没有完成响应；代理会在 VS/Copilot 约 100 秒上限前主动结束请求，避免用户等到客户端 499。请检查上游首 token 延迟、new-api/sub2api 渠道超时/轮换策略，或把模型 timeout_seconds 调得更短。"
 	case "proxy_parse_error":
 		return "上游返回格式不符合当前协议转换预期；需要保存响应样本进一步排查。"
 	default:
 		return "检查 provider 是否启用、API key 是否填写、模型名和 provider 类型是否匹配。"
 	}
+}
+
+func networkPeerFromMessage(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+	arrow := strings.LastIndex(message, "->")
+	if arrow < 0 {
+		return ""
+	}
+	peer := strings.TrimSpace(message[arrow+2:])
+	if peer == "" {
+		return ""
+	}
+	if marker := strings.Index(peer, ": "); marker >= 0 {
+		peer = peer[:marker]
+	}
+	if space := strings.IndexAny(peer, " \t\n\r"); space >= 0 {
+		peer = peer[:space]
+	}
+	peer = strings.Trim(peer, `"'.,;()[]{}<>`)
+	return peer
 }

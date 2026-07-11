@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -358,6 +359,8 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		errorMessage := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Message")
 		errorHint := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Hint")
 		errorCode, errorMessage, errorHint = enrichClientGoneDiagnostics(ww.statusCode, elapsed, r.ContentLength, errorCode, errorMessage, errorHint)
+		cancelReason := requestCancelReason(ww.statusCode, elapsed, errorCode, r.Context().Err())
+		networkPeer := firstNonEmptyHeader(ww.Header(), "X-Proxy-Network-Peer")
 		requestTools := ww.requestTools
 		if requestTools == "" {
 			requestTools = firstNonEmptyHeader(ww.Header(), "X-Proxy-Request-Tools")
@@ -374,25 +377,42 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if normalization == "" {
 			normalization = firstNonEmptyHeader(ww.Header(), "X-Proxy-Tool-Call-Normalization")
 		}
+		streamState := ww.streamState
+		if streamState == "" {
+			streamState = firstNonEmptyHeader(ww.Header(), "X-Proxy-Stream-State")
+		}
+		configuredTimeout := ww.configuredTimeoutSeconds
+		if configuredTimeout == 0 {
+			configuredTimeout = firstPositiveHeaderInt(ww.Header(), "X-Proxy-Configured-Timeout-Seconds")
+		}
+		effectiveTimeout := ww.effectiveTimeoutSeconds
+		if effectiveTimeout == 0 {
+			effectiveTimeout = firstPositiveHeaderInt(ww.Header(), "X-Proxy-Effective-Timeout-Seconds")
+		}
 
 		s.store.AddLog(store.RequestLog{
-			Method:        r.Method,
-			Path:          r.URL.Path,
-			Provider:      provider,
-			Model:         model,
-			Upstream:      upstream,
-			RequestBytes:  r.ContentLength,
-			UpstreamBytes: ww.upstreamBytes,
-			StatusCode:    ww.statusCode,
-			ElapsedMs:     elapsed,
-			IsSuccess:     ww.statusCode < 400,
-			ErrorCode:     errorCode,
-			ErrorMessage:  errorMessage,
-			ErrorHint:     errorHint,
-			RequestTools:  requestTools,
-			ResponseTools: responseTools,
-			FallbackMode:  fallbackMode,
-			Normalization: normalization,
+			Method:                   r.Method,
+			Path:                     r.URL.Path,
+			Provider:                 provider,
+			Model:                    model,
+			Upstream:                 upstream,
+			RequestBytes:             r.ContentLength,
+			UpstreamBytes:            ww.upstreamBytes,
+			ConfiguredTimeoutSeconds: configuredTimeout,
+			EffectiveTimeoutSeconds:  effectiveTimeout,
+			StatusCode:               ww.statusCode,
+			ElapsedMs:                elapsed,
+			IsSuccess:                ww.statusCode < 400,
+			ErrorCode:                errorCode,
+			ErrorMessage:             errorMessage,
+			ErrorHint:                errorHint,
+			CancelReason:             cancelReason,
+			NetworkPeer:              networkPeer,
+			RequestTools:             requestTools,
+			ResponseTools:            responseTools,
+			FallbackMode:             fallbackMode,
+			Normalization:            normalization,
+			StreamState:              streamState,
 		})
 
 		s.logger.Info("%s %s - %d (%.0f ms)", r.Method, r.URL.Path, ww.statusCode, elapsed)
@@ -411,6 +431,25 @@ func enrichClientGoneDiagnostics(statusCode int, elapsedMs float64, requestBytes
 	return "client_deadline_reached", message, hint
 }
 
+func requestCancelReason(statusCode int, elapsedMs float64, code string, err error) string {
+	if statusCode != 499 && code != "client_gone" && code != "client_deadline_reached" {
+		return ""
+	}
+	if code == "client_deadline_reached" || elapsedMs >= clientDeadlineDiagnosticThreshold {
+		return "client_deadline_reached"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "server_timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "client_canceled"
+	}
+	if err != nil {
+		return "context_closed"
+	}
+	return "client_gone"
+}
+
 func firstNonEmptyHeader(header http.Header, keys ...string) string {
 	for _, key := range keys {
 		if value := strings.TrimSpace(header.Get(key)); value != "" {
@@ -418,6 +457,20 @@ func firstNonEmptyHeader(header http.Header, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstPositiveHeaderInt(header http.Header, keys ...string) int {
+	for _, key := range keys {
+		value := strings.TrimSpace(header.Get(key))
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -457,15 +510,18 @@ func isAuthorizedProxyRequest(r *http.Request, proxyKey string) bool {
 // 供 loggingMiddleware 在请求完成后读取并写入 Store。
 type responseWriter struct {
 	http.ResponseWriter
-	statusCode    int
-	provider      string
-	model         string
-	upstream      string
-	upstreamBytes int64
-	requestTools  string
-	responseTools string
-	fallbackMode  string
-	normalization string
+	statusCode               int
+	provider                 string
+	model                    string
+	upstream                 string
+	upstreamBytes            int64
+	configuredTimeoutSeconds int
+	effectiveTimeoutSeconds  int
+	requestTools             string
+	responseTools            string
+	fallbackMode             string
+	normalization            string
+	streamState              string
 }
 
 func (w *responseWriter) finalizeRequestStatus(r *http.Request) {
@@ -523,11 +579,13 @@ type streamAttemptWriter struct {
 
 func (w *streamAttemptWriter) WriteHeader(code int) {
 	w.wrote = true
+	setProxyStreamState(w.ResponseWriter, "downstream_started")
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *streamAttemptWriter) Write(data []byte) (int, error) {
 	w.wrote = true
+	setProxyStreamState(w.ResponseWriter, "downstream_started")
 	return w.ResponseWriter.Write(data)
 }
 
@@ -630,9 +688,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		setUpstreamRequestBytes(w, req)
+		configuredTimeout, effectiveTimeout := modelTimeoutSeconds(cfg, modelName, modelID, prov.Name(), profile, hasProfile)
+		setTimeoutDiagnostic(w, configuredTimeout, effectiveTimeout)
 		ctx, cancel := requestContextWithTimeout(
 			r.Context(),
-			modelTimeoutSeconds(cfg, modelName, modelID, prov.Name(), profile, hasProfile),
+			effectiveTimeout,
 		)
 
 		if req.Stream {
@@ -887,9 +947,11 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		setUpstreamRequestBytes(w, req)
+		configuredTimeout, effectiveTimeout := modelTimeoutSeconds(cfg, modelName, modelID, prov.Name(), profile, hasProfile)
+		setTimeoutDiagnostic(w, configuredTimeout, effectiveTimeout)
 		ctx, cancel := requestContextWithTimeout(
 			r.Context(),
-			modelTimeoutSeconds(cfg, modelName, modelID, prov.Name(), profile, hasProfile),
+			effectiveTimeout,
 		)
 
 		if stream {
@@ -1012,6 +1074,7 @@ func (s *Server) handleStream(
 
 // streamOpenAI OpenAI 直通流式转发
 func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provider.Provider, req *provider.ChatRequest, flusher http.Flusher) error {
+	setProxyStreamState(w, "upstream_connecting")
 	stream, err := prov.ChatStream(r.Context(), req)
 	if err != nil {
 		// VS Copilot 的 /v1/chat/completions stream=true 真实路径中，UseAI/New API
@@ -1034,6 +1097,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		return fmt.Errorf("openai stream error: %w", err)
 	}
 	defer stream.Close()
+	setProxyStreamState(w, "upstream_connected")
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1089,11 +1153,13 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 
 // streamOllamaToOpenAI 将 Ollama NDJSON 流转换为 OpenAI SSE。
 func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, prov provider.Provider, req *provider.ChatRequest, flusher http.Flusher) error {
+	setProxyStreamState(w, "upstream_connecting")
 	stream, err := prov.ChatStream(r.Context(), req)
 	if err != nil {
 		return fmt.Errorf("ollama stream error: %w", err)
 	}
 	defer stream.Close()
+	setProxyStreamState(w, "upstream_connected")
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1145,11 +1211,13 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 
 // streamOllamaPassthrough 对 Ollama 客户端保持原生 NDJSON 输出。
 func (s *Server) streamOllamaPassthrough(w http.ResponseWriter, r *http.Request, prov provider.Provider, req *provider.ChatRequest, flusher http.Flusher) error {
+	setProxyStreamState(w, "upstream_connecting")
 	stream, err := prov.ChatStream(r.Context(), req)
 	if err != nil {
 		return fmt.Errorf("ollama stream error: %w", err)
 	}
 	defer stream.Close()
+	setProxyStreamState(w, "upstream_connected")
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1182,11 +1250,13 @@ func (s *Server) streamOllamaPassthrough(w http.ResponseWriter, r *http.Request,
 
 // streamOpenAIToOllama 将 OpenAI SSE 流转换为 Ollama NDJSON。
 func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, prov provider.Provider, req *provider.ChatRequest, flusher http.Flusher) error {
+	setProxyStreamState(w, "upstream_connecting")
 	stream, err := prov.ChatStream(r.Context(), req)
 	if err != nil {
 		return fmt.Errorf("openai stream error: %w", err)
 	}
 	defer stream.Close()
+	setProxyStreamState(w, "upstream_connected")
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1342,16 +1412,34 @@ func modelTimeoutSeconds(
 	providerName string,
 	profile provider.ModelProfile,
 	hasProfile bool,
-) int {
+) (int, int) {
+	configuredTimeout := defaultModelTimeoutSeconds
 	if hasProfile && profile.TimeoutSeconds != nil && *profile.TimeoutSeconds > 0 {
-		return *profile.TimeoutSeconds
+		configuredTimeout = *profile.TimeoutSeconds
+	} else if modelCfg, ok := findModelConfig(cfg, requestedModel, upstreamModel, providerName); ok && modelCfg.TimeoutSeconds != nil && *modelCfg.TimeoutSeconds > 0 {
+		configuredTimeout = *modelCfg.TimeoutSeconds
 	}
 
-	modelCfg, ok := findModelConfig(cfg, requestedModel, upstreamModel, providerName)
-	if !ok || modelCfg.TimeoutSeconds == nil || *modelCfg.TimeoutSeconds <= 0 {
-		return defaultModelTimeoutSeconds
+	return configuredTimeout, effectiveClientBoundTimeoutSeconds(cfg, configuredTimeout)
+}
+
+func effectiveClientBoundTimeoutSeconds(cfg *config.AppConfig, configuredTimeout int) int {
+	if configuredTimeout <= 0 {
+		return 0
 	}
-	return *modelCfg.TimeoutSeconds
+	// VS/Copilot 实测会在约 100 秒取消 /v1/chat/completions。
+	// 如果代理允许 180/300 秒上游超时，用户只能等到客户端断开并看到 499，
+	// 上游网关也没有机会在客户端预算内完成失败切换。因此默认把有效上游预算
+	// 压到 client_timeout_budget_seconds：保留配置中“更短”的超时，但不让
+	// “更长”的 profile 超过客户端可等待窗口。
+	budget := config.DefaultClientTimeoutBudgetSeconds
+	if cfg != nil && cfg.Defense.ClientTimeoutBudgetSeconds != nil && *cfg.Defense.ClientTimeoutBudgetSeconds > 0 {
+		budget = *cfg.Defense.ClientTimeoutBudgetSeconds
+	}
+	if configuredTimeout > budget {
+		return budget
+	}
+	return configuredTimeout
 }
 
 func profileForProvider(catalog *provider.ModelCatalog, model string, prov provider.Provider) (provider.ModelProfile, bool) {

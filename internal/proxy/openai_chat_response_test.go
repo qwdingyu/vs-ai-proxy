@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
 
 func TestNormalizeOpenAIChatResponseForVisualStudioRewritesBlankFinishReason(t *testing.T) {
@@ -210,6 +212,45 @@ func TestNormalizeProviderSpecificToolCallsInOpenAIJSONPassesThroughUndeclaredTo
 	}
 	if choice.FinishReason != "tool_calls" || strings.Contains(choice.Message.Content, "Proxy blocked undeclared tool calls") {
 		t.Fatalf("stable mode should preserve tool call and finish reason: %s", normalized)
+	}
+}
+
+func TestNormalizeProviderSpecificToolCallsInOpenAIJSONCanonicalizesRunTestsAlias(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_test","type":"function","function":{"name":"run_tests","arguments":"{\"command\":\"go test ./...\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	normalized := normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"powershell": {}})
+
+	if !strings.Contains(string(normalized), `"name":"powershell"`) || strings.Contains(string(normalized), `"name":"run_tests"`) {
+		t.Fatalf("run_tests alias should canonicalize to powershell when declared: %s", normalized)
+	}
+}
+
+func TestNormalizeProviderSpecificToolCallsInOpenAIJSONDoesNotCanonicalizeToUndeclaredTarget(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_test","type":"function","function":{"name":"run_tests","arguments":"{\"command\":\"go test ./...\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	normalized := normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"get_file": {}})
+
+	if !strings.Contains(string(normalized), `"name":"run_tests"`) || strings.Contains(string(normalized), `"name":"powershell"`) {
+		t.Fatalf("run_tests alias must not canonicalize when no terminal tool is declared: %s", normalized)
+	}
+}
+
+func TestNormalizeOpenAIStreamLineCanonicalizesRunTestsAlias(t *testing.T) {
+	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"powershell": {}})
+	line := `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_test","type":"function","function":{"name":"run_tests","arguments":"{\"command\":"}}]},"finish_reason":null}]}`
+
+	normalized := normalizeOpenAIStreamLineForVisualStudioWithToolState(line, sanitizer)
+
+	if !strings.Contains(normalized, `"name":"powershell"`) || strings.Contains(normalized, `"name":"run_tests"`) {
+		t.Fatalf("stream run_tests alias should canonicalize to powershell when declared: %s", normalized)
+	}
+}
+
+func TestNormalizeProviderSpecificToolCallsCanonicalizesLegacyRunTestsAlias(t *testing.T) {
+	resp := &provider.ChatResponse{Choices: []provider.Choice{{Message: provider.Message{FunctionCall: &provider.FunctionCall{Name: "run_tests", Arguments: `{"command":"go test ./..."}`}}, FinishReason: "function_call"}}}
+
+	normalizeProviderSpecificToolCalls(resp, map[string]struct{}{"powershell": {}})
+
+	if resp.Choices[0].Message.FunctionCall == nil || resp.Choices[0].Message.FunctionCall.Name != "powershell" {
+		t.Fatalf("legacy run_tests alias should canonicalize to powershell: %#v", resp.Choices[0].Message.FunctionCall)
 	}
 }
 

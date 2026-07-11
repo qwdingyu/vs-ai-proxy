@@ -73,7 +73,9 @@ record = {
     'target_bytes': int(target_bytes),
     'script_rc': int(rc),
     'direct_status': result.get('direct_status'),
+    'direct_elapsed_ms': result.get('direct_elapsed_ms'),
     'proxy_status': result.get('proxy_status'),
+    'proxy_elapsed_ms': result.get('proxy_elapsed_ms'),
     'error_code': last.get('error_code'),
     'request_bytes': result.get('request_bytes'),
     'upstream_bytes': result.get('upstream_bytes'),
@@ -124,7 +126,8 @@ for r in records:
         f"{r.get('provider_id')}\t{r.get('model')}\t{r.get('target_bytes')}\t"
         f"direct={r.get('direct_status')}\tproxy={r.get('proxy_status')}\t"
         f"code={r.get('error_code') or '-'}\treq={r.get('request_bytes')}\t"
-        f"up={r.get('upstream_bytes')}\tdelta={r.get('delta_bytes')}"
+        f"up={r.get('upstream_bytes')}\tdelta={r.get('delta_bytes')}\t"
+        f"direct_ms={r.get('direct_elapsed_ms')}\tproxy_ms={r.get('proxy_elapsed_ms')}"
     )
 print(f"\n矩阵结果: {summary_path}")
 PY

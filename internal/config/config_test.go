@@ -237,6 +237,9 @@ func TestNormalizeForRuntimeDefaultsDefenseEnabledForOldConfigs(t *testing.T) {
 	if cfg.Defense.Enabled == nil || !*cfg.Defense.Enabled {
 		t.Fatalf("defense.enabled should default to true for old configs: %#v", cfg.Defense.Enabled)
 	}
+	if cfg.Defense.ClientTimeoutBudgetSeconds == nil || *cfg.Defense.ClientTimeoutBudgetSeconds != DefaultClientTimeoutBudgetSeconds {
+		t.Fatalf("client_timeout_budget_seconds should default to %d: %#v", DefaultClientTimeoutBudgetSeconds, cfg.Defense.ClientTimeoutBudgetSeconds)
+	}
 }
 
 func TestNormalizeForRuntimePreservesExplicitDefenseDisabled(t *testing.T) {
@@ -247,6 +250,26 @@ func TestNormalizeForRuntimePreservesExplicitDefenseDisabled(t *testing.T) {
 
 	if cfg.Defense.Enabled == nil || *cfg.Defense.Enabled {
 		t.Fatalf("explicit defense.enabled=false should be preserved: %#v", cfg.Defense.Enabled)
+	}
+}
+
+func TestNormalizeForRuntimeClampsClientTimeoutBudget(t *testing.T) {
+	tooHigh := 300
+	cfg := &AppConfig{Defense: DefenseConfig{ClientTimeoutBudgetSeconds: &tooHigh}, Providers: []ProviderConfig{DefaultUseAIProvider()}}
+
+	NormalizeForRuntime(cfg)
+
+	if cfg.Defense.ClientTimeoutBudgetSeconds == nil || *cfg.Defense.ClientTimeoutBudgetSeconds != MaxClientTimeoutBudgetSeconds {
+		t.Fatalf("high client timeout budget should clamp to %d: %#v", MaxClientTimeoutBudgetSeconds, cfg.Defense.ClientTimeoutBudgetSeconds)
+	}
+
+	tooLow := 1
+	cfg = &AppConfig{Defense: DefenseConfig{ClientTimeoutBudgetSeconds: &tooLow}, Providers: []ProviderConfig{DefaultUseAIProvider()}}
+
+	NormalizeForRuntime(cfg)
+
+	if cfg.Defense.ClientTimeoutBudgetSeconds == nil || *cfg.Defense.ClientTimeoutBudgetSeconds != MinClientTimeoutBudgetSeconds {
+		t.Fatalf("low client timeout budget should clamp to %d: %#v", MinClientTimeoutBudgetSeconds, cfg.Defense.ClientTimeoutBudgetSeconds)
 	}
 }
 

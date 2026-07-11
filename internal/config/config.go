@@ -16,6 +16,10 @@ const (
 	UseAIProviderBaseURL  = "https://api.eforge.xyz/v1"
 	UseAIProviderType     = "openai"
 	UseAIProviderPriority = 0
+
+	DefaultClientTimeoutBudgetSeconds = 90
+	MinClientTimeoutBudgetSeconds     = 15
+	MaxClientTimeoutBudgetSeconds     = 95
 )
 
 // ProviderConfig 表示一个 AI 提供商的配置。
@@ -62,7 +66,8 @@ type AppConfig struct {
 // DefenseConfig 控制代理侧对 OpenAI-compatible 上游的防御行为。
 // Enabled 用指针是为了区分“旧配置没写该字段”和“用户明确关闭”：旧配置升级时默认开启。
 type DefenseConfig struct {
-	Enabled *bool `json:"enabled"` // 是否启用短重试、稳定 User-Agent、限流冷却和协议兜底
+	Enabled                    *bool `json:"enabled"`                       // 是否启用短重试、稳定 User-Agent、限流冷却和协议兜底
+	ClientTimeoutBudgetSeconds *int  `json:"client_timeout_budget_seconds"` // VS/Copilot 等客户端等待预算，代理会把更长的模型超时裁剪到该值
 }
 
 // DefaultConfigDir 返回本项目默认配置目录。
@@ -94,7 +99,7 @@ func DefaultConfig() *AppConfig {
 	cfg := &AppConfig{
 		Port:         12345,
 		DefaultModel: "deepseek-v4-pro",
-		Defense:      DefenseConfig{Enabled: boolPtr(true)},
+		Defense:      DefenseConfig{Enabled: boolPtr(true), ClientTimeoutBudgetSeconds: intPtr(DefaultClientTimeoutBudgetSeconds)},
 		Providers: []ProviderConfig{
 			DefaultUseAIProvider(),
 			{
@@ -223,6 +228,21 @@ func NormalizeForRuntime(cfg *AppConfig) {
 	}
 	if cfg.Defense.Enabled == nil {
 		cfg.Defense.Enabled = boolPtr(true)
+	}
+	if cfg.Defense.ClientTimeoutBudgetSeconds == nil {
+		cfg.Defense.ClientTimeoutBudgetSeconds = intPtr(DefaultClientTimeoutBudgetSeconds)
+	} else {
+		budget := *cfg.Defense.ClientTimeoutBudgetSeconds
+		if budget <= 0 {
+			budget = DefaultClientTimeoutBudgetSeconds
+		}
+		if budget < MinClientTimeoutBudgetSeconds {
+			budget = MinClientTimeoutBudgetSeconds
+		}
+		if budget > MaxClientTimeoutBudgetSeconds {
+			budget = MaxClientTimeoutBudgetSeconds
+		}
+		cfg.Defense.ClientTimeoutBudgetSeconds = intPtr(budget)
 	}
 	EnsureBuiltInProviders(cfg)
 	NormalizeModelProviderBindings(cfg.Models, cfg.Providers)
@@ -472,6 +492,10 @@ func CloneAppConfig(cfg *AppConfig) *AppConfig {
 	if cfg.Defense.Enabled != nil {
 		v := *cfg.Defense.Enabled
 		out.Defense.Enabled = &v
+	}
+	if cfg.Defense.ClientTimeoutBudgetSeconds != nil {
+		v := *cfg.Defense.ClientTimeoutBudgetSeconds
+		out.Defense.ClientTimeoutBudgetSeconds = &v
 	}
 	out.Providers = append([]ProviderConfig(nil), cfg.Providers...)
 	out.Models = make([]ModelConfig, len(cfg.Models))
