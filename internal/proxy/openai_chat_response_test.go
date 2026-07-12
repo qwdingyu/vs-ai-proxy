@@ -276,6 +276,127 @@ func TestNormalizeProviderSpecificToolCallsInOpenAIJSONAllowsLegacyDeclaredFunct
 	}
 }
 
+func TestNormalizeProviderSpecificToolCallsInOpenAIJSONPassesThroughLegacyCreateFileWhenUndeclared(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","function_call":{"name":"create_file","arguments":"{\"path\":\"docs/08_当前程序架构与运行流程事实梳理.md\",\"content\":\"ok\"}"}},"finish_reason":"function_call"}]}`)
+	normalized := normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"powershell": {}})
+
+	if !strings.Contains(string(normalized), `"function_call"`) || !strings.Contains(string(normalized), `"name":"create_file"`) {
+		t.Fatalf("legacy create_file must pass through in stable mode: %s", normalized)
+	}
+	if strings.Contains(string(normalized), "Proxy blocked undeclared tool calls") || strings.Contains(string(normalized), `"finish_reason":"stop"`) {
+		t.Fatalf("legacy create_file should not be blocked: %s", normalized)
+	}
+}
+
+func TestNormalizeProviderSpecificToolCallsInOpenAIJSONPassesThroughLegacyGetFileWhenUndeclared(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","function_call":{"name":"get_file","arguments":"{\"filename\":\"docs/08_当前程序架构与运行流程事实梳理.md\"}"}},"finish_reason":"function_call"}]}`)
+	normalized := normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"powershell": {}})
+
+	if !strings.Contains(string(normalized), `"function_call"`) || !strings.Contains(string(normalized), `"name":"get_file"`) {
+		t.Fatalf("legacy get_file must pass through in stable mode: %s", normalized)
+	}
+	if strings.Contains(string(normalized), "Proxy blocked undeclared tool calls") || strings.Contains(string(normalized), `"finish_reason":"stop"`) {
+		t.Fatalf("legacy get_file should not be blocked: %s", normalized)
+	}
+}
+
+func TestOpenAIToolCallCompatibilityMatrixKeepsKnownVSTools(t *testing.T) {
+	// VS Copilot 在不同模型/网关组合下可能返回 OpenAI tool_calls、legacy
+	// function_call、SSE 增量 tool_calls 或 SSE legacy function_call。这里用矩阵
+	// 锁住核心原则：代理只做兼容性归一化，不因本地未声明而删除已命名工具。
+	tests := []struct {
+		name       string
+		tool       string
+		normalized func(string) string
+		want       string
+	}{
+		{
+			name: "json tool_calls create_file",
+			tool: "create_file",
+			normalized: func(tool string) string {
+				body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"` + tool + `","arguments":"{\"path\":\"docs/a.md\",\"content\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]}`)
+				return string(normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"powershell": {}}))
+			},
+			want: `"tool_calls"`,
+		},
+		{
+			name: "json tool_calls get_file",
+			tool: "get_file",
+			normalized: func(tool string) string {
+				body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"` + tool + `","arguments":"{\"filename\":\"docs/a.md\"}"}}]},"finish_reason":"tool_calls"}]}`)
+				return string(normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"powershell": {}}))
+			},
+			want: `"tool_calls"`,
+		},
+		{
+			name: "json legacy function_call create_file",
+			tool: "create_file",
+			normalized: func(tool string) string {
+				body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","function_call":{"name":"` + tool + `","arguments":"{\"path\":\"docs/a.md\",\"content\":\"ok\"}"}},"finish_reason":"function_call"}]}`)
+				return string(normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"powershell": {}}))
+			},
+			want: `"function_call"`,
+		},
+		{
+			name: "json legacy function_call get_file",
+			tool: "get_file",
+			normalized: func(tool string) string {
+				body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","function_call":{"name":"` + tool + `","arguments":"{\"filename\":\"docs/a.md\"}"}},"finish_reason":"function_call"}]}`)
+				return string(normalizeProviderSpecificToolCallsInOpenAIJSON(body, map[string]struct{}{"powershell": {}}))
+			},
+			want: `"function_call"`,
+		},
+		{
+			name: "stream tool_calls create_file",
+			tool: "create_file",
+			normalized: func(tool string) string {
+				line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"` + tool + `","arguments":"{\"path\":\"docs/a.md\",\"content\":\"ok\"}"}}]},"finish_reason":null}]}`
+				return normalizeOpenAIStreamLineForVisualStudioWithTools(line, map[string]struct{}{"powershell": {}})
+			},
+			want: `"tool_calls"`,
+		},
+		{
+			name: "stream tool_calls get_file",
+			tool: "get_file",
+			normalized: func(tool string) string {
+				line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"` + tool + `","arguments":"{\"filename\":\"docs/a.md\"}"}}]},"finish_reason":null}]}`
+				return normalizeOpenAIStreamLineForVisualStudioWithTools(line, map[string]struct{}{"powershell": {}})
+			},
+			want: `"tool_calls"`,
+		},
+		{
+			name: "stream legacy function_call create_file",
+			tool: "create_file",
+			normalized: func(tool string) string {
+				line := `data: {"choices":[{"delta":{"function_call":{"name":"` + tool + `","arguments":"{\"path\":\"docs/a.md\",\"content\":\"ok\"}"}},"finish_reason":null}]}`
+				return normalizeOpenAIStreamLineForVisualStudioWithTools(line, map[string]struct{}{"powershell": {}})
+			},
+			want: `"function_call"`,
+		},
+		{
+			name: "stream legacy function_call get_file",
+			tool: "get_file",
+			normalized: func(tool string) string {
+				line := `data: {"choices":[{"delta":{"function_call":{"name":"` + tool + `","arguments":"{\"filename\":\"docs/a.md\"}"}},"finish_reason":null}]}`
+				return normalizeOpenAIStreamLineForVisualStudioWithTools(line, map[string]struct{}{"powershell": {}})
+			},
+			want: `"function_call"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized := tt.normalized(tt.tool)
+			if !strings.Contains(normalized, tt.want) || !strings.Contains(normalized, `"name":"`+tt.tool+`"`) {
+				t.Fatalf("tool call was not preserved: %s", normalized)
+			}
+			if strings.Contains(normalized, "Proxy blocked undeclared tool calls") || strings.Contains(normalized, "空工具名") || strings.Contains(normalized, `"finish_reason":"stop"`) {
+				t.Fatalf("tool call should not be blocked or downgraded: %s", normalized)
+			}
+		})
+	}
+}
+
 func TestNormalizeOpenAIStreamLinePassesThroughNamedToolWhenRequestDeclaresNone(t *testing.T) {
 	sanitizer := newOpenAIStreamToolSanitizer(nil)
 	line := normalizeOpenAIStreamLineForVisualStudioWithToolState(
@@ -314,6 +435,17 @@ func TestNormalizeOpenAIStreamLineAllowsArgumentOnlyToolCallChunks(t *testing.T)
 	}
 	if !strings.Contains(normalized, `"tool_calls"`) || !strings.Contains(normalized, `"arguments"`) {
 		t.Fatalf("argument-only stream chunk must pass through unchanged enough for VS to merge it: %s", normalized)
+	}
+}
+
+func TestNormalizeOpenAIStreamLinePreservesToolCallsFinishWithoutObservedName(t *testing.T) {
+	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"create_file": {}})
+	line := `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`
+
+	normalized := normalizeOpenAIStreamLineForVisualStudioWithToolState(line, sanitizer)
+
+	if !strings.Contains(normalized, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("stable mode must not downgrade tool_calls finish_reason without observed name: %s", normalized)
 	}
 }
 

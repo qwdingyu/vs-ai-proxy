@@ -185,17 +185,6 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 			if canonicalizeRawToolCallNames(calls, allowedTools) {
 				changed = true
 			}
-			kept, removed := sanitizeRawToolCalls(calls, allowedTools)
-			if len(removed) > 0 {
-				if len(kept) > 0 {
-					message["tool_calls"] = kept
-				} else {
-					delete(message, "tool_calls")
-					message["content"] = appendToolSanitizationNotice(asString(message["content"]), removed)
-					choice["finish_reason"] = "stop"
-				}
-				changed = true
-			}
 			continue
 		}
 		if functionCall, ok := message["function_call"].(map[string]any); ok && functionCall != nil {
@@ -203,7 +192,7 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 				changed = true
 			}
 			name, _ := functionCall["name"].(string)
-			if !isAllowedDSMLTool(name, allowedTools) {
+			if strings.TrimSpace(name) == "" {
 				delete(message, "function_call")
 				message["content"] = appendToolSanitizationNotice(asString(message["content"]), []string{toolNoticeName(name)})
 				choice["finish_reason"] = "stop"
@@ -229,13 +218,6 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 		return body
 	}
 	return out
-}
-
-func sanitizeRawToolCalls(calls []any, allowedTools map[string]struct{}) ([]any, []string) {
-	// VS Stable 默认策略：工具调用必须优先透传，不能因为代理没有识别到
-	// tools/functions 声明就删除 create_file / powershell / git 等合法调用。
-	// strict 阻断以后只能作为显式高级策略启用；当前默认返回原始 calls。
-	return calls, nil
 }
 
 func toolNoticeName(name string) string {
@@ -473,23 +455,12 @@ func normalizeOpenAIStreamFinishReasonForVisualStudio(line string) string {
 }
 
 type openAIStreamToolSanitizer struct {
-	allowedTools               map[string]struct{}
-	blockedToolCallIndexes     map[streamToolCallKey]struct{}
-	blockedLegacyFunctionCalls map[int]bool
-	hasAllowedToolCalls        map[int]bool
-}
-
-type streamToolCallKey struct {
-	choiceIndex int
-	toolIndex   int
+	allowedTools map[string]struct{}
 }
 
 func newOpenAIStreamToolSanitizer(allowedTools map[string]struct{}) *openAIStreamToolSanitizer {
 	return &openAIStreamToolSanitizer{
-		allowedTools:               allowedTools,
-		blockedToolCallIndexes:     map[streamToolCallKey]struct{}{},
-		blockedLegacyFunctionCalls: map[int]bool{},
-		hasAllowedToolCalls:        map[int]bool{},
+		allowedTools: allowedTools,
 	}
 }
 
@@ -516,7 +487,6 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 		if choice == nil {
 			continue
 		}
-		choiceIndex := openAIStreamChoiceIndex(choice)
 		delta, _ := choice["delta"].(map[string]any)
 		if delta == nil {
 			delta, _ = choice["message"].(map[string]any)
@@ -528,36 +498,11 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 			if canonicalizeRawToolCallNames(calls, s.allowedTools) {
 				changed = true
 			}
-			kept, removed, dropped := s.sanitizeDeltaToolCalls(choiceIndex, calls)
-			if len(removed) > 0 || dropped {
-				if len(kept) > 0 {
-					delta["tool_calls"] = kept
-				} else if len(removed) > 0 {
-					delete(delta, "tool_calls")
-					delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), removed)
-				} else {
-					delete(delta, "tool_calls")
-				}
-				changed = true
-			}
 		}
 		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
 			if canonicalizeRawLegacyFunctionCall(functionCall, s.allowedTools) {
 				changed = true
 			}
-			removed := s.sanitizeLegacyFunctionCall(choiceIndex, functionCall)
-			if len(removed) > 0 {
-				delete(delta, "function_call")
-				delta["content"] = appendToolSanitizationNotice(asString(delta["content"]), removed)
-				changed = true
-			} else if _, stillPresent := delta["function_call"]; stillPresent && s.blockedLegacyFunctionCalls[choiceIndex] {
-				delete(delta, "function_call")
-				changed = true
-			}
-		}
-		if finish, ok := choice["finish_reason"].(string); ok && finish == "tool_calls" && !s.hasAllowedToolCalls[choiceIndex] {
-			choice["finish_reason"] = "stop"
-			changed = true
 		}
 	}
 	if !changed {
@@ -568,33 +513,6 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 		return line
 	}
 	return "data: " + string(normalized)
-}
-
-func (s *openAIStreamToolSanitizer) sanitizeDeltaToolCalls(choiceIndex int, calls []any) ([]any, []string, bool) {
-	kept := make([]any, 0, len(calls))
-	for _, raw := range calls {
-		call, _ := raw.(map[string]any)
-		function, _ := call["function"].(map[string]any)
-		name, _ := function["name"].(string)
-		// OpenAI SSE 的 tool_calls 是增量协议。默认稳定模式只观察工具名，
-		// 不再删除未声明工具，避免误拦 VS Copilot 的合法 create_file/powershell/git。
-		if strings.TrimSpace(name) != "" {
-			s.hasAllowedToolCalls[choiceIndex] = true
-		}
-		kept = append(kept, raw)
-	}
-	return kept, nil, false
-}
-
-func (s *openAIStreamToolSanitizer) sanitizeLegacyFunctionCall(choiceIndex int, functionCall map[string]any) []string {
-	name, _ := functionCall["name"].(string)
-	if strings.TrimSpace(name) == "" {
-		return nil
-	}
-	// legacy function_call 也按默认透传处理，只记录存在过工具调用。
-	s.blockedLegacyFunctionCalls[choiceIndex] = false
-	s.hasAllowedToolCalls[choiceIndex] = true
-	return nil
 }
 
 func openAIStreamChoiceIndex(choice map[string]any) int {

@@ -676,7 +676,7 @@ func TestOpenAIStreamHandlesLegacyFunctionCallContinuationAtHandler(t *testing.T
 	}
 }
 
-func TestOpenAIStreamBlocksLegacyFunctionCallContinuationAtHandler(t *testing.T) {
+func TestOpenAIStreamPassesThroughLegacyFunctionCallContinuationAtHandler(t *testing.T) {
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"function_call":{"name":"powershell","arguments":"{\"command\":"}},"finish_reason":null}]}`,
 		`data: {"choices":[{"delta":{"function_call":{"arguments":"\"Remove-Item\"}"}},"finish_reason":null}]}`,

@@ -935,3 +935,77 @@ Windows 后台替换脚本启动成功后，主进程必须主动退出，让脚
 2. 再看 `response_tools`，确认模型实际返回了什么工具名。
 3. 如果 `response_tools` 里是未声明工具名，优先判断为模型方言漂移，而不是代理拦截。
 4. 如发现新的稳定别名，应加入别名表并补四类测试：标准、legacy、流式、DSML。
+
+## 2026-07-11 追加：legacy `function_call:create_file` 仍可能导致“无法运行 create_file”
+
+### 现象
+
+用户反馈 GPT 准备创建文档：
+
+```text
+开始写入新的事实版文档：docs/08_当前程序架构与运行流程事实梳理.md
+无法运行 create_file
+```
+
+这类问题需要区分两种格式：
+
+- modern OpenAI `tool_calls`：当前稳定策略已经默认透传，不会因为未声明而删除 `create_file`。
+- legacy `function_call`：部分 GPT / GLM / 兼容网关可能仍返回旧格式 `function_call`，而不是 `tool_calls`。
+
+### 复盘结论
+
+复查代码后发现一个边界问题：
+
+- 标准 `tool_calls` 已按稳定策略透传。
+- 流式 `function_call` 已按稳定策略透传。
+- 但 raw JSON 非流式路径里的 legacy `message.function_call` 仍保留了旧逻辑：如果工具名未在当前请求声明中匹配，就可能把它删除并写入 `Proxy blocked undeclared tool calls`。
+
+这会造成某些 GPT 响应返回 legacy `function_call:create_file` 时，VS 端看起来像“无法运行 create_file”。
+
+### 修复策略
+
+现在统一为：
+
+1. legacy `function_call` 只在工具名为空时清理，避免空工具名导致 VS 执行异常。
+2. 只要 legacy `function_call.name` 非空，例如 `create_file`、`powershell`、`git`，默认稳定透传。
+3. 工具别名仍只映射到已声明目标工具，不扩权。
+4. DSML 文本方言仍要求目标工具已声明后才转换为可执行工具。
+
+### 新增回归
+
+新增测试覆盖：
+
+- raw JSON 非流式 legacy `function_call:create_file` 即使未声明，也必须透传。
+- raw JSON 非流式 legacy `function_call:get_file` 即使未声明，也必须透传。
+- OpenAI 标准 `tool_calls`、legacy `function_call`、SSE `tool_calls`、SSE legacy `function_call` 四类协议路径均覆盖 `create_file` / `get_file`。
+- 空 name 的 legacy `function_call` 仍会被清理并提示 `空工具名`，避免无效工具调用。
+
+### 2026-07-12 追加：测试不能只停留在“不报错”
+
+本次复盘后明确：工具调用兼容的发版准入不能只验证 HTTP 200、JSON 能解析，或响应字符串中包含 `tool_calls`。
+这类测试只能证明“代理没有崩”，不能证明 VS/Copilot 下游真的可以执行工具。
+
+新的准入标准分三层：
+
+1. **代理透传层**：确认代理不会删除、降级或改坏 `tool_calls` / `function_call`。
+2. **客户端解析层**：模拟 VS 客户端解析非流式 JSON 与流式 SSE，确保能拿到结构化工具名和参数。
+3. **执行语义层**：用最小工具运行时实际执行 `create_file` / `get_file`：先创建内存文件，再读取同一路径并校验内容。
+
+新增 `internal/proxy/tool_execution_e2e_test.go` 专门覆盖执行语义层：
+
+- 非流式 OpenAI `tool_calls`：`create_file` 后接 `get_file`，校验读取内容。
+- 非流式 legacy `function_call`：分别执行 `create_file` 与 `get_file`。
+- 流式 OpenAI `tool_calls`：解析 SSE 增量后执行创建和读取。
+- 流式 legacy `function_call`：解析 SSE 后执行旧格式工具调用。
+
+这组测试的目标不是替代真实 Visual Studio，而是把我们可控边界推到“下游拿到工具后能执行”的层级。
+如果这组测试失败，说明不是网络、模型质量或 VS UI 问题，而是代理输出的工具调用已经不具备可执行语义。
+
+### 排障建议
+
+如果后续仍看到“无法运行 create_file”：
+
+1. 查看 `request_tools` 是否包含 `create_file`。
+2. 查看 `response_tools` 是否返回了 `create_file`。
+3. 如果响应是 `function_call` 而不是 `tool_calls`，确认版本是否包含本修复。
+4. 如果代理日志显示 4xx/5xx/timeout，则问题发生在模型响应前，不是 `create_file` 执行阶段。
