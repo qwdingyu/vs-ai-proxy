@@ -20,11 +20,12 @@ var (
 )
 
 type attemptDiagnostic struct {
-	Provider string `json:"provider"`
-	Upstream string `json:"upstream_model"`
-	Category string `json:"category"`
-	Message  string `json:"message"`
-	Peer     string `json:"network_peer,omitempty"`
+	Provider  string  `json:"provider"`
+	Upstream  string  `json:"upstream_model"`
+	Category  string  `json:"category"`
+	Message   string  `json:"message"`
+	ElapsedMs float64 `json:"elapsed_ms,omitempty"`
+	Peer      string  `json:"network_peer,omitempty"`
 }
 
 type proxyDiagnosticDetails struct {
@@ -44,14 +45,24 @@ type proxyDiagnosticError struct {
 
 func writeProxyDiagnosticError(w http.ResponseWriter, status int, diag proxyDiagnosticError) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Proxy-Error-Code", diag.Code)
-	w.Header().Set("X-Proxy-Error-Message", sanitizeDiagnosticMessage(diag.Message))
-	w.Header().Set("X-Proxy-Error-Hint", sanitizeDiagnosticMessage(diag.Details.Hint))
+	w.Header().Set("X-Proxy-Error-Code", diagnosticHeaderValue(diag.Code))
+	w.Header().Set("X-Proxy-Error-Message", diagnosticHeaderValue(diag.Message))
+	w.Header().Set("X-Proxy-Error-Hint", diagnosticHeaderValue(diag.Details.Hint))
+	if summary := attemptsSummary(diag.Details.Attempts); summary != "" {
+		w.Header().Set("X-Proxy-Attempts-Summary", diagnosticHeaderValue(summary))
+	}
 	if peer := firstAttemptNetworkPeer(diag.Details.Attempts); peer != "" {
 		w.Header().Set("X-Proxy-Network-Peer", peer)
 	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": diag})
+}
+
+func diagnosticHeaderValue(value string) string {
+	value = sanitizeDiagnosticMessage(value)
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func noCandidateDiagnostic(requestedModel, resolvedModel string, candidateCount int) proxyDiagnosticError {
@@ -105,6 +116,39 @@ func allCandidatesFailedDiagnostic(requestedModel, resolvedModel string, candida
 	}
 }
 
+func attemptsSummary(attempts []attemptDiagnostic) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(attempts))
+	for _, attempt := range attempts {
+		label := providerModelLabel(attempt.Provider, attempt.Upstream)
+		if label == "" {
+			label = "unknown"
+		}
+		duration := ""
+		if attempt.ElapsedMs > 0 {
+			duration = " " + humanDurationMs(attempt.ElapsedMs)
+		}
+		category := strings.TrimSpace(attempt.Category)
+		if category == "" {
+			category = "provider_error"
+		}
+		parts = append(parts, label+duration+" "+category)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func humanDurationMs(ms float64) string {
+	if ms < 1000 {
+		return strconv.Itoa(int(ms+0.5)) + "ms"
+	}
+	if ms < 10000 {
+		return strconv.FormatFloat(ms/1000, 'f', 1, 64) + "s"
+	}
+	return strconv.Itoa(int(ms/1000+0.5)) + "s"
+}
+
 func diagnosticHintForAttempts(category string, attempts []attemptDiagnostic) string {
 	hint := diagnosticHint(category)
 	if len(attempts) == 0 {
@@ -139,17 +183,18 @@ func providerModelLabel(providerName, upstreamModel string) string {
 	}
 }
 
-func newAttemptDiagnostic(providerName, upstreamModel string, err error) attemptDiagnostic {
+func newAttemptDiagnostic(providerName, upstreamModel string, elapsedMs float64, err error) attemptDiagnostic {
 	message := ""
 	if err != nil {
 		message = sanitizeDiagnosticMessage(err.Error())
 	}
 	return attemptDiagnostic{
-		Provider: providerName,
-		Upstream: upstreamModel,
-		Category: classifyProxyErrorFromErr(err, message),
-		Message:  message,
-		Peer:     networkPeerFromMessage(message),
+		Provider:  providerName,
+		Upstream:  upstreamModel,
+		Category:  classifyProxyErrorFromErr(err, message),
+		Message:   message,
+		ElapsedMs: elapsedMs,
+		Peer:      networkPeerFromMessage(message),
 	}
 }
 
@@ -250,6 +295,124 @@ func diagnosticHint(category string) string {
 	default:
 		return "检查 provider 是否启用、API key 是否填写、模型名和 provider 类型是否匹配。"
 	}
+}
+
+type logDiagnosticSummary struct {
+	Reason  string
+	Action  string
+	Summary string
+}
+
+func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requestBytes int64, upstreamBytes int64, networkPeer string, streamState string) logDiagnosticSummary {
+	code = strings.TrimSpace(code)
+	if code == "" && statusCode < http.StatusBadRequest {
+		return logDiagnosticSummary{}
+	}
+	if code == "" && statusCode >= http.StatusBadRequest {
+		code = "provider_error"
+	}
+	requestSize := humanBytes(requestBytes)
+	upstreamSize := humanBytes(upstreamBytes)
+	switch code {
+	case "client_deadline_reached":
+		return logDiagnosticSummary{
+			Reason:  "客户端等待上限",
+			Action:  "查上游首 token、new-api/sub2api 单渠道超时和轮换；必要时减少上下文。",
+			Summary: compactDiagnosticSummary("VS/Copilot 接近等待上限后取消", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "client_gone":
+		return logDiagnosticSummary{
+			Reason:  "客户端主动断开",
+			Action:  "若耗时很短，多为用户取消/窗口关闭；若接近 100 秒，按客户端等待上限排查。",
+			Summary: compactDiagnosticSummary("客户端在响应完成前断开", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "timeout":
+		return logDiagnosticSummary{
+			Reason:  "代理/上游超时",
+			Action:  "检查模型 timeout_seconds、上游首 token 延迟和网关单渠道超时。",
+			Summary: compactDiagnosticSummary("请求超过有效超时预算", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "upstream_payload_too_large":
+		return logDiagnosticSummary{
+			Reason:  "上游拒绝大请求",
+			Action:  "减少历史上下文/文件内容，或切到支持更大上下文和工具声明的 provider/channel。",
+			Summary: compactDiagnosticSummary("上游返回 413 或等价大请求错误", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "upstream_rate_limit":
+		return logDiagnosticSummary{
+			Reason:  "上游限流/额度",
+			Action:  "检查账号额度、并发限制、429 冷却和 new-api 渠道限流配置。",
+			Summary: compactDiagnosticSummary("上游返回 429", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "upstream_server_error":
+		return logDiagnosticSummary{
+			Reason:  "上游服务异常",
+			Action:  "检查 new-api/sub2api 渠道健康、上游状态页和网关重试/轮换策略。",
+			Summary: compactDiagnosticSummary("上游返回 5xx", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "upstream_request_error":
+		return logDiagnosticSummary{
+			Reason:  "上游拒绝参数/模型",
+			Action:  "检查模型名、provider 绑定、base_url 和不兼容参数治理。",
+			Summary: compactDiagnosticSummary("上游返回 400/404", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "upstream_auth_error":
+		return logDiagnosticSummary{
+			Reason:  "上游鉴权失败",
+			Action:  "检查 API key、余额、权限和 provider 所需鉴权头。",
+			Summary: compactDiagnosticSummary("上游返回 401/403", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "network_error":
+		return logDiagnosticSummary{
+			Reason:  "网络/CDN/连接异常",
+			Action:  "检查本机网络、DNS/CDN、Cloudflare/WAF、源站连接和代理链路。",
+			Summary: compactDiagnosticSummary("连接被关闭、重置或网络不可达", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	case "proxy_parse_error":
+		return logDiagnosticSummary{
+			Reason:  "上游响应格式异常",
+			Action:  "保存响应样本，检查是否 stream=false 返回 SSE、HTML 错误页或非 JSON 内容。",
+			Summary: compactDiagnosticSummary("代理无法按协议解析上游响应", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+		}
+	}
+	return logDiagnosticSummary{
+		Reason:  "未分类请求失败",
+		Action:  "查看错误正文、provider/model/upstream、请求体大小和工具声明。",
+		Summary: compactDiagnosticSummary("请求失败，需结合错误正文排查", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+	}
+}
+
+func compactDiagnosticSummary(prefix string, elapsedMs float64, requestSize string, upstreamSize string, networkPeer string, streamState string) string {
+	parts := []string{prefix}
+	if elapsedMs > 0 {
+		parts = append(parts, "耗时 "+strconv.Itoa(int(elapsedMs+0.5))+"ms")
+	}
+	if requestSize != "" {
+		parts = append(parts, "请求体 "+requestSize)
+	}
+	if upstreamSize != "" {
+		parts = append(parts, "上游体 "+upstreamSize)
+	}
+	if strings.TrimSpace(networkPeer) != "" {
+		parts = append(parts, "远端 "+strings.TrimSpace(networkPeer))
+	}
+	if strings.TrimSpace(streamState) != "" {
+		parts = append(parts, "流状态 "+strings.TrimSpace(streamState))
+	}
+	return strings.Join(parts, "；")
+}
+
+func humanBytes(bytes int64) string {
+	if bytes <= 0 {
+		return ""
+	}
+	if bytes < 1024 {
+		return strconv.FormatInt(bytes, 10) + " B"
+	}
+	if bytes < 1024*1024 {
+		return strconv.FormatFloat(float64(bytes)/1024, 'f', 1, 64) + " KB"
+	}
+	return strconv.FormatFloat(float64(bytes)/1024/1024, 'f', 2, 64) + " MB"
 }
 
 func networkPeerFromMessage(message string) string {

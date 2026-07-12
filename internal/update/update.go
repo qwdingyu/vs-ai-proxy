@@ -216,29 +216,7 @@ func LaunchWindowsSelfUpdate(result SelfUpdateResult, args []string) error {
 	}
 	scriptPath := filepath.Join(filepath.Dir(result.StagedBinaryPath), "vs-ai-proxy-self-update.ps1")
 	logPath := filepath.Join(filepath.Dir(result.StagedBinaryPath), "vs-ai-proxy-self-update.log")
-	quotedArgs := powershellStringArray(args)
-	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
-$pidToWait = %d
-$exe = %s
-$stage = %s
-$backup = %s
-$log = %s
-$argsToPass = @(%s)
-try {
-  "[$(Get-Date -Format o)] waiting for pid $pidToWait" | Out-File -FilePath $log -Encoding utf8 -Append
-  while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
-  "[$(Get-Date -Format o)] replacing $exe" | Out-File -FilePath $log -Encoding utf8 -Append
-  if (Test-Path $backup) { Remove-Item -Force $backup }
-  if (Test-Path $exe) { Move-Item -Force $exe $backup }
-  Move-Item -Force $stage $exe
-  "[$(Get-Date -Format o)] starting $exe" | Out-File -FilePath $log -Encoding utf8 -Append
-  Start-Process -FilePath $exe -ArgumentList $argsToPass -WorkingDirectory %s
-  "[$(Get-Date -Format o)] done" | Out-File -FilePath $log -Encoding utf8 -Append
-} catch {
-  "[$(Get-Date -Format o)] ERROR $($_.Exception.Message)" | Out-File -FilePath $log -Encoding utf8 -Append
-  throw
-}
-`, os.Getpid(), psQuote(result.ExecutablePath), psQuote(result.StagedBinaryPath), psQuote(result.BackupPath), psQuote(logPath), quotedArgs, psQuote(mustGetwd()))
+	script := windowsSelfUpdateScript(result, args, logPath, os.Getpid(), mustGetwd())
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 		return err
 	}
@@ -247,6 +225,66 @@ try {
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 	return cmd.Start()
+}
+
+func windowsSelfUpdateScript(result SelfUpdateResult, args []string, logPath string, pidToWait int, workingDir string) string {
+	quotedArgs := powershellStringArray(args)
+	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$pidToWait = %d
+$exe = %s
+$stage = %s
+$backup = %s
+$log = %s
+$argsToPass = @(%s)
+function Write-UpdateLog([string]$message) {
+  "[$(Get-Date -Format o)] $message" | Out-File -FilePath $log -Encoding utf8 -Append
+}
+function Assert-PathExists([string]$path, [string]$label) {
+  if (-not (Test-Path -LiteralPath $path)) { throw "$label 不存在: $path" }
+}
+function Move-WithRetry([string]$source, [string]$target, [string]$label) {
+  $lastError = $null
+  for ($i = 1; $i -le 20; $i++) {
+    try {
+      Move-Item -LiteralPath $source -Destination $target -Force
+      Write-UpdateLog "$label 成功，第 $i 次尝试"
+      return
+    } catch {
+      $lastError = $_.Exception.Message
+      Write-UpdateLog "$label 失败，第 $i 次尝试: $lastError"
+      Start-Sleep -Milliseconds 300
+    }
+  }
+  throw "$label 失败，已重试 20 次: $lastError"
+}
+try {
+  Write-UpdateLog "waiting for pid $pidToWait"
+  while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
+  Write-UpdateLog "preflight exe=$exe stage=$stage backup=$backup"
+  Assert-PathExists $stage '新版暂存文件'
+  $stageInfo = Get-Item -LiteralPath $stage
+  if ($stageInfo.Length -le 0) { throw "新版暂存文件为空: $stage" }
+  if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
+  if (Test-Path -LiteralPath $exe) { Move-WithRetry $exe $backup '备份旧版本' }
+  Move-WithRetry $stage $exe '安装新版本'
+  Assert-PathExists $exe '安装后的程序'
+  if ((Test-Path -LiteralPath $stage)) { throw "新版暂存文件仍存在，说明替换未完成: $stage" }
+  Write-UpdateLog "starting $exe"
+  Start-Process -FilePath $exe -ArgumentList $argsToPass -WorkingDirectory %s
+  Write-UpdateLog 'done'
+} catch {
+  Write-UpdateLog "ERROR $($_.Exception.Message)"
+  if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $exe)) {
+    try {
+      Move-Item -LiteralPath $backup -Destination $exe -Force
+      Write-UpdateLog 'rollback restored backup'
+    } catch {
+      Write-UpdateLog "rollback failed: $($_.Exception.Message)"
+    }
+  }
+  throw
+}
+`, pidToWait, psQuote(result.ExecutablePath), psQuote(result.StagedBinaryPath), psQuote(result.BackupPath), psQuote(logPath), quotedArgs, psQuote(workingDir))
 }
 
 func normalizeOptions(opts Options) Options {

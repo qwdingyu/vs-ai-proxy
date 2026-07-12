@@ -32,6 +32,9 @@ jobs:
       - name: 全量测试
         run: go test ./... -count=1
 
+      - name: 工具调用专项核查
+        run: make tool-check
+
       - name: 编译（当前平台）
         run: make build
 

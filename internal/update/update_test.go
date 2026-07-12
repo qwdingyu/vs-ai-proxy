@@ -222,6 +222,33 @@ func TestReplaceExecutableBacksUpAndInstallsStage(t *testing.T) {
 	}
 }
 
+func TestWindowsSelfUpdateScriptIncludesPreflightRetryRollbackAndCleanupChecks(t *testing.T) {
+	result := SelfUpdateResult{
+		ExecutablePath:     `C:\apps\vs-ai-proxy.exe`,
+		StagedBinaryPath:   `C:\apps\vs-ai-proxy.exe.new`,
+		BackupPath:         `C:\apps\vs-ai-proxy.exe.bak-20260712000102`,
+		NeedsExternalApply: true,
+	}
+
+	script := windowsSelfUpdateScript(result, []string{"--config", `C:\cfg\config.json`}, `C:\apps\vs-ai-proxy-self-update.log`, 1234, `C:\apps`)
+	for _, want := range []string{
+		"function Write-UpdateLog",
+		"function Assert-PathExists",
+		"function Move-WithRetry",
+		"$label 不存在",
+		"新版暂存文件为空",
+		"已重试 20 次",
+		"新版暂存文件仍存在",
+		"rollback restored backup",
+		"--config",
+		`C:\cfg\config.json`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func buildTarGz(t *testing.T, name string, data []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer

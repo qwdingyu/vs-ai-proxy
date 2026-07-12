@@ -304,6 +304,22 @@ func TestParsePIDLinesDeduplicatesPIDs(t *testing.T) {
 	}
 }
 
+func TestSafeProxyProcessNameAndDisplayName(t *testing.T) {
+	for _, name := range []string{"vs-ai-proxy", "vs-ai-proxy.exe", "server", "server.exe"} {
+		if !isSafeProxyProcessName(name) {
+			t.Fatalf("%q should be safe proxy process", name)
+		}
+	}
+	for _, name := range []string{"powershell", "Code", "nginx", ""} {
+		if isSafeProxyProcessName(name) {
+			t.Fatalf("%q should not be safe proxy process", name)
+		}
+	}
+	if got := displayProcessName(""); got != "进程名未知" {
+		t.Fatalf("displayProcessName empty = %q", got)
+	}
+}
+
 func TestIsPortBindErrorRecognizesWindowsForbiddenSocket(t *testing.T) {
 	err := errors.New("listen tcp 127.0.0.1:12345: bind: An attempt was made to access a socket in a way forbidden by its access permissions.")
 	if !isPortBindError(err) {

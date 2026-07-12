@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dingyuwang/vs-ai-proxy/internal/requestmeta"
 )
 
 func TestOpenAIProviderUsesCapabilityPaths(t *testing.T) {
@@ -116,6 +118,44 @@ func TestOpenAIProviderChatRawPreservesToolFields(t *testing.T) {
 	}
 	if captured["tool_choice"] != "auto" || captured["parallel_tool_calls"] != true {
 		t.Fatalf("tool selection fields missing: %#v", captured)
+	}
+}
+
+func TestOpenAIProviderForwardsRequestIDHeaders(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "chat_raw", true: "chat_stream"}[stream], func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("X-Request-ID"); got != "req-upstream-1" {
+					t.Fatalf("X-Request-ID = %q, want req-upstream-1", got)
+				}
+				if got := r.Header.Get("X-Proxy-Request-ID"); got != "req-upstream-1" {
+					t.Fatalf("X-Proxy-Request-ID = %q, want req-upstream-1", got)
+				}
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+			}))
+			defer upstream.Close()
+
+			prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+			ctx := requestmeta.ContextWithRequestID(context.Background(), "req-upstream-1")
+			req := &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}}
+			if stream {
+				streamBody, err := prov.ChatStream(ctx, req)
+				if err != nil {
+					t.Fatalf("ChatStream returned error: %v", err)
+				}
+				_ = streamBody.Close()
+				return
+			}
+			if _, err := prov.ChatRaw(ctx, req); err != nil {
+				t.Fatalf("ChatRaw returned error: %v", err)
+			}
+		})
 	}
 }
 
@@ -879,6 +919,46 @@ func TestOllamaProviderBuildsNativeChatRequest(t *testing.T) {
 	}
 	if _, ok := options["custom_option"]; !ok {
 		t.Fatalf("custom_option was not preserved: %#v", options)
+	}
+}
+
+func TestOllamaProviderForwardsRequestIDHeaders(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "chat_raw", true: "chat_stream"}[stream], func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/chat" {
+					t.Fatalf("unexpected path: %s", r.URL.Path)
+				}
+				if got := r.Header.Get("X-Request-ID"); got != "req-ollama-1" {
+					t.Fatalf("X-Request-ID = %q, want req-ollama-1", got)
+				}
+				if got := r.Header.Get("X-Proxy-Request-ID"); got != "req-ollama-1" {
+					t.Fatalf("X-Proxy-Request-ID = %q, want req-ollama-1", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if stream {
+					_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"done":true}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"done":true}`))
+			}))
+			defer upstream.Close()
+
+			prov := NewOllamaProvider("ollama", upstream.URL, true, time.Second)
+			ctx := requestmeta.ContextWithRequestID(context.Background(), "req-ollama-1")
+			req := &ChatRequest{Model: "llama", Messages: []Message{{Role: "user", Content: "hi"}}}
+			if stream {
+				body, err := prov.ChatStream(ctx, req)
+				if err != nil {
+					t.Fatalf("ChatStream returned error: %v", err)
+				}
+				_ = body.Close()
+				return
+			}
+			if _, err := prov.ChatRaw(ctx, req); err != nil {
+				t.Fatalf("ChatRaw returned error: %v", err)
+			}
+		})
 	}
 }
 

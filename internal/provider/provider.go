@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dingyuwang/vs-ai-proxy/internal/requestmeta"
 )
 
 // ChatRequest 聊天请求
@@ -132,6 +134,10 @@ type Provider interface {
 
 	// IsEnabled 是否启用
 	IsEnabled() bool
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	return requestmeta.RequestIDFromContext(ctx)
 }
 
 // OpenAIProvider OpenAI 兼容提供商
@@ -627,9 +633,19 @@ func (p *OpenAIProvider) applyOpenAIRequestHeaders(req *http.Request, accept str
 	if req.Body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	applyRequestIDHeaders(req)
 	if strings.EqualFold(p.capabilityName(), "openrouter") || strings.EqualFold(p.NameStr, "openrouter") {
 		applyOpenRouterHeaders(req)
 	}
+}
+
+func applyRequestIDHeaders(req *http.Request) {
+	requestID := requestIDFromContext(req.Context())
+	if requestID == "" {
+		return
+	}
+	req.Header.Set("X-Request-ID", requestID)
+	req.Header.Set("X-Proxy-Request-ID", requestID)
 }
 
 func providerUserAgent() string {
@@ -856,6 +872,7 @@ func (p *OllamaProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	applyRequestIDHeaders(httpReq)
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {
@@ -886,6 +903,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	applyRequestIDHeaders(httpReq)
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {

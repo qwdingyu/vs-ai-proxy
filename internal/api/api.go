@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ const adminSessionCookieName = "vs_ai_proxy_admin_token"
 // 并在 staticFS 非空时兼做静态资源与 SPA 路由的宿主。
 type Server struct {
 	engine    *gin.Engine
+	port      int
 	configMgr *config.Manager
 	proxy     *proxy.Server
 	store     *store.Store
@@ -58,6 +60,7 @@ func NewServer(
 
 	s := &Server{
 		engine:    engine,
+		port:      port,
 		configMgr: configMgr,
 		proxy:     proxySrv,
 		store:     st,
@@ -312,10 +315,245 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 
 	// 统计相关
 	group.GET("/statistics", s.getStatistics)
+	group.GET("/runtime/status", s.getRuntimeStatus)
+	group.GET("/diagnostics/summary", s.getDiagnosticsSummary)
 }
 
 func (s *Server) getVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"version": s.proxy.Version()})
+}
+
+type runtimeFileStatus struct {
+	Path     string     `json:"path"`
+	Exists   bool       `json:"exists"`
+	Size     int64      `json:"size,omitempty"`
+	Modified *time.Time `json:"modified,omitempty"`
+}
+
+type runtimeUpdateArtifacts struct {
+	StagedBinary     runtimeFileStatus `json:"staged_binary"`
+	SelfUpdateScript runtimeFileStatus `json:"self_update_script"`
+	SelfUpdateLog    runtimeFileStatus `json:"self_update_log"`
+	BackupCount      int               `json:"backup_count"`
+	LatestBackup     runtimeFileStatus `json:"latest_backup"`
+}
+
+type runtimeStatusResponse struct {
+	Version         string                 `json:"version"`
+	ConfigPath      string                 `json:"config_path"`
+	ExecutablePath  string                 `json:"executable_path"`
+	PID             int                    `json:"pid"`
+	GOOS            string                 `json:"goos"`
+	GOARCH          string                 `json:"goarch"`
+	ListenHost      string                 `json:"listen_host"`
+	ListenPort      int                    `json:"listen_port"`
+	AdminURL        string                 `json:"admin_url"`
+	ProviderCount   int                    `json:"provider_count"`
+	ModelCount      int                    `json:"model_count"`
+	ExecutableError string                 `json:"executable_error,omitempty"`
+	UpdateArtifacts runtimeUpdateArtifacts `json:"update_artifacts"`
+}
+
+type diagnosticsSummaryResponse struct {
+	Runtime          runtimeStatusResponse    `json:"runtime"`
+	Statistics       store.Statistics         `json:"statistics"`
+	LatestFailure    store.RequestLog         `json:"latest_failure"`
+	ProviderHealth   []providerHealthResponse `json:"provider_health"`
+	ProblemProviders []providerHealthResponse `json:"problem_providers"`
+	CopySummary      string                   `json:"copy_summary"`
+}
+
+func (s *Server) getRuntimeStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, s.runtimeStatusPayload())
+}
+
+func runtimePathStatus(path string) runtimeFileStatus {
+	path = strings.TrimSpace(path)
+	status := runtimeFileStatus{Path: path}
+	if path == "" {
+		return status
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return status
+	}
+	modified := info.ModTime()
+	status.Exists = true
+	status.Size = info.Size()
+	status.Modified = &modified
+	return status
+}
+
+func (s *Server) getDiagnosticsSummary(c *gin.Context) {
+	stats := s.store.GetStatistics()
+	latestFailure := store.RequestLog{}
+	if item, ok := s.store.GetLatestFailure(); ok {
+		latestFailure = item
+	}
+	providerHealth := s.providerHealthSnapshotResponse()
+	problemProviders := []providerHealthResponse{}
+	for _, item := range providerHealth {
+		if item.CooldownRemainingMs > 0 || item.ConsecutiveFailures > 0 || strings.TrimSpace(item.LastError) != "" {
+			problemProviders = append(problemProviders, item)
+		}
+	}
+
+	c.JSON(http.StatusOK, diagnosticsSummaryResponse{
+		Runtime:          s.runtimeStatusPayload(),
+		Statistics:       stats,
+		LatestFailure:    latestFailure,
+		ProviderHealth:   providerHealth,
+		ProblemProviders: problemProviders,
+		CopySummary:      buildDiagnosticsCopySummary(stats, latestFailure, problemProviders),
+	})
+}
+
+func (s *Server) runtimeStatusPayload() runtimeStatusResponse {
+	exePath, exeErr := os.Executable()
+	if exeErr == nil {
+		exePath = filepath.Clean(exePath)
+	}
+	exeDir := ""
+	backupPattern := ""
+	backups := []string{}
+	if exePath != "" {
+		exeDir = filepath.Dir(exePath)
+		backupPattern = exePath + ".bak-*"
+		backups, _ = filepath.Glob(backupPattern)
+	}
+	sort.Strings(backups)
+	latestBackup := ""
+	if len(backups) > 0 {
+		latestBackup = backups[len(backups)-1]
+	}
+	cfg := s.configMgr.Get()
+	listenPort := s.port
+	if cfg.Port > 0 {
+		listenPort = cfg.Port
+	}
+	listenHost := strings.TrimSpace(os.Getenv("HOST"))
+	if listenHost == "" {
+		listenHost = "127.0.0.1"
+	}
+	executableError := ""
+	if exeErr != nil {
+		executableError = exeErr.Error()
+	}
+	return runtimeStatusResponse{
+		Version:         s.proxy.Version(),
+		ConfigPath:      s.configMgr.ConfigPath(),
+		ExecutablePath:  exePath,
+		PID:             os.Getpid(),
+		GOOS:            runtime.GOOS,
+		GOARCH:          runtime.GOARCH,
+		ListenHost:      listenHost,
+		ListenPort:      listenPort,
+		AdminURL:        fmt.Sprintf("http://%s:%d/admin", adminURLHost(listenHost), listenPort),
+		ProviderCount:   len(cfg.Providers),
+		ModelCount:      len(cfg.Models),
+		ExecutableError: executableError,
+		UpdateArtifacts: runtimeUpdateArtifacts{
+			StagedBinary:     runtimePathStatus(exePath + ".new"),
+			SelfUpdateScript: runtimePathStatus(filepath.Join(exeDir, "vs-ai-proxy-self-update.ps1")),
+			SelfUpdateLog:    runtimePathStatus(filepath.Join(exeDir, "vs-ai-proxy-self-update.log")),
+			BackupCount:      len(backups),
+			LatestBackup:     runtimePathStatus(latestBackup),
+		},
+	}
+}
+
+func adminURLHost(listenHost string) string {
+	host := strings.TrimSpace(listenHost)
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	case "::1":
+		return "[::1]"
+	default:
+		if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") && !strings.HasSuffix(host, "]") {
+			return "[" + host + "]"
+		}
+		return host
+	}
+}
+
+func (s *Server) providerHealthSnapshotResponse() []providerHealthResponse {
+	if s.proxy == nil {
+		return []providerHealthResponse{}
+	}
+	health := s.proxy.ProviderHealthSnapshot()
+	_, registry, _ := s.proxy.SnapshotComponents()
+	providerNames := map[string]struct{}{}
+	for providerName := range health {
+		providerNames[providerName] = struct{}{}
+	}
+	if registry != nil {
+		for _, providerName := range registry.ProviderNames() {
+			providerNames[providerName] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(providerNames))
+	for providerName := range providerNames {
+		names = append(names, providerName)
+	}
+	sort.Strings(names)
+
+	out := make([]providerHealthResponse, 0, len(names))
+	now := time.Now()
+	for _, providerName := range names {
+		item := health[providerName]
+		total := item.Successes + item.Failures
+		successRate := 0.0
+		if total > 0 {
+			successRate = float64(item.Successes) / float64(total)
+		}
+		remaining := int64(0)
+		if item.CooldownUntil.After(now) {
+			remaining = item.CooldownUntil.Sub(now).Milliseconds()
+		}
+		out = append(out, providerHealthResponse{
+			Provider:            providerName,
+			Successes:           item.Successes,
+			Failures:            item.Failures,
+			ConsecutiveFailures: item.ConsecutiveFailures,
+			SuccessRate:         successRate,
+			LatencyMs:           float64(item.LatencyEWMA.Microseconds()) / 1000,
+			LastSuccess:         nonZeroTimePtr(item.LastSuccess),
+			LastFailure:         nonZeroTimePtr(item.LastFailure),
+			CooldownUntil:       futureTimePtr(item.CooldownUntil, now),
+			CooldownRemainingMs: remaining,
+			LastError:           item.LastError,
+		})
+	}
+	return out
+}
+
+func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.RequestLog, problemProviders []providerHealthResponse) string {
+	lines := []string{
+		fmt.Sprintf("请求统计: total=%d success=%d failure=%d avg=%.0fms", stats.TotalRequests, stats.SuccessCount, stats.FailureCount, stats.AvgLatencyMs),
+	}
+	if latestFailure.ID != "" {
+		lines = append(lines,
+			fmt.Sprintf("最近失败: request_id=%s provider=%s model=%s upstream=%s status=%d code=%s", latestFailure.RequestID, latestFailure.Provider, latestFailure.Model, latestFailure.Upstream, latestFailure.StatusCode, latestFailure.ErrorCode),
+		)
+		if strings.TrimSpace(latestFailure.ErrorReason) != "" {
+			lines = append(lines, "原因: "+latestFailure.ErrorReason)
+		}
+		if strings.TrimSpace(latestFailure.ErrorAction) != "" {
+			lines = append(lines, "处理: "+latestFailure.ErrorAction)
+		}
+		if strings.TrimSpace(latestFailure.DiagnosticSummary) != "" {
+			lines = append(lines, "摘要: "+latestFailure.DiagnosticSummary)
+		}
+	}
+	if len(problemProviders) > 0 {
+		parts := make([]string, 0, len(problemProviders))
+		for _, item := range problemProviders {
+			parts = append(parts, fmt.Sprintf("%s failures=%d cooldown=%dms last=%s", item.Provider, item.ConsecutiveFailures, item.CooldownRemainingMs, item.LastError))
+		}
+		lines = append(lines, "异常 provider: "+strings.Join(parts, " | "))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // getConfig 获取当前配置快照
@@ -1395,7 +1633,20 @@ func (s *Server) getLogs(c *gin.Context) {
 				pageSize = p
 			}
 		}
-		result := s.store.GetLogsPage(page, pageSize)
+		filters := store.LogFilters{
+			Provider:    strings.TrimSpace(c.Query("provider")),
+			Model:       strings.TrimSpace(c.Query("model")),
+			ErrorCode:   strings.TrimSpace(c.Query("error_code")),
+			RequestID:   strings.TrimSpace(c.Query("request_id")),
+			ErrorReason: strings.TrimSpace(c.Query("error_reason")),
+			Search:      strings.TrimSpace(c.Query("q")),
+		}
+		if statusStr := strings.TrimSpace(c.Query("status_code")); statusStr != "" {
+			if statusCode, err := strconv.Atoi(statusStr); err == nil {
+				filters.StatusCode = statusCode
+			}
+		}
+		result := s.store.GetLogsPageFiltered(page, pageSize, filters)
 		c.JSON(http.StatusOK, result)
 		return
 	}

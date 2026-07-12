@@ -1027,3 +1027,153 @@ new-api 单渠道 timeout < new-api 总体切换窗口 < proxy effective timeout
 - 如果出现 `timeout≈90s`，说明代理已正确工作；下一步应治理上游渠道首 token、排队、单渠道超时和上下文大小。
 
 这套方案的核心价值是把“客户端无意义取消”转化为“代理可解释超时”，并通过日志告诉用户：原始模型超时是多少、实际执行预算是多少、问题发生在哪一层。
+
+## 18. 2026-07-12 追加：日志必须一眼能判断是哪一层的问题
+
+### 18.1 背景
+
+new-api/sub2api 多渠道场景下，同一模型可能出现：
+
+- 慢首 token，最终接近 VS/Copilot 约 100 秒等待上限。
+- `413 Request Entity Too Large` 或等价的上游大请求拒绝。
+- `429` 限流。
+- `503` / `500 do_request_failed` 等上游渠道错误。
+- `context canceled` / `use of closed network connection` 等连接生命周期问题。
+
+这些问题不应全部被客服解释成“模型不可用”或“工具调用坏了”。
+本地代理必须把日志做成可运营诊断，而不是只保存原始错误字符串。
+
+### 18.2 新增结构化日志字段
+
+请求日志新增三类字段：
+
+```json
+{
+  "error_reason": "客户端等待上限",
+  "error_action": "查上游首 token、new-api/sub2api 单渠道超时和轮换；必要时减少上下文。",
+  "diagnostic_summary": "VS/Copilot 接近等待上限后取消；耗时 99995ms；请求体 619.2 KB；上游体 627.1 KB"
+}
+```
+
+它们和已有字段配合使用：
+
+- `error_code`：机器可读分类，如 `client_deadline_reached`、`upstream_payload_too_large`。
+- `error_reason`：客服/用户一眼能看懂的原因。
+- `error_action`：下一步处理建议。
+- `diagnostic_summary`：把耗时、原始请求体大小、上游归一化后的请求体大小、远端 peer、流状态压缩成一行。
+- `error_hint`：更长的排障说明。
+
+### 18.3 常见错误一眼判断表
+
+| error_code | error_reason | 优先判断 | 建议动作 |
+| --- | --- | --- | --- |
+| `client_deadline_reached` | 客户端等待上限 | VS/Copilot 接近 100 秒取消 | 查上游首 token、渠道超时和轮换；必要时减少上下文 |
+| `client_gone` | 客户端主动断开 | 用户取消、窗口关闭、客户端提前断开 | 若耗时很短可忽略；若接近 100 秒按等待上限排查 |
+| `timeout` | 代理/上游超时 | 代理按有效预算主动结束 | 查 `effective_timeout_seconds` 与上游延迟 |
+| `upstream_payload_too_large` | 上游拒绝大请求 | 413 或上下文/工具声明过大 | 减少上下文，或换更大上下文渠道 |
+| `upstream_rate_limit` | 上游限流/额度 | 429 | 查账号额度、并发和冷却策略 |
+| `upstream_server_error` | 上游服务异常 | 500/502/503/504 | 查 new-api/sub2api 渠道健康和轮换策略 |
+| `upstream_request_error` | 上游拒绝参数/模型 | 400/404 | 查模型名、provider 绑定、参数治理 |
+| `network_error` | 网络/CDN/连接异常 | DNS、CDN、Cloudflare/WAF、连接重置 | 查本机网络、CDN peer、源站连接 |
+| `proxy_parse_error` | 上游响应格式异常 | SSE/HTML/非 JSON 与协议不匹配 | 保存样本，检查上游是否 stream=false 返回 SSE 或 HTML 错误页 |
+
+### 18.4 运营原则
+
+- 客服优先看 `error_reason` 和 `diagnostic_summary`，再展开看 `error_hint`。
+- 如果 `diagnostic_summary` 显示远端 `104.21.x.x` / `172.67.x.x`，这是 Cloudflare/CDN peer，不等于 new-api 源站 IP。
+- 如果 `request_bytes` 或 `upstream_bytes` 很大且错误是 `413`、`timeout`、`client_deadline_reached`，优先判断大上下文/工具声明/参数归一化后的上游请求过大导致上游慢或拒绝。
+- 如果同一请求官方 provider 成功、new-api provider 失败，优先查当前 provider/channel 的限制，不要归因为 nginx 全局限制。
+- 每条管理页日志和服务端请求完成日志都带 `request_id`，客服复制一条日志时应同时带上该 ID，便于串联前端、代理控制台日志和上游网关的同一次请求。
+- 代理会把同一个 `request_id` 透传到上游请求头 `X-Request-ID` 和 `X-Proxy-Request-ID`。如果上游是 new-api/sub2api，建议在网关访问日志里记录这两个 header，这样可以从管理页一键定位到上游渠道日志。
+- `request_id` 的实现已经收敛为统一的请求元数据层，不再由 proxy/provider 各自维护独立的 context key。后续如果要加入 `trace_id`、`span_id`、`tenant_id`，应优先扩展这一层，而不是继续在调用链里加新 header/key。
+- 如果同一模型候选多个 provider，查看 `attempts` 里的 `elapsed_ms`，先定位“哪个候选慢/挂”，再谈是否需要调低单渠道超时或切换渠道。
+
+## 19. 2026-07-12 追加：运营化排障界面与运行状态
+
+### 19.1 日志页改造原则
+
+日志页不是给开发者看原始 JSON 的，而是给客服/用户快速判断“是哪一层坏了”。本轮把以下信息前置：
+
+- `error_reason`：一眼可读原因，例如“客户端等待上限”“上游拒绝大请求”。
+- `error_action`：下一步处理动作，例如查首 token、渠道轮换、上下文大小。
+- `diagnostic_summary`：一行摘要，包含耗时、请求体、上游体、远端 peer、流状态。
+- `attempts_summary`：候选 provider/model 的单次耗时与分类，避免多 provider 场景只看到整次请求耗时。
+- `request_id`：用于把管理页、代理日志、上游网关日志串起来。
+- 服务端请求完成日志也会输出 `request_id=...`；失败时额外输出 `error_code=...`，便于直接从控制台日志反查管理页详情。
+- 上游 OpenAI-compatible 和 Ollama 请求都会携带 `X-Request-ID` / `X-Proxy-Request-ID`；不要在 provider 层重新生成另一个 ID，否则管理页、控制台和上游网关会对不上。
+- 这套 request metadata 层的目标是“统一观测链路”，不是“多加几个 header 就算完成”。后续任何元数据新增都应先评估：是否需要进入 `requestmeta.Metadata`，是否要在 proxy 日志、provider 请求头、管理页摘要三处同时可见。
+
+日志分页过滤必须在服务端执行，不能只做前端当前页过滤。否则分页后会误以为“没有相关日志”，实际只是当前页没有命中。
+
+### 19.2 过滤字段
+
+`/admin/api/logs` 分页模式支持：
+
+- `provider`
+- `model`
+- `status_code`
+- `error_code`
+- `request_id`
+- `error_reason`
+- `q`：全文检索路径、模型、上游、错误、诊断摘要、工具声明等。
+
+注意：过滤后的分页仍必须保持“最新在前”。本轮专门补了回归测试，避免筛选后页序被反转。
+
+### 19.3 Windows 更新状态
+
+Windows 自更新最容易造成误解的是“提示已启动替换脚本，但 `.new/.ps1` 还在”。现在监控页会展示：
+
+- 当前版本、PID、操作系统、架构。
+- 监听 host/port 和管理面板 URL。
+- 当前 provider/model 数量。
+- 当前可执行文件路径。
+- `vs-ai-proxy.exe.new` 是否存在。
+- `vs-ai-proxy-self-update.ps1` 是否存在。
+- `vs-ai-proxy-self-update.log` 是否存在。
+- `.bak-*` 备份数量和最近备份。
+
+如果 `.new` 长时间存在，优先检查：当前 exe 是否仍被占用、杀软/权限是否阻止替换、脚本日志中 Move-Item 哪一步失败。
+
+### 19.4 端口占用诊断
+
+启动端口被占用时，代理只会自动清理进程名明确是 `vs-ai-proxy` / `server` 的旧进程。其它进程即使占用同端口也不会误杀。
+
+日志必须包含：
+
+- 占用端口。
+- PID。
+- 进程名。
+- 是否跳过清理。
+- 跳过/失败原因。
+
+这能避免用户只看到 `bind: access forbidden`，却不知道是旧代理、VS、PowerShell、系统保留端口还是权限策略导致。
+
+### 19.5 统一诊断总览
+
+为了避免用户在“健康页、日志页、更新页”之间来回切换，本轮新增了一个统一的只读诊断总览接口：
+
+- `runtime`：当前版本、PID、OS/架构、监听地址、管理面板 URL、provider/model 数量、更新残留文件状态。
+- `statistics`：请求总量、成功率、平均耗时。
+- `latest_failure`：最近一次失败请求的关键字段。
+- `problem_providers`：有连续失败或冷却中的 provider。
+- `copy_summary`：可以直接复制给客服/用户的一段诊断摘要。
+
+原则上，客服排障时先看这个总览，再展开日志明细；不要把这些信息拆散成多个页面的“猜谜游戏”。
+
+实现上，`runtime` 和 `diagnostics/summary` 使用同一份运行状态结构，避免两个接口各自拼字段导致版本、端口、更新文件状态发生漂移。新增字段必须先进入结构化响应类型，再更新前端展示和测试。
+
+前端复制按钮统一走同一个复制 helper；成功时使用全局轻提示反馈，不污染测试页结果。若浏览器 Clipboard API 不可用或权限受限，会提示原因并弹出可手动复制的文本框，避免客服点击后没有任何反馈。
+
+### 19.6 2026-07-12 复审补充：不要让“最近失败”和统计口径漂移
+
+本轮复审时发现两个容易在高频排障场景里放大的细节：
+
+1. `latest_failure` 不能只从日志页当前分页或最近固定 50 条里找。客服需要的是“当前保留日志中的最近一次失败”，否则用户筛选、翻页或连续健康检查成功后，页面可能隐藏真正有价值的失败样本。现在由 Store 层提供 `GetLatestFailure()`，统一诊断摘要和日志页最近失败卡片都以这个全局样本为准。
+2. Store 的统计字段必须由 `statsMu` 保护。`AddLog()` 会更新 `AvgLatencyMs/TotalRequests`，`GetStatistics()` 会并发读取这些字段；如果只持有 `logMu`，高并发请求和监控刷新同时发生时会产生数据竞争。现在写统计时同时持有 `statsMu`，并补充了 race 回归测试。
+
+对应测试原则：
+
+- 必须覆盖“失败在较早位置、最近几十条都是成功”的场景，证明最近失败样本不是当前页偶然结果。
+- 必须用 `go test -race` 覆盖日志写入和统计读取并发场景，避免管理页刷新本身引入不稳定。
+- 页面字段仍显示“耗时”，因为它是代理端到端耗时；Prometheus 历史指标名里的 `latency` 暂不重命名，避免破坏已有监控抓取，文案层统一解释为代理耗时。
+- `web/dist/index.html` 是单文件前端，新增按钮/卡片/筛选框后必须跑 `go test ./web -count=1`，该测试会检查重复 DOM id 以及脚本里 `$('id')` 引用是否真实存在，避免发布后才发现按钮无响应。

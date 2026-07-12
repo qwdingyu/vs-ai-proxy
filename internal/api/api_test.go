@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -252,6 +253,257 @@ func TestVersionEndpointReturnsBuildVersion(t *testing.T) {
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"version":"v9.9.9-test"`)) {
 		t.Fatalf("version response = %s", rec.Body.String())
+	}
+}
+
+func TestRuntimeStatusEndpointReturnsUpdateArtifacts(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/status", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/runtime/status status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		Version         string `json:"version"`
+		ExecutablePath  string `json:"executable_path"`
+		PID             int    `json:"pid"`
+		GOOS            string `json:"goos"`
+		GOARCH          string `json:"goarch"`
+		ListenHost      string `json:"listen_host"`
+		ListenPort      int    `json:"listen_port"`
+		AdminURL        string `json:"admin_url"`
+		ProviderCount   int    `json:"provider_count"`
+		ModelCount      int    `json:"model_count"`
+		UpdateArtifacts struct {
+			StagedBinary struct {
+				Path string `json:"path"`
+			} `json:"staged_binary"`
+			SelfUpdateScript struct {
+				Path string `json:"path"`
+			} `json:"self_update_script"`
+			SelfUpdateLog struct {
+				Path string `json:"path"`
+			} `json:"self_update_log"`
+			BackupCount int `json:"backup_count"`
+		} `json:"update_artifacts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal runtime status: %v", err)
+	}
+	if got.Version == "" || got.ExecutablePath == "" {
+		t.Fatalf("runtime status missing version/path: %#v", got)
+	}
+	if got.PID <= 0 || got.GOOS == "" || got.GOARCH == "" {
+		t.Fatalf("runtime status missing process/platform fields: %#v", got)
+	}
+	if got.ListenHost == "" || got.ListenPort <= 0 || !strings.Contains(got.AdminURL, "/admin") {
+		t.Fatalf("runtime status missing listen/admin fields: %#v", got)
+	}
+	if got.ProviderCount <= 0 {
+		t.Fatalf("provider_count = %d, want positive default provider count", got.ProviderCount)
+	}
+	if !strings.HasSuffix(got.UpdateArtifacts.StagedBinary.Path, ".new") {
+		t.Fatalf("staged path = %q, want .new suffix", got.UpdateArtifacts.StagedBinary.Path)
+	}
+	if !strings.HasSuffix(got.UpdateArtifacts.SelfUpdateScript.Path, "vs-ai-proxy-self-update.ps1") {
+		t.Fatalf("script path = %q, want self-update ps1", got.UpdateArtifacts.SelfUpdateScript.Path)
+	}
+	if !strings.HasSuffix(got.UpdateArtifacts.SelfUpdateLog.Path, "vs-ai-proxy-self-update.log") {
+		t.Fatalf("log path = %q, want self-update log", got.UpdateArtifacts.SelfUpdateLog.Path)
+	}
+}
+
+func TestAdminURLHostUsesOpenableLoopbackForWildcardBinds(t *testing.T) {
+	tests := []struct {
+		listenHost string
+		want       string
+	}{
+		{listenHost: "", want: "127.0.0.1"},
+		{listenHost: "0.0.0.0", want: "127.0.0.1"},
+		{listenHost: "::", want: "127.0.0.1"},
+		{listenHost: "::1", want: "[::1]"},
+		{listenHost: "2001:db8::1", want: "[2001:db8::1]"},
+		{listenHost: "127.0.0.1", want: "127.0.0.1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.listenHost, func(t *testing.T) {
+			if got := adminURLHost(tt.listenHost); got != tt.want {
+				t.Fatalf("adminURLHost(%q) = %q, want %q", tt.listenHost, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDiagnosticsSummaryEndpointReturnsCopyableSummary(t *testing.T) {
+	apiSrv, proxySrv := newAPITestHarness(t)
+	_, registry, _ := proxySrv.SnapshotComponents()
+	registry.RecordCandidateFailure("useai", errors.New("API 错误 503"))
+	apiSrv.store.AddLog(store.RequestLog{
+		Method:            "POST",
+		Path:              "/v1/chat/completions",
+		Provider:          "useai",
+		Model:             "UseAI - gpt-5.5",
+		Upstream:          "gpt-5.5",
+		StatusCode:        499,
+		ErrorCode:         "client_deadline_reached",
+		ErrorReason:       "客户端等待上限",
+		ErrorAction:       "查上游首 token",
+		DiagnosticSummary: "VS/Copilot 接近等待上限后取消",
+		IsSuccess:         false,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/summary", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/diagnostics/summary status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		CopySummary      string                   `json:"copy_summary"`
+		LatestFailure    store.RequestLog         `json:"latest_failure"`
+		ProblemProviders []providerHealthResponse `json:"problem_providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal diagnostics summary: %v", err)
+	}
+	if !strings.Contains(got.CopySummary, "client_deadline_reached") || !strings.Contains(got.CopySummary, "查上游首 token") {
+		t.Fatalf("copy_summary missing actionable failure details: %q", got.CopySummary)
+	}
+	if got.LatestFailure.ErrorCode != "client_deadline_reached" {
+		t.Fatalf("latest failure = %#v", got.LatestFailure)
+	}
+	if len(got.ProblemProviders) == 0 || got.ProblemProviders[0].Provider != "useai" {
+		t.Fatalf("problem providers = %#v, want useai", got.ProblemProviders)
+	}
+}
+
+func TestDiagnosticsSummaryUsesLatestFailureAcrossRetainedLogs(t *testing.T) {
+	apiSrv, _ := newAPITestHarnessWithStoreMax(t, 100)
+	apiSrv.store.AddLog(store.RequestLog{
+		Method:      "POST",
+		Path:        "/v1/chat/completions",
+		Provider:    "useai",
+		Model:       "gpt-5.5",
+		StatusCode:  502,
+		RequestID:   "retained-failure",
+		ErrorCode:   "upstream_server_error",
+		ErrorReason: "上游服务异常",
+		IsSuccess:   false,
+	})
+	for i := 0; i < 60; i++ {
+		apiSrv.store.AddLog(store.RequestLog{Method: "GET", Path: "/health", StatusCode: 200, IsSuccess: true})
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/summary", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/diagnostics/summary status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		LatestFailure store.RequestLog `json:"latest_failure"`
+		CopySummary   string           `json:"copy_summary"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal diagnostics summary: %v", err)
+	}
+	if got.LatestFailure.RequestID != "retained-failure" {
+		t.Fatalf("latest_failure.request_id = %q, want retained-failure", got.LatestFailure.RequestID)
+	}
+	if !strings.Contains(got.CopySummary, "retained-failure") {
+		t.Fatalf("copy_summary = %q, want retained-failure", got.CopySummary)
+	}
+}
+
+func TestDiagnosticsSummaryCopyTextIncludesLatestFailureAndProblemProvider(t *testing.T) {
+	apiSrv, proxySrv := newAPITestHarness(t)
+	_, registry, _ := proxySrv.SnapshotComponents()
+	registry.RecordCandidateFailure("useai", errors.New("API 错误 503"))
+	apiSrv.store.AddLog(store.RequestLog{
+		RequestID:         "req-copy-1",
+		Provider:          "useai",
+		Model:             "gpt-5.5",
+		Upstream:          "gpt-5.5",
+		StatusCode:        499,
+		ErrorCode:         "client_deadline_reached",
+		ErrorReason:       "客户端等待上限",
+		ErrorAction:       "查上游首 token",
+		DiagnosticSummary: "VS/Copilot 接近等待上限后取消",
+		IsSuccess:         false,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/summary", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/diagnostics/summary status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		CopySummary string `json:"copy_summary"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal diagnostics summary: %v", err)
+	}
+	for _, want := range []string{"req-copy-1", "client_deadline_reached", "查上游首 token", "异常 provider"} {
+		if !strings.Contains(got.CopySummary, want) {
+			t.Fatalf("copy_summary = %q, want contains %q", got.CopySummary, want)
+		}
+	}
+}
+
+func TestLogsEndpointSupportsFiltering(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	apiSrv.store.AddLog(store.RequestLog{Method: "POST", Path: "/v1/chat/completions", Provider: "useai", Model: "gpt-5.5", StatusCode: 499, ErrorCode: "client_deadline_reached", ErrorReason: "客户端等待上限", RequestID: "req-1", DiagnosticSummary: "VS/Copilot 接近等待上限后取消"})
+	apiSrv.store.AddLog(store.RequestLog{Method: "POST", Path: "/v1/chat/completions", Provider: "deepseek", Model: "deepseek-v4-flash", StatusCode: 502, ErrorCode: "upstream_server_error", ErrorReason: "上游服务异常", RequestID: "req-2", DiagnosticSummary: "上游返回 5xx"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?page=1&page_size=20&provider=deepseek&status_code=502&q=5xx&request_id=req-2", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/logs status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var result store.LogPageResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal logs result: %v", err)
+	}
+	if got, want := len(result.Logs), 1; got != want {
+		t.Fatalf("logs len = %d, want %d", got, want)
+	}
+	if result.Logs[0].Provider != "deepseek" || result.Logs[0].RequestID != "req-2" {
+		t.Fatalf("filtered log = %#v, want deepseek req-2", result.Logs[0])
+	}
+}
+
+func TestLogsEndpointSupportsLegacyLimit(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	apiSrv.store.AddLog(store.RequestLog{Method: "GET", Path: "/health", Provider: "useai", StatusCode: 200, IsSuccess: true})
+	apiSrv.store.AddLog(store.RequestLog{Method: "POST", Path: "/v1/chat/completions", Provider: "deepseek", StatusCode: 502, IsSuccess: false})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?limit=1", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/logs limit status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var result struct {
+		Logs []store.RequestLog `json:"logs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal logs result: %v", err)
+	}
+	if got, want := len(result.Logs), 1; got != want {
+		t.Fatalf("logs len = %d, want %d", got, want)
+	}
+	if result.Logs[0].Provider != "deepseek" {
+		t.Fatalf("newest log = %#v, want deepseek", result.Logs[0])
 	}
 }
 
@@ -1479,10 +1731,18 @@ func TestManagementTestChatFallsBackToStreamWhenNonStreamFails(t *testing.T) {
 }
 
 func newAPITestHarness(t *testing.T) (*Server, *proxy.Server) {
-	return newAPITestHarnessWithStaticFS(t, nil)
+	return newAPITestHarnessWithStaticFSAndStoreMax(t, nil, 50)
 }
 
 func newAPITestHarnessWithStaticFS(t *testing.T, staticFS fs.FS) (*Server, *proxy.Server) {
+	return newAPITestHarnessWithStaticFSAndStoreMax(t, staticFS, 50)
+}
+
+func newAPITestHarnessWithStoreMax(t *testing.T, maxLogs int) (*Server, *proxy.Server) {
+	return newAPITestHarnessWithStaticFSAndStoreMax(t, nil, maxLogs)
+}
+
+func newAPITestHarnessWithStaticFSAndStoreMax(t *testing.T, staticFS fs.FS, maxLogs int) (*Server, *proxy.Server) {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -1502,7 +1762,7 @@ func newAPITestHarnessWithStaticFS(t *testing.T, staticFS fs.FS) (*Server, *prox
 	}
 
 	logger := log.New(nil, log.LevelError, false)
-	st := store.New(50)
+	st := store.New(maxLogs)
 	proxySrv := proxy.NewServer(cfg, mgr, st, logger)
 	apiSrv := NewServer(cfg.Port, mgr, proxySrv, st, logger, staticFS)
 	return apiSrv, proxySrv

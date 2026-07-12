@@ -79,12 +79,20 @@ func TestLoggingMiddlewareCapturesProviderAndModelHeaders(t *testing.T) {
 
 	body := `{"model":"useai-model"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("X-Request-ID", "req-123-abc")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("X-Proxy-Request-ID"); got != "req-123-abc" {
+		t.Fatalf("response request id = %q, want req-123-abc", got)
+	}
 
 	logs := st.GetLogs(1)
 	if len(logs) != 1 {
 		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if logs[0].RequestID != "req-123-abc" {
+		t.Fatalf("request id = %q, want req-123-abc", logs[0].RequestID)
 	}
 	if logs[0].Provider != "UseAI" {
 		t.Fatalf("provider = %q, want UseAI", logs[0].Provider)
@@ -97,6 +105,70 @@ func TestLoggingMiddlewareCapturesProviderAndModelHeaders(t *testing.T) {
 	}
 	if logs[0].RequestBytes != int64(len(body)) {
 		t.Fatalf("request bytes = %d, want %d", logs[0].RequestBytes, len(body))
+	}
+}
+
+func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
+	var buf strings.Builder
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(&buf, log.LevelInfo, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Proxy-Error-Code", "upstream_server_error")
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.5"}`))
+	req.Header.Set("X-Request-ID", "req-log-1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	out := buf.String()
+	if !strings.Contains(out, "request_id=req-log-1") || !strings.Contains(out, "error_code=upstream_server_error") {
+		t.Fatalf("server log = %q, want request_id and error_code", out)
+	}
+}
+
+func TestRequestIDFromRequestFallsBackWhenHeaderSanitizesToEmpty(t *testing.T) {
+	start := time.Unix(0, 12345)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("X-Request-ID", "中文请求")
+
+	if got := requestIDFromRequest(req, start); got != "12345" {
+		t.Fatalf("request id = %q, want timestamp fallback", got)
+	}
+}
+
+func TestLoggingMiddlewareStoresStructuredDiagnostics(t *testing.T) {
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Proxy-Provider", "useai")
+		w.Header().Set("X-Proxy-Requested-Model", "UseAI - gpt-5.5")
+		w.Header().Set("X-Proxy-Upstream-Model", "gpt-5.5")
+		w.Header().Set("X-Proxy-Error-Code", "upstream_server_error")
+		w.Header().Set("X-Proxy-Error-Message", "当前提供商请求失败")
+		w.Header().Set("X-Proxy-Error-Hint", "检查 new-api/sub2api 渠道健康度。")
+		w.Header().Set("X-Proxy-Attempts-Summary", "useai/gpt-5.5 13s upstream_server_error")
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.5"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logs := st.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	entry := logs[0]
+	if entry.AttemptsSummary != "useai/gpt-5.5 13s upstream_server_error" {
+		t.Fatalf("attempts summary = %q", entry.AttemptsSummary)
+	}
+	if entry.ErrorReason != "上游服务异常" {
+		t.Fatalf("error reason = %q, want 上游服务异常", entry.ErrorReason)
+	}
+	if !strings.Contains(entry.ErrorAction, "渠道") || !strings.Contains(entry.DiagnosticSummary, "5xx") {
+		t.Fatalf("diagnostic fields missing useful guidance: %#v", entry)
 	}
 }
 

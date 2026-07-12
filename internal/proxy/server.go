@@ -20,6 +20,7 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/internal/converter"
 	"github.com/dingyuwang/vs-ai-proxy/internal/log"
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
+	"github.com/dingyuwang/vs-ai-proxy/internal/requestmeta"
 	"github.com/dingyuwang/vs-ai-proxy/internal/store"
 )
 
@@ -334,10 +335,13 @@ func (s *Server) Stop() error {
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		requestID := requestIDFromRequest(r, start)
+		w.Header().Set("X-Proxy-Request-ID", requestID)
 		ww := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
-		next.ServeHTTP(ww, r)
-		ww.finalizeRequestStatus(r)
+		reqWithID := r.WithContext(requestmeta.ContextWithRequestID(r.Context(), requestID))
+		next.ServeHTTP(ww, reqWithID)
+		ww.finalizeRequestStatus(reqWithID)
 
 		elapsed := time.Since(start).Seconds() * 1000
 
@@ -358,6 +362,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		errorCode := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Code")
 		errorMessage := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Message")
 		errorHint := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Hint")
+		attemptsSummary := firstNonEmptyHeader(ww.Header(), "X-Proxy-Attempts-Summary")
 		errorCode, errorMessage, errorHint = enrichClientGoneDiagnostics(ww.statusCode, elapsed, r.ContentLength, errorCode, errorMessage, errorHint)
 		cancelReason := requestCancelReason(ww.statusCode, elapsed, errorCode, r.Context().Err())
 		networkPeer := firstNonEmptyHeader(ww.Header(), "X-Proxy-Network-Peer")
@@ -389,8 +394,10 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if effectiveTimeout == 0 {
 			effectiveTimeout = firstPositiveHeaderInt(ww.Header(), "X-Proxy-Effective-Timeout-Seconds")
 		}
+		diagSummary := summarizeLogDiagnostic(errorCode, ww.statusCode, elapsed, r.ContentLength, ww.upstreamBytes, networkPeer, streamState)
 
 		s.store.AddLog(store.RequestLog{
+			RequestID:                requestID,
 			Method:                   r.Method,
 			Path:                     r.URL.Path,
 			Provider:                 provider,
@@ -406,6 +413,10 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			ErrorCode:                errorCode,
 			ErrorMessage:             errorMessage,
 			ErrorHint:                errorHint,
+			ErrorReason:              diagSummary.Reason,
+			ErrorAction:              diagSummary.Action,
+			DiagnosticSummary:        diagSummary.Summary,
+			AttemptsSummary:          attemptsSummary,
 			CancelReason:             cancelReason,
 			NetworkPeer:              networkPeer,
 			RequestTools:             requestTools,
@@ -415,7 +426,11 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			StreamState:              streamState,
 		})
 
-		s.logger.Info("%s %s - %d (%.0f ms)", r.Method, r.URL.Path, ww.statusCode, elapsed)
+		if errorCode != "" {
+			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s error_code=%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID, errorCode)
+		} else {
+			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID)
+		}
 	})
 }
 
@@ -522,6 +537,44 @@ type responseWriter struct {
 	fallbackMode             string
 	normalization            string
 	streamState              string
+}
+
+func requestIDFromRequest(r *http.Request, start time.Time) string {
+	if r != nil {
+		for _, header := range []string{"X-Request-ID", "X-Correlation-ID", "X-Proxy-Request-ID"} {
+			if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+				if sanitized := sanitizeRequestID(value); sanitized != "" {
+					return sanitized
+				}
+			}
+		}
+	}
+	return fmt.Sprintf("%d", start.UnixNano())
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	return requestmeta.RequestIDFromContext(ctx)
+}
+
+func sanitizeRequestID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 96 {
+		value = value[:96]
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_' || r == '.' || r == ':':
+			return r
+		default:
+			return -1
+		}
+	}, value)
 }
 
 func (w *responseWriter) finalizeRequestStatus(r *http.Request) {
@@ -694,6 +747,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			r.Context(),
 			effectiveTimeout,
 		)
+		ctx = requestmeta.ContextWithRequestID(ctx, requestIDFromContext(r.Context()))
 
 		if req.Stream {
 			streamReq := r.WithContext(ctx)
@@ -702,7 +756,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			if err != nil {
 				lastErr = err
-				attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 				attempts = append(attempts, attempt)
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if isClientGoneError(err) {
@@ -745,7 +799,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					}
 					cancel()
 					lastErr = err
-					attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 					attempts = append(attempts, attempt)
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					registry.RecordCandidateFailure(prov.Name(), err)
@@ -794,7 +848,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			cancel()
 			lastErr = err
-			attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 			attempts = append(attempts, attempt)
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 			registry.RecordCandidateFailure(prov.Name(), err)
@@ -961,7 +1015,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			if err != nil {
 				lastErr = err
-				attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 				attempts = append(attempts, attempt)
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if streamWriter.HasWritten() {
@@ -985,7 +1039,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				cancel()
 				if err != nil {
 					lastErr = err
-					attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 					attempts = append(attempts, attempt)
 					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 					registry.RecordCandidateFailure(prov.Name(), err)
@@ -1016,7 +1070,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err != nil {
 			lastErr = err
-			attempt := newAttemptDiagnostic(prov.Name(), modelID, err)
+			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 			attempts = append(attempts, attempt)
 			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
 			registry.RecordCandidateFailure(prov.Name(), err)

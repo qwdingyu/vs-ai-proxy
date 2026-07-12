@@ -199,6 +199,48 @@ func containsAnyString(values []any, want string) bool {
 	return false
 }
 
+func TestProxyForwardsRequestIDToOpenAIUpstream(t *testing.T) {
+	upstreamSawRequestID := ""
+	upstreamSawProxyRequestID := ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.5"}]}`))
+		case "/v1/chat/completions":
+			upstreamSawRequestID = r.Header.Get("X-Request-ID")
+			upstreamSawProxyRequestID = r.Header.Get("X-Proxy-Request-ID")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	prov := provider.NewOpenAIProviderWithCapability("useai", "openai", "sk-test", upstream.URL, true, time.Second)
+	server := newOpenServer(prov)
+	inner := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	handler := server.loggingMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("X-Request-ID", "req-proxy-upstream-1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Request-ID"); got != "req-proxy-upstream-1" {
+		t.Fatalf("response request id = %q, want req-proxy-upstream-1", got)
+	}
+	if upstreamSawRequestID != "req-proxy-upstream-1" || upstreamSawProxyRequestID != "req-proxy-upstream-1" {
+		t.Fatalf("upstream ids = %q/%q, want req-proxy-upstream-1", upstreamSawRequestID, upstreamSawProxyRequestID)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // 1. 模型 catalog：/v1/models 与 /api/tags
 // -----------------------------------------------------------------------------

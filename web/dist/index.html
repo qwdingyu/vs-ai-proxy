@@ -38,11 +38,31 @@
     .value { font-size: 20px; margin-top: 6px; }
     .table { width: 100%; border-collapse: collapse; margin-top: 10px; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); }
+    .logs-table { table-layout: fixed; }
+    .logs-table th, .logs-table td { padding: 7px 6px; vertical-align: middle; }
+    .logs-table .col-time { width: 92px; }
+    .logs-table .col-method { width: 58px; }
+    .logs-table .col-path { width: 132px; }
+    .logs-table .col-provider { width: 96px; }
+    .logs-table .col-model { width: 260px; }
+    .logs-table .col-tools { width: auto; }
+    .logs-table .col-error { width: 190px; }
+    .logs-table .col-status { width: 58px; }
+    .logs-table .col-latency { width: 68px; text-align: right; }
+    .logs-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .logs-table td.col-tools { white-space: normal; }
     .ok { color: #3fb950; }
     .warn { color: #d29922; }
     .err { color: #f85149; }
     .empty { color: var(--muted); text-align: center; }
     .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+    .filter-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 10px 0 14px; }
+    .filter-bar input, .filter-bar select { min-width: 140px; }
+    .diagnostic-banner { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0 14px; }
+    .diagnostic-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: #11161d; }
+    .diagnostic-card .label { margin-bottom: 6px; }
+    .diagnostic-card .value { font-size: 16px; line-height: 1.4; word-break: break-word; }
+    .diagnostic-card .hint { margin-top: 6px; line-height: 1.45; }
     .btn { background: #21262d; color: var(--text); border: 1px solid var(--border); padding: 8px 12px; border-radius: 6px; cursor: pointer; }
     .primary { background: #238636; border-color: #238636; color: white; }
     .danger { background: #da3633; border-color: #da3633; color: white; }
@@ -70,6 +90,8 @@
     .stack { display: flex; flex-direction: column; gap: 12px; }
     .pre { white-space: pre-wrap; word-break: break-word; background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 280px; overflow: auto; }
     .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #0f1115; font-size: 12px; }
+    .toast { position: fixed; right: 16px; bottom: 16px; z-index: 50; max-width: min(420px, calc(100vw - 32px)); padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: #11161d; color: var(--text); box-shadow: 0 14px 34px rgba(0,0,0,0.35); line-height: 1.45; }
+    .toast.warn { border-color: rgba(210,153,34,0.65); color: #f2cc60; }
     .badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; background: #0f1115; border: 1px solid var(--border); color: var(--muted); font-size: 12px; }
     .search-results { background: #0f1115; border: 1px solid var(--border); border-radius: 6px; padding: 6px; margin-top: 8px; max-height: 240px; overflow: auto; }
     .search-item { padding: 10px 8px; border-bottom: 1px solid var(--border); cursor: pointer; }
@@ -93,6 +115,7 @@
 </head>
 <body>
   <div class="page">
+    <div class="toast hidden" id="globalToast" role="status" aria-live="polite"></div>
     <header class="header">
       <h1><a class="brand" href="#/" aria-label="VS AI Proxy 首页">
         <svg class="brand-logo" viewBox="0 0 64 64" role="img" aria-label="VS AI Proxy logo">
@@ -162,13 +185,16 @@
             <div class="value" id="failureCount">-</div>
           </div>
           <div class="stat">
-            <div class="label">平均延迟</div>
+            <div class="label">平均耗时</div>
             <div class="value" id="avgLatency">-</div>
           </div>
         </div>
 
         <h3>最近日志</h3>
-        <table class="table">
+        <table class="table logs-table">
+          <colgroup>
+            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency">
+          </colgroup>
           <thead>
             <tr>
               <th>时间</th>
@@ -179,7 +205,7 @@
               <th>工具/恢复</th>
               <th>错误</th>
               <th>状态</th>
-              <th>延迟</th>
+              <th>耗时</th>
             </tr>
           </thead>
           <tbody id="dashboardLogs">
@@ -357,7 +383,7 @@
                   <tr>
                     <th>Provider</th>
                     <th>成功率</th>
-                    <th>延迟</th>
+                    <th>耗时</th>
                     <th>连续失败</th>
                     <th>冷却</th>
                     <th>最近错误</th>
@@ -375,6 +401,17 @@
           </div>
           <div class="stack">
             <div class="panel" style="margin:0;">
+              <div class="label">运行与更新状态</div>
+              <div class="pre" id="runtimeStatusOutput">-</div>
+            </div>
+            <div class="panel" style="margin:0;">
+              <div class="label">统一诊断摘要</div>
+              <div class="pre" id="diagnosticsSummaryOutput">-</div>
+              <div class="actions" style="justify-content:flex-start; margin-top:8px;">
+                <button class="btn" id="btnCopyDiagnosticsSummary">复制诊断摘要</button>
+              </div>
+            </div>
+            <div class="panel" style="margin:0;">
               <div class="label">Metrics</div>
               <div class="pre" id="metricsOutput">-</div>
             </div>
@@ -387,13 +424,44 @@
         <div class="toolbar">
           <button class="btn danger" id="btnClearLogs">清空日志</button>
           <button class="btn" id="btnRefreshLogs">刷新</button>
+          <button class="btn" id="btnCopyLatestFailure">复制最近失败摘要</button>
+        </div>
+        <div class="filter-bar">
+          <input id="logFilterSearch" placeholder="搜索路径 / 模型 / 错误 / 请求ID" />
+          <input id="logFilterProvider" placeholder="provider" />
+          <input id="logFilterModel" placeholder="model" />
+          <input id="logFilterErrorCode" placeholder="error_code" />
+          <input id="logFilterRequestID" placeholder="request_id" />
+          <input id="logFilterStatusCode" type="number" min="100" max="599" step="1" placeholder="status_code" />
+          <button class="btn" id="btnApplyLogFilters">应用筛选</button>
+          <button class="btn" id="btnClearLogFilters">清除筛选</button>
+        </div>
+        <div class="diagnostic-banner hidden" id="latestFailureBanner">
+          <div class="diagnostic-card">
+            <div class="label">最近失败</div>
+            <div class="value" id="latestFailureReason">-</div>
+            <div class="hint" id="latestFailureAction">-</div>
+          </div>
+          <div class="diagnostic-card">
+            <div class="label">诊断摘要</div>
+            <div class="value" id="latestFailureSummary">-</div>
+            <div class="hint" id="latestFailureMeta">-</div>
+          </div>
+          <div class="diagnostic-card">
+            <div class="label">最近样本</div>
+            <div class="value" id="latestFailureSample">-</div>
+            <div class="hint" id="latestFailureSampleHint">-</div>
+          </div>
         </div>
         <div class="toolbar" style="justify-content:flex-end;align-items:center;">
           <span id="logPageInfo" class="hint"></span>
           <button class="btn" id="btnLogPrevPage" disabled>上一页</button>
           <button class="btn" id="btnLogNextPage" disabled>下一页</button>
         </div>
-        <table class="table">
+        <table class="table logs-table">
+          <colgroup>
+            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency">
+          </colgroup>
           <thead>
             <tr>
               <th>时间</th>
@@ -404,7 +472,7 @@
               <th>工具/恢复</th>
               <th>错误</th>
               <th>状态</th>
-              <th>延迟</th>
+              <th>耗时</th>
             </tr>
           </thead>
           <tbody id="logTable">
@@ -495,6 +563,12 @@
       if (Number.isNaN(d.getTime())) return ts;
       return d.toLocaleString();
     };
+    const formatShortTime = (ts) => {
+      if (!ts) return '-';
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return escapeHTML(ts);
+      return d.toLocaleTimeString(undefined, { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    };
     const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
       '&': '&amp;',
       '<': '&lt;',
@@ -509,6 +583,13 @@
     const formatLatency = (value) => {
       if (!value || Number(value) <= 0) return '-';
       return Math.round(Number(value)) + ' ms';
+    };
+    const formatCompactLatency = (value) => {
+      const ms = Number(value || 0);
+      if (!Number.isFinite(ms) || ms <= 0) return '-';
+      if (ms < 1000) return `${Math.round(ms)}ms`;
+      if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
+      return `${Math.round(ms / 1000)}s`;
     };
     const formatCooldown = (ms) => {
       if (!ms || Number(ms) <= 0) return '<span class="badge ok">可用</span>';
@@ -590,6 +671,10 @@
       if (!log || log.is_success) return '-';
       const code = escapeHTML(log.error_code || 'error');
       const message = escapeHTML(log.error_message || '请求失败');
+      const reason = log.error_reason ? `&#10;原因: ${escapeHTML(log.error_reason)}` : '';
+      const action = log.error_action ? `&#10;处理: ${escapeHTML(log.error_action)}` : '';
+      const summary = log.diagnostic_summary ? `&#10;摘要: ${escapeHTML(log.diagnostic_summary)}` : '';
+      const attempts = log.attempts_summary ? `&#10;候选: ${escapeHTML(log.attempts_summary)}` : '';
       const hint = log.error_hint ? `&#10;建议: ${escapeHTML(log.error_hint)}` : '';
       const requestSize = Number(log.request_bytes || 0) > 0 ? `&#10;请求体: ${formatBytes(log.request_bytes)}` : '';
       const upstreamSize = Number(log.upstream_bytes || 0) > 0 ? `&#10;上游体: ${formatBytes(log.upstream_bytes)}` : '';
@@ -597,7 +682,8 @@
       const cancelReason = log.cancel_reason ? `&#10;取消原因: ${escapeHTML(log.cancel_reason)}` : '';
       const networkPeer = log.network_peer ? `&#10;远端: ${escapeHTML(log.network_peer)}` : '';
       const streamState = log.stream_state ? `&#10;流状态: ${escapeHTML(log.stream_state)}` : '';
-      return `<span class="badge warn" title="${message}${hint}${requestSize}${upstreamSize}${timeoutBudget}${cancelReason}${networkPeer}${streamState}">${code}</span>`;
+      const label = log.error_reason ? `${code} · ${escapeHTML(log.error_reason)}` : code;
+      return `<span class="badge warn" title="${message}${reason}${action}${summary}${attempts}${hint}${requestSize}${upstreamSize}${timeoutBudget}${cancelReason}${networkPeer}${streamState}">${label}</span>`;
     };
     const formatBytes = (bytes) => {
       const n = Number(bytes || 0);
@@ -608,6 +694,7 @@
     };
     const formatToolDiagnostics = (log) => {
       const parts = [];
+      if (log.request_id) parts.push(`请求ID ${log.request_id}`);
       if (log.request_tools) parts.push(`请求 ${log.request_tools}`);
       if (log.response_tools) parts.push(`响应 ${log.response_tools}`);
       if (log.fallback_mode) parts.push(`恢复 ${log.fallback_mode}`);
@@ -619,6 +706,28 @@
       const escaped = escapeHTML(text);
       const shortText = escaped.length > 96 ? escaped.slice(0, 96) + '...' : escaped;
       return `<span class="badge" title="${escaped}">${shortText}</span>`;
+    };
+    const renderLogRow = (log) => {
+      const fullTime = escapeHTML(formatTime(log.timestamp));
+      const shortTime = formatShortTime(log.timestamp);
+      const method = escapeHTML(log.method || '-');
+      const path = escapeHTML(log.path || '-');
+      const provider = escapeHTML(log.provider || '-');
+      const model = escapeHTML(formatModelRoute(log));
+      const latency = escapeHTML(formatCompactLatency(log.elapsed_ms));
+      const latencyTitle = escapeHTML(formatLatency(log.elapsed_ms));
+      return `
+          <tr>
+            <td class="col-time" title="${fullTime}">${shortTime}</td>
+            <td class="col-method" title="${method}">${method}</td>
+            <td class="col-path" title="${path}">${path}</td>
+            <td class="col-provider" title="${provider}">${provider}</td>
+            <td class="col-model" title="${model}">${model}</td>
+            <td class="col-tools">${formatToolDiagnostics(log)}</td>
+            <td class="col-error">${formatLogError(log)}</td>
+            <td class="col-status"><span class="${statusClass(log.status_code)}">${escapeHTML(log.status_code ?? '-')}</span></td>
+            <td class="col-latency" title="${latencyTitle}">${latency}</td>
+          </tr>`;
     };
 
     const providerKey = (provider) => provider?.id || provider?.name || '';
@@ -656,6 +765,31 @@
       return true;
     };
 
+    let toastTimer;
+    const showToast = (message, kind = 'ok') => {
+      const toast = $('globalToast');
+      clearTimeout(toastTimer);
+      toast.textContent = message;
+      toast.classList.toggle('warn', kind === 'warn');
+      toast.classList.remove('hidden');
+      toastTimer = setTimeout(() => toast.classList.add('hidden'), 2600);
+    };
+
+    const copyText = async (label, text) => {
+      const value = String(text || '');
+      if (!value) return false;
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('clipboard unavailable');
+        await navigator.clipboard.writeText(value);
+        showToast(`已复制${label}`);
+        return true;
+      } catch (e) {
+        showToast(`无法自动复制${label}，请在弹窗中手动复制。`, 'warn');
+        window.prompt(`复制${label}`, value);
+        return false;
+      }
+    };
+
     // 页面切换：根据前端 hash 路由显示对应面板
     const showPage = (page) => {
       setActiveNav(page);
@@ -685,12 +819,7 @@
 
     const copyQQGroup = async () => {
       const group = '390485182';
-      try {
-        await navigator.clipboard.writeText(group);
-        setTestResult('已复制 QQ 群号', `QQ群：${group}`);
-      } catch (e) {
-        window.prompt('复制 QQ 群号', group);
-      }
+      await copyText(' QQ 群号', group);
     };
 
     // 加载仪表盘统计数据与最近日志
@@ -710,19 +839,7 @@
           tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无日志</td></tr>';
           return;
         }
-        tbody.innerHTML = logs.map(log => `
-          <tr>
-            <td>${formatTime(log.timestamp)}</td>
-            <td>${log.method}</td>
-            <td>${log.path}</td>
-            <td>${log.provider || '-'}</td>
-            <td>${formatModelRoute(log)}</td>
-            <td>${formatToolDiagnostics(log)}</td>
-            <td>${formatLogError(log)}</td>
-            <td><span class="${statusClass(log.status_code)}">${log.status_code}</span></td>
-            <td>${Number(log.elapsed_ms).toFixed(0)} ms</td>
-          </tr>
-        `).join('');
+        tbody.innerHTML = logs.map(renderLogRow).join('');
       } catch (e) {
         console.error(e);
       }
@@ -962,9 +1079,55 @@
       }).join('');
     };
 
+    const formatRuntimeStatus = (status) => {
+      const artifact = status?.update_artifacts || {};
+      const lineForFile = (label, item) => {
+        if (!item || !item.path) return `${label}: 未知`;
+        const state = item.exists ? `存在 (${formatBytes(item.size)})` : '不存在';
+        const modified = item.modified ? `, 修改 ${formatTime(item.modified)}` : '';
+        return `${label}: ${state}${modified}\n  ${item.path}`;
+      };
+      return [
+        `版本: ${status?.version || '-'}`,
+        `进程: PID ${status?.pid || '-'} / ${status?.goos || '-'}-${status?.goarch || '-'}`,
+        `监听: ${status?.listen_host || '-'}:${status?.listen_port || '-'}`,
+        `面板: ${status?.admin_url || '-'}`,
+        `Provider/模型: ${status?.provider_count ?? 0} / ${status?.model_count ?? 0}`,
+        `配置: ${status?.config_path || '-'}`,
+        `程序: ${status?.executable_path || '-'}`,
+        lineForFile('新版 .new', artifact.staged_binary),
+        lineForFile('更新脚本 .ps1', artifact.self_update_script),
+        lineForFile('更新日志 .log', artifact.self_update_log),
+        `备份数量: ${artifact.backup_count ?? 0}`,
+        lineForFile('最近备份 .bak', artifact.latest_backup),
+      ].join('\n');
+    };
+
+    const formatDiagnosticsSummary = (summary) => {
+      if (!summary) return '-';
+      const copy = summary.copy_summary || '-';
+      const lines = [];
+      lines.push(copy);
+      if (summary.latest_failure && summary.latest_failure.id) {
+        lines.push('');
+        lines.push(`最近失败: ${summary.latest_failure.error_code || '-'} · ${summary.latest_failure.error_reason || summary.latest_failure.error_message || '-'}`);
+        lines.push(`请求ID: ${summary.latest_failure.request_id || '-'}`);
+        lines.push(`Provider: ${summary.latest_failure.provider || '-'} / ${summary.latest_failure.model || '-'} -> ${summary.latest_failure.upstream || '-'}`);
+        lines.push(`状态: ${summary.latest_failure.status_code || '-'}`);
+      }
+      if (Array.isArray(summary.problem_providers) && summary.problem_providers.length > 0) {
+        lines.push('');
+        lines.push('异常 provider:');
+        summary.problem_providers.forEach((item) => {
+          lines.push(`- ${item.provider}: 连续失败 ${item.consecutive_failures || 0}，冷却 ${formatCompactLatency(item.cooldown_remaining_ms || 0)}，最近错误 ${item.last_error || '-'}`);
+        });
+      }
+      return lines.join('\n');
+    };
+
     const loadMonitor = async () => {
       try {
-        const [health, metrics, providerHealth] = await Promise.all([
+        const [health, metrics, providerHealth, runtimeStatus, diagnosticsSummary] = await Promise.all([
           fetch('/health').then(async (res) => {
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.error || '请求失败');
@@ -975,7 +1138,9 @@
             if (!res.ok) throw new Error(text || '请求失败');
             return text;
           }),
-          fetchJSON('/providers/health')
+          fetchJSON('/providers/health'),
+          fetchJSON('/runtime/status'),
+          fetchJSON('/diagnostics/summary')
         ]);
         $('healthStatus').textContent = health.status || '-';
         $('healthProviders').textContent = (health.providers || []).length;
@@ -986,6 +1151,11 @@
           provider_health: providerHealth
         }, null, 2);
         $('metricsOutput').textContent = metrics;
+        $('runtimeStatusOutput').textContent = formatRuntimeStatus(runtimeStatus);
+        $('diagnosticsSummaryOutput').textContent = formatDiagnosticsSummary(diagnosticsSummary);
+        $('btnCopyDiagnosticsSummary').onclick = async () => {
+          await copyText('诊断摘要', diagnosticsSummary?.copy_summary || '');
+        };
       } catch (e) {
         console.error(e);
       }
@@ -994,11 +1164,64 @@
     // ── 分页日志 ──────────────────────────────────────────
     let logCurrentPage = 1;
     const LOG_PAGE_SIZE = 20;
+    let currentLogFilters = {};
+    let latestFailureSnapshot = null;
+
+    const getLogFiltersFromUI = () => ({
+      q: $('logFilterSearch').value,
+      provider: $('logFilterProvider').value,
+      model: $('logFilterModel').value,
+      error_code: $('logFilterErrorCode').value,
+      request_id: $('logFilterRequestID').value,
+      status_code: $('logFilterStatusCode').value,
+    });
+
+    const setLogFiltersToUI = (filters) => {
+      $('logFilterSearch').value = filters.q || '';
+      $('logFilterProvider').value = filters.provider || '';
+      $('logFilterModel').value = filters.model || '';
+      $('logFilterErrorCode').value = filters.error_code || '';
+      $('logFilterRequestID').value = filters.request_id || '';
+      $('logFilterStatusCode').value = filters.status_code || '';
+    };
+
+    const updateLatestFailureBanner = (logs) => {
+      const latest = latestFailureSnapshot || (logs || []).find((log) => !log.is_success);
+      const banner = $('latestFailureBanner');
+      if (!latest) {
+        banner.classList.add('hidden');
+        return;
+      }
+      banner.classList.remove('hidden');
+      $('latestFailureReason').textContent = `${latest.error_code || 'error'} · ${latest.error_reason || latest.error_message || '请求失败'}`;
+      $('latestFailureAction').textContent = latest.error_action || latest.error_hint || '-';
+      $('latestFailureSummary').textContent = latest.diagnostic_summary || latest.attempts_summary || '-';
+      $('latestFailureMeta').textContent = [
+        latest.request_id ? `请求ID ${latest.request_id}` : null,
+        latest.provider || null,
+        latest.model || null,
+        latest.upstream ? `upstream ${latest.upstream}` : null,
+        latest.status_code ? `HTTP ${latest.status_code}` : null,
+        latest.elapsed_ms ? `${formatCompactLatency(latest.elapsed_ms)}` : null,
+      ].filter(Boolean).join(' | ') || '-';
+      $('latestFailureSample').textContent = latest.request_tools || latest.response_tools || '-';
+      $('latestFailureSampleHint').textContent = latest.request_tools ? '请求工具声明' : (latest.response_tools ? '响应工具声明' : '-');
+    };
 
     // 加载日志列表（分页模式）
     const loadLogs = async () => {
       try {
-        const res = await fetchJSON('/logs?page=' + logCurrentPage + '&page_size=' + LOG_PAGE_SIZE);
+        const params = new URLSearchParams({ page: String(logCurrentPage), page_size: String(LOG_PAGE_SIZE) });
+        Object.entries(currentLogFilters).forEach(([key, value]) => {
+          if (value !== undefined && value !== null && String(value).trim() !== '') {
+            params.set(key, String(value).trim());
+          }
+        });
+        const [res, diagnosticsSummary] = await Promise.all([
+          fetchJSON('/logs?' + params.toString()),
+          fetchJSON('/diagnostics/summary').catch(() => null)
+        ]);
+        latestFailureSnapshot = diagnosticsSummary?.latest_failure?.id ? diagnosticsSummary.latest_failure : null;
         const logs = res.logs || [];
         const total = res.total || 0;
         const totalPages = Math.max(1, Math.ceil(total / LOG_PAGE_SIZE));
@@ -1013,21 +1236,11 @@
         const tbody = $('logTable');
         if (!logs.length) {
           tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无日志</td></tr>';
+          updateLatestFailureBanner([]);
           return;
         }
-        tbody.innerHTML = logs.map(log => `
-          <tr>
-            <td>${formatTime(log.timestamp)}</td>
-            <td>${log.method}</td>
-            <td>${log.path}</td>
-            <td>${log.provider || '-'}</td>
-            <td>${formatModelRoute(log)}</td>
-            <td>${formatToolDiagnostics(log)}</td>
-            <td>${formatLogError(log)}</td>
-            <td><span class="${statusClass(log.status_code)}">${log.status_code}</span></td>
-            <td>${Number(log.elapsed_ms).toFixed(0)} ms</td>
-          </tr>
-        `).join('');
+        updateLatestFailureBanner(logs);
+        tbody.innerHTML = logs.map(renderLogRow).join('');
       } catch (e) {
         console.error(e);
       }
@@ -1043,6 +1256,28 @@
     $('btnLogNextPage').addEventListener('click', () => {
       logCurrentPage++;
       loadLogs();
+    });
+    $('btnApplyLogFilters').addEventListener('click', () => {
+      currentLogFilters = getLogFiltersFromUI();
+      logCurrentPage = 1;
+      loadLogs();
+    });
+    $('btnClearLogFilters').addEventListener('click', () => {
+      currentLogFilters = {};
+      setLogFiltersToUI({});
+      logCurrentPage = 1;
+      loadLogs();
+    });
+    $('btnCopyLatestFailure').addEventListener('click', async () => {
+      const banner = $('latestFailureBanner');
+      if (banner.classList.contains('hidden')) return;
+      const text = [
+        $('latestFailureReason').textContent,
+        $('latestFailureAction').textContent,
+        $('latestFailureSummary').textContent,
+        $('latestFailureMeta').textContent,
+      ].filter(Boolean).join('\n');
+      await copyText('最近失败摘要', text);
     });
 
     // 导航点击处理：读取当前元素的 hash 用于前端路由切换

@@ -545,14 +545,20 @@ func listenWithStartupPortRecovery(addr string, logger *log.Logger) (net.Listene
 
 	killed := []int{}
 	for _, pid := range pids {
-		if pid == os.Getpid() || !isSafeProxyProcess(pid) {
-			logger.Warn("端口 %d 被 PID %d 占用，但进程名不是 vs-ai-proxy/server，跳过清理", port, pid)
+		name := processName(pid)
+		if pid == os.Getpid() {
+			logger.Warn("端口 %d 被当前进程 PID %d (%s) 占用，跳过清理；请检查是否重复启动或系统端口保留", port, pid, displayProcessName(name))
+			continue
+		}
+		if !isSafeProxyProcessName(name) {
+			logger.Warn("端口 %d 被 PID %d (%s) 占用，但不是 vs-ai-proxy/server，跳过清理以避免误杀；请手动确认占用进程", port, pid, displayProcessName(name))
 			continue
 		}
 		if killErr := killProcess(pid); killErr != nil {
-			logger.Warn("清理端口 %d 的旧代理进程 PID %d 失败: %v", port, pid, killErr)
+			logger.Warn("清理端口 %d 的旧代理进程 PID %d (%s) 失败: %v；请检查权限、杀软或进程保护", port, pid, displayProcessName(name), killErr)
 			continue
 		}
+		logger.Warn("端口 %d 的旧代理进程 PID %d (%s) 已清理", port, pid, displayProcessName(name))
 		killed = append(killed, pid)
 	}
 	if len(killed) == 0 {
@@ -639,12 +645,24 @@ func parsePIDLines(out string) []int {
 }
 
 func isSafeProxyProcess(pid int) bool {
-	name := strings.ToLower(processName(pid))
+	return isSafeProxyProcessName(processName(pid))
+}
+
+func isSafeProxyProcessName(name string) bool {
+	name = strings.ToLower(name)
 	if name == "" {
 		return false
 	}
 	name = strings.TrimSuffix(name, ".exe")
 	return name == "vs-ai-proxy" || name == "server"
+}
+
+func displayProcessName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "进程名未知"
+	}
+	return name
 }
 
 func processName(pid int) string {

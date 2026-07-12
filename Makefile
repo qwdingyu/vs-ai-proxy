@@ -5,6 +5,7 @@
 #   make install       构建所有平台便携包（可执行文件）
 #   make release       构建并打包所有平台（压缩包）
 #   make release-notes 生成当前 tag 的 GitHub Release 正文
+#   make tool-check    工具调用专项核查
 #   make clean         清理构建产物
 
 APP_NAME     := vs-ai-proxy
@@ -33,7 +34,7 @@ PLATFORM_ALIAS := \
 	windows/amd64:windows-x64
 
 # ─── 默认目标 ──────────────────────────────────────────
-.PHONY: all build build-all install release release-notes clean
+.PHONY: all build build-all install release release-notes tool-check clean
 
 all: build
 
@@ -84,6 +85,10 @@ release:
 # ─── 生成规范 Release 说明 ─────────────────────────────
 release-notes:
 	@bash .bin/release-notes.sh
+
+# ─── 工具调用专项核查 ──────────────────────────────────
+tool-check:
+	@bash tests/tool_call_release_check.sh
 
 # ─── 清理 ──────────────────────────────────────────────
 clean:
