@@ -96,7 +96,7 @@ cat > "$CONFIG_PATH" <<JSON
 }
 JSON
 
-rtk go build -o "$PROXY_BIN" ./cmd/server
+go build -o "$PROXY_BIN" ./cmd/server
 python3 "$PYTHON_UPSTREAM" &
 UPSTREAM_PID=$!
 echo "$UPSTREAM_PID" > "$PID_FILE"

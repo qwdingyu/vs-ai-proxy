@@ -180,7 +180,7 @@ print(body[:limit])
 PY
 
 printf '\n== 2. local proxy: build and start ==\n'
-rtk go build -o "$PROXY_BIN" ./cmd/server
+go build -o "$PROXY_BIN" ./cmd/server
 CONFIG_PATH="$CONFIG_PATH" STORE_PATH="$STORE_PATH" "$PROXY_BIN" >"$PROXY_LOG" 2>&1 &
 echo $! > "$PID_FILE"
 for _ in {1..80}; do
