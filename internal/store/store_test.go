@@ -65,6 +65,58 @@ func TestGetLogsPageFilteredFiltersByProviderStatusAndSearch(t *testing.T) {
 	}
 }
 
+func TestGetLogsPageFilteredCoversDiagnosticFields(t *testing.T) {
+	s := New(10)
+	s.AddLog(RequestLog{
+		Method:            "POST",
+		Path:              "/v1/chat/completions",
+		Provider:          "useai",
+		Model:             "UseAI - step-router-v1",
+		Upstream:          "step-router-v1",
+		StatusCode:        502,
+		IsSuccess:         false,
+		ErrorCode:         "network_error",
+		ErrorReason:       "网络/CDN/连接异常",
+		ErrorAction:       "检查 Cloudflare/WAF",
+		DiagnosticSummary: "连接被关闭；请求体 619.2 KB",
+		AttemptsSummary:   "useai/step-router-v1 22s network_error",
+		RequestID:         "req-network-1",
+		NetworkPeer:       "104.21.57.81:443",
+		StreamState:       "upstream_connecting",
+		RequestTools:      "declared: create_file,get_file",
+	})
+	s.AddLog(RequestLog{Method: "POST", Path: "/v1/chat/completions", Provider: "deepseek", Model: "deepseek-v4-flash", StatusCode: 200, IsSuccess: true, RequestID: "req-ok"})
+
+	filters := LogFilters{
+		Provider:    "useai",
+		Model:       "step-router",
+		StatusCode:  502,
+		ErrorCode:   "network",
+		RequestID:   "network-1",
+		ErrorReason: "连接异常",
+		Search:      "create_file",
+	}
+	result := s.GetLogsPageFiltered(1, 10, filters)
+
+	if got, want := len(result.Logs), 1; got != want {
+		t.Fatalf("len = %d, want %d", got, want)
+	}
+	if got := result.Logs[0].RequestID; got != "req-network-1" {
+		t.Fatalf("RequestID = %q, want req-network-1", got)
+	}
+}
+
+func TestGetLogsPageFilteredRejectsMismatchedDiagnosticReason(t *testing.T) {
+	s := New(10)
+	s.AddLog(RequestLog{Provider: "useai", StatusCode: 502, ErrorReason: "网络/CDN/连接异常", IsSuccess: false})
+
+	result := s.GetLogsPageFiltered(1, 10, LogFilters{ErrorReason: "上游服务异常"})
+
+	if got := len(result.Logs); got != 0 {
+		t.Fatalf("len = %d, want 0", got)
+	}
+}
+
 func TestGetLogsPageFilteredKeepsNewestFirstOrder(t *testing.T) {
 	s := New(10)
 	s.AddLog(RequestLog{Method: "GET", Path: "/first", StatusCode: 200, IsSuccess: true})

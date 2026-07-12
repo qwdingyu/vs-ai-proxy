@@ -1329,6 +1329,70 @@ func TestStreamingDoesNotFailoverWhenClientGone(t *testing.T) {
 	}
 }
 
+func TestStreamingClassifiesUpstreamStatusBeforeContextCanceled(t *testing.T) {
+	primary := newFakeProvider("primary", true, []string{"shared"}, nil, "")
+	primary.streamErr = errors.Join(context.Canceled, errors.New(`openai stream error: API 错误 500: {"error":{"code":"do_request_failed"}}`))
+	secondary := newFakeProvider("secondary", true, []string{"shared"}, nil, "")
+
+	server := newOpenServer(primary, secondary)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"shared","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if primary.streamCalls != 1 {
+		t.Fatalf("primary stream calls = %d, want 1", primary.streamCalls)
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "upstream_server_error") {
+		t.Fatalf("body should classify mixed cancel/status as upstream_server_error: %s", rec.Body.String())
+	}
+}
+
+func TestStreamingMixedUpstreamStatusWritesStructuredLogDiagnostics(t *testing.T) {
+	primary := newFakeProvider("primary", true, []string{"shared"}, nil, "")
+	primary.streamErr = errors.Join(context.Canceled, errors.New(`openai stream error: API 错误 500: {"error":{"code":"do_request_failed"}}`))
+	server := newOpenServer(primary)
+	inner := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	handler := server.loggingMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"shared","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "mixed-upstream-500")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	logs := server.store.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	logEntry := logs[0]
+	if logEntry.RequestID != "mixed-upstream-500" {
+		t.Fatalf("request_id = %q, want mixed-upstream-500", logEntry.RequestID)
+	}
+	if logEntry.StatusCode != http.StatusBadGateway || logEntry.ErrorCode != "upstream_server_error" {
+		t.Fatalf("status/error = %d/%q, want 502/upstream_server_error; log=%#v", logEntry.StatusCode, logEntry.ErrorCode, logEntry)
+	}
+	if !strings.Contains(logEntry.ErrorReason, "上游服务异常") || !strings.Contains(logEntry.ErrorAction, "渠道健康") {
+		t.Fatalf("operator diagnostics missing: %#v", logEntry)
+	}
+	if !strings.Contains(logEntry.DiagnosticSummary, "5xx") || !strings.Contains(logEntry.AttemptsSummary, "primary/shared") {
+		t.Fatalf("summary/attempt diagnostics missing: %#v", logEntry)
+	}
+}
+
 func TestChatCompletionsAppliesModelTimeout(t *testing.T) {
 	timeout := 2
 	prov := newFakeProvider("openai", true, []string{"gpt-test"}, &fakeChatResponse{Model: "gpt-test", Content: "pong"}, "")

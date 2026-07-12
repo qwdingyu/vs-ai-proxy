@@ -394,7 +394,11 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if effectiveTimeout == 0 {
 			effectiveTimeout = firstPositiveHeaderInt(ww.Header(), "X-Proxy-Effective-Timeout-Seconds")
 		}
-		diagSummary := summarizeLogDiagnostic(errorCode, ww.statusCode, elapsed, r.ContentLength, ww.upstreamBytes, networkPeer, streamState)
+		logErrorCode := errorCode
+		if logErrorCode == "" && ww.statusCode >= http.StatusBadRequest {
+			logErrorCode = fallbackLogErrorCode(ww.statusCode)
+		}
+		diagSummary := summarizeLogDiagnostic(logErrorCode, ww.statusCode, elapsed, r.ContentLength, ww.upstreamBytes, networkPeer, streamState)
 
 		s.store.AddLog(store.RequestLog{
 			RequestID:                requestID,
@@ -410,7 +414,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			StatusCode:               ww.statusCode,
 			ElapsedMs:                elapsed,
 			IsSuccess:                ww.statusCode < 400,
-			ErrorCode:                errorCode,
+			ErrorCode:                logErrorCode,
 			ErrorMessage:             errorMessage,
 			ErrorHint:                errorHint,
 			ErrorReason:              diagSummary.Reason,
@@ -426,12 +430,65 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			StreamState:              streamState,
 		})
 
-		if errorCode != "" {
-			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s error_code=%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID, errorCode)
+		if logErrorCode != "" {
+			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s error_code=%s%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID, logErrorCode, consoleDiagnosticSuffix(diagSummary, attemptsSummary, r.ContentLength, ww.upstreamBytes))
 		} else {
 			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID)
 		}
 	})
+}
+
+func fallbackLogErrorCode(statusCode int) string {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "upstream_auth_error"
+	case http.StatusTooManyRequests:
+		return "upstream_rate_limit"
+	case http.StatusRequestEntityTooLarge:
+		return "upstream_payload_too_large"
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed:
+		return "upstream_request_error"
+	}
+	if statusCode >= http.StatusInternalServerError {
+		return "provider_error"
+	}
+	if statusCode >= http.StatusBadRequest {
+		return "provider_error"
+	}
+	return ""
+}
+
+func consoleDiagnosticSuffix(diag logDiagnosticSummary, attemptsSummary string, requestBytes int64, upstreamBytes int64) string {
+	parts := []string{}
+	if strings.TrimSpace(diag.Reason) != "" {
+		parts = append(parts, "reason="+quoteLogValue(diag.Reason))
+	}
+	if strings.TrimSpace(diag.Action) != "" {
+		parts = append(parts, "action="+quoteLogValue(diag.Action))
+	}
+	if strings.TrimSpace(diag.Summary) != "" {
+		parts = append(parts, "summary="+quoteLogValue(diag.Summary))
+	}
+	if strings.TrimSpace(attemptsSummary) != "" {
+		parts = append(parts, "attempts="+quoteLogValue(attemptsSummary))
+	}
+	if requestSize := humanBytes(requestBytes); requestSize != "" {
+		parts = append(parts, "request_bytes="+quoteLogValue(requestSize))
+	}
+	if upstreamSize := humanBytes(upstreamBytes); upstreamSize != "" {
+		parts = append(parts, "upstream_bytes="+quoteLogValue(upstreamSize))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
+}
+
+func quoteLogValue(value string) string {
+	value = sanitizeDiagnosticMessage(value)
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strconv.Quote(strings.Join(strings.Fields(value), " "))
 }
 
 func enrichClientGoneDiagnostics(statusCode int, elapsedMs float64, requestBytes int64, code, message, hint string) (string, string, string) {
@@ -1557,6 +1614,9 @@ func shouldStopCandidateFallback(category string) bool {
 
 func isClientGoneError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if category := classifyProxyErrorFromErr(err, err.Error()); category != "client_gone" {
 		return false
 	}
 	return errors.Is(err, context.Canceled) || strings.Contains(strings.ToLower(err.Error()), "client_gone")

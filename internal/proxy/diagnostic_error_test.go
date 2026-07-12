@@ -32,23 +32,49 @@ func TestClassifyProxyErrorDistinguishesNetworkAndUpstreamStatus(t *testing.T) {
 	tests := map[string]string{
 		`请求失败: dial tcp: connect: connection refused`: "network_error",
 		`请求失败: Post "https://api.eforge.xyz/v1/chat/completions": write tcp 192.168.1.11:57874->104.21.57.81:443: use of closed network connection`: "network_error",
-		`openai stream error: API 错误 401`:       "upstream_auth_error",
-		`ollama stream error: Ollama 错误 403`:    "upstream_auth_error",
-		`openai stream error: API 错误 400`:       "upstream_request_error",
-		`openai stream error: API 错误 404`:       "upstream_request_error",
-		`openai stream error: API 错误 413`:       "upstream_payload_too_large",
-		`openai stream error: API 错误 429`:       "upstream_rate_limit",
-		`openai stream error: API 错误 503`:       "upstream_server_error",
-		`openai stream error: context canceled`: "client_gone",
-		`client_gone`:                           "client_gone",
-		`context deadline exceeded`:             "timeout",
-		`解析响应失败: invalid character`:             "proxy_parse_error",
+		`openai stream error: API 错误 401`:                                          "upstream_auth_error",
+		`ollama stream error: Ollama 错误 403`:                                       "upstream_auth_error",
+		`openai stream error: API 错误 400`:                                          "upstream_request_error",
+		`openai stream error: API 错误 400: unsupported parameter; context canceled`: "upstream_request_error",
+		`openai stream error: API 错误 404`:                                          "upstream_request_error",
+		`openai stream error: API 错误 413`:                                          "upstream_payload_too_large",
+		`openai stream error: API 错误 413: payload too large; context canceled`:     "upstream_payload_too_large",
+		`openai stream error: API 错误 429`:                                          "upstream_rate_limit",
+		`openai stream error: API 错误 503`:                                          "upstream_server_error",
+		`openai stream error: context canceled`:                                    "client_gone",
+		`client_gone`:                                                              "client_gone",
+		`context deadline exceeded`:                                                "timeout",
+		`解析响应失败: invalid character`:                                                "proxy_parse_error",
 	}
 
 	for message, want := range tests {
 		if got := classifyProxyError(message); got != want {
 			t.Fatalf("%q classified as %q, want %q", message, got, want)
 		}
+	}
+}
+
+func TestClassifyProxyErrorPrioritizesExplicitHTTPStatusOverTransportText(t *testing.T) {
+	tests := []struct {
+		message string
+		want    string
+	}{
+		{`openai stream error: API 错误 401: auth failed; context canceled`, "upstream_auth_error"},
+		{`openai stream error: API 错误 403: forbidden; context deadline exceeded`, "upstream_auth_error"},
+		{`openai stream error: API 错误 400: unsupported parameter; timeout`, "upstream_request_error"},
+		{`openai stream error: API 错误 404: model_not_found; client_gone`, "upstream_request_error"},
+		{`openai stream error: API 错误 413: payload too large; use of closed network connection`, "upstream_payload_too_large"},
+		{`openai stream error: API 错误 429: rate limited; context canceled`, "upstream_rate_limit"},
+		{`openai stream error: API 错误 500: upstream error; context canceled`, "upstream_server_error"},
+		{`openai stream error: API 错误 503: unavailable; timeout`, "upstream_server_error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := classifyProxyError(tt.message); got != tt.want {
+				t.Fatalf("classifyProxyError(%q) = %q, want %q", tt.message, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -133,8 +159,8 @@ func TestDiagnosticHeaderValueRemovesLineBreaksAndRedactsSecrets(t *testing.T) {
 func TestNewAttemptDiagnosticClassifiesWrappedContextCanceledAsClientGone(t *testing.T) {
 	err := errors.Join(context.Canceled, errors.New(`openai stream error: API 错误 500: {"error":{"code":"do_request_failed"}}`))
 	attempt := newAttemptDiagnostic("useai", "gpt-5.5", 2345.6, err)
-	if attempt.Category != "client_gone" {
-		t.Fatalf("category = %q, want client_gone; message=%s", attempt.Category, attempt.Message)
+	if attempt.Category != "upstream_server_error" {
+		t.Fatalf("category = %q, want upstream_server_error; message=%s", attempt.Category, attempt.Message)
 	}
 }
 
@@ -168,6 +194,78 @@ func TestPayloadTooLargeHintMentionsProviderSpecificLimit(t *testing.T) {
 	}
 	if !strings.Contains(diag.Details.Hint, "useai/deepseek-v4-flash") {
 		t.Fatalf("hint should identify provider/model: %q", diag.Details.Hint)
+	}
+}
+
+func TestPayloadTooLargeHintUsesMatchingAttemptProvider(t *testing.T) {
+	diag := allCandidatesFailedDiagnostic("shared", "shared", 2, []attemptDiagnostic{
+		{Provider: "useai", Upstream: "shared", Category: "upstream_payload_too_large", Message: "API 错误 413"},
+		{Provider: "backup", Upstream: "shared", Category: "network_error", Message: "use of closed network connection"},
+	})
+
+	if diag.Code != "upstream_payload_too_large" {
+		t.Fatalf("code = %q, want upstream_payload_too_large", diag.Code)
+	}
+	if !strings.Contains(diag.Details.Hint, "useai/shared") {
+		t.Fatalf("hint should point to payload provider, got %q", diag.Details.Hint)
+	}
+	if strings.Contains(diag.Details.Hint, "backup/shared") {
+		t.Fatalf("hint should not point to later non-payload provider: %q", diag.Details.Hint)
+	}
+}
+
+func TestAllCandidatesFailedDiagnosticUsesMostActionableCategory(t *testing.T) {
+	attempts := []attemptDiagnostic{
+		{Provider: "useai", Upstream: "model-a", Category: "network_error", Message: "use of closed network connection"},
+		{Provider: "usecpa", Upstream: "model-a", Category: "upstream_payload_too_large", Message: "API 错误 413"},
+		{Provider: "backup", Upstream: "model-a", Category: "provider_error", Message: "unknown"},
+	}
+
+	diag := allCandidatesFailedDiagnostic("model-a", "model-a", 3, attempts)
+
+	if diag.Code != "upstream_payload_too_large" {
+		t.Fatalf("code = %q, want upstream_payload_too_large", diag.Code)
+	}
+	if !strings.Contains(diag.Details.Hint, "请求体或上下文过大") {
+		t.Fatalf("hint = %q, want payload guidance", diag.Details.Hint)
+	}
+}
+
+func TestPrimaryFailureCategoryPrioritizesConfigurationErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		attempts []attemptDiagnostic
+		want     string
+	}{
+		{
+			name: "request error beats later network error",
+			attempts: []attemptDiagnostic{
+				{Category: "network_error"},
+				{Category: "upstream_request_error"},
+			},
+			want: "upstream_request_error",
+		},
+		{
+			name: "rate limit beats server error",
+			attempts: []attemptDiagnostic{
+				{Category: "upstream_server_error"},
+				{Category: "upstream_rate_limit"},
+			},
+			want: "upstream_rate_limit",
+		},
+		{
+			name:     "empty attempts fallback",
+			attempts: nil,
+			want:     "provider_error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := primaryFailureCategory(tt.attempts); got != tt.want {
+				t.Fatalf("primaryFailureCategory = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -213,6 +311,16 @@ func TestSummarizeLogDiagnosticGivesOperatorReadyReasonAndAction(t *testing.T) {
 			wantInSum:  "104.21.57.81:443",
 		},
 		{
+			code:       "network_error",
+			statusCode: 502,
+			elapsedMs:  22_510,
+			bytes:      634_054,
+			upstream:   642_181,
+			wantReason: "网络/CDN/连接异常",
+			wantAction: "新建 session 后恢复",
+			wantInSum:  "大上下文",
+		},
+		{
 			code:       "upstream_request_error",
 			statusCode: 502,
 			elapsedMs:  11228,
@@ -242,5 +350,28 @@ func TestSummarizeLogDiagnosticLeavesSuccessfulRequestsEmpty(t *testing.T) {
 	diag := summarizeLogDiagnostic("", 200, 12, 512, 128, "", "")
 	if diag.Reason != "" || diag.Action != "" || diag.Summary != "" {
 		t.Fatalf("success diagnostic = %#v, want empty", diag)
+	}
+}
+
+func TestSessionPressureDiagnosticNoteClassifiesLargeContexts(t *testing.T) {
+	if got := sessionPressureDiagnosticNote(128*1024, 96*1024); got != "" {
+		t.Fatalf("small request note = %q, want empty", got)
+	}
+	if got := sessionPressureDiagnosticNote(640*1024, 512*1024); !strings.Contains(got, "大上下文") || !strings.Contains(got, "新建 session 后恢复") {
+		t.Fatalf("large request note = %q, want large-context hint", got)
+	}
+	if got := sessionPressureDiagnosticNote(2*1024*1024, 256*1024); !strings.Contains(got, "超大上下文") {
+		t.Fatalf("extra large request note = %q, want extra-large-context hint", got)
+	}
+}
+
+func TestSummarizeLogDiagnosticDoesNotAttachContextPressureToUnrelatedErrors(t *testing.T) {
+	for _, code := range []string{"upstream_auth_error", "upstream_request_error", "upstream_rate_limit"} {
+		t.Run(code, func(t *testing.T) {
+			diag := summarizeLogDiagnostic(code, 502, 1200, 2*1024*1024, 2*1024*1024, "", "")
+			if strings.Contains(diag.Action, "旧 session") || strings.Contains(diag.Summary, "大上下文") {
+				t.Fatalf("%s should not include context pressure hint: %#v", code, diag)
+			}
+		})
 	}
 }

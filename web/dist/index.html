@@ -431,6 +431,7 @@
           <input id="logFilterProvider" placeholder="provider" />
           <input id="logFilterModel" placeholder="model" />
           <input id="logFilterErrorCode" placeholder="error_code" />
+          <input id="logFilterErrorReason" placeholder="error_reason" />
           <input id="logFilterRequestID" placeholder="request_id" />
           <input id="logFilterStatusCode" type="number" min="100" max="599" step="1" placeholder="status_code" />
           <button class="btn" id="btnApplyLogFilters">应用筛选</button>
@@ -1172,6 +1173,7 @@
       provider: $('logFilterProvider').value,
       model: $('logFilterModel').value,
       error_code: $('logFilterErrorCode').value,
+      error_reason: $('logFilterErrorReason').value,
       request_id: $('logFilterRequestID').value,
       status_code: $('logFilterStatusCode').value,
     });
@@ -1181,6 +1183,7 @@
       $('logFilterProvider').value = filters.provider || '';
       $('logFilterModel').value = filters.model || '';
       $('logFilterErrorCode').value = filters.error_code || '';
+      $('logFilterErrorReason').value = filters.error_reason || '';
       $('logFilterRequestID').value = filters.request_id || '';
       $('logFilterStatusCode').value = filters.status_code || '';
     };

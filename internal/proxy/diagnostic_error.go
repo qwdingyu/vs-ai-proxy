@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -94,10 +95,10 @@ func ambiguousModelAliasDiagnostic(requestedModel, resolvedModel string) proxyDi
 }
 
 func allCandidatesFailedDiagnostic(requestedModel, resolvedModel string, candidateCount int, attempts []attemptDiagnostic) proxyDiagnosticError {
-	category := "provider_error"
-	if len(attempts) > 0 {
-		category = attempts[len(attempts)-1].Category
-	}
+	// 多 provider 候选都失败时，不能简单取最后一个错误作为总错误码。
+	// 最后一个候选可能只是普通网络断开，真正需要用户处理的却是前面的 400/413/429。
+	// 因此这里按“最可行动”的错误类别选主因，让日志和前端先展示最值得排查的方向。
+	category := primaryFailureCategory(attempts)
 	message := "所有候选提供商请求均失败"
 	if candidateCount == 1 {
 		message = "当前提供商请求失败"
@@ -113,6 +114,58 @@ func allCandidatesFailedDiagnostic(requestedModel, resolvedModel string, candida
 			Attempts:       attempts,
 			Hint:           diagnosticHintForAttempts(category, attempts),
 		},
+	}
+}
+
+func primaryFailureCategory(attempts []attemptDiagnostic) string {
+	if len(attempts) == 0 {
+		return "provider_error"
+	}
+	bestCategory := "provider_error"
+	bestRank := failureCategoryRank(bestCategory)
+	for _, attempt := range attempts {
+		category := strings.TrimSpace(attempt.Category)
+		if category == "" {
+			category = "provider_error"
+		}
+		rank := failureCategoryRank(category)
+		if rank < bestRank {
+			bestCategory = category
+			bestRank = rank
+		}
+	}
+	return bestCategory
+}
+
+func failureCategoryRank(category string) int {
+	// 数字越小优先级越高。
+	// 排序原则：先暴露用户或配置能立即修正的问题（鉴权、参数、请求体、限流），
+	// 再暴露超时/上游/网络等环境和上游稳定性问题，避免关键信息被兜底错误覆盖。
+	switch category {
+	case "upstream_auth_error":
+		return 10
+	case "upstream_request_error":
+		return 20
+	case "upstream_payload_too_large":
+		return 30
+	case "upstream_rate_limit":
+		return 40
+	case "client_deadline_reached", "timeout":
+		return 50
+	case "upstream_server_error":
+		return 60
+	case "network_error":
+		return 70
+	case "proxy_parse_error":
+		return 80
+	case "client_gone":
+		return 90
+	case "upstream_api_error":
+		return 100
+	case "provider_error":
+		return 110
+	default:
+		return 120
 	}
 }
 
@@ -154,22 +207,35 @@ func diagnosticHintForAttempts(category string, attempts []attemptDiagnostic) st
 	if len(attempts) == 0 {
 		return hint
 	}
-	last := attempts[len(attempts)-1]
+	representative := representativeAttempt(category, attempts)
 	if category == "network_error" {
-		if last.Peer != "" {
-			return hint + " 本次连接的远端 peer 为 " + last.Peer + "；如果这是 Cloudflare/CDN IP（如 104.21.x.x 或 172.67.x.x），说明错误发生在客户端到 CDN/边缘节点或边缘到源站链路，不能直接等同于 new-api 源站 IP。"
+		if representative.Peer != "" {
+			return hint + " 本次连接的远端 peer 为 " + representative.Peer + "；如果这是 Cloudflare/CDN IP（如 104.21.x.x 或 172.67.x.x），说明错误发生在客户端到 CDN/边缘节点或边缘到源站链路，不能直接等同于 new-api 源站 IP。"
 		}
 		return hint
 	}
 	if category != "upstream_payload_too_large" {
 		return hint
 	}
-	providerName := strings.TrimSpace(last.Provider)
-	upstreamModel := strings.TrimSpace(last.Upstream)
+	providerName := strings.TrimSpace(representative.Provider)
+	upstreamModel := strings.TrimSpace(representative.Upstream)
 	if providerName == "" && upstreamModel == "" {
 		return hint
 	}
 	return hint + " 如果同一请求在其他 provider 可成功，这通常不是代理或 nginx 全局限制，而是当前 provider/channel 对该模型的上下文、工具声明或请求体大小限制；请优先检查 " + providerModelLabel(providerName, upstreamModel) + " 在上游网关中的模型映射、渠道组和 body/context 限制。"
+}
+
+func representativeAttempt(category string, attempts []attemptDiagnostic) attemptDiagnostic {
+	// 诊断文案需要指出“哪个 provider/model 触发了这个主错误”。
+	// 如果直接取最后一次 attempt，会把 413 等主因错误错误归属到后续失败的候选上。
+	// 从后向前找同类 attempt，既保留最近同类样本，又避免张冠李戴。
+	category = strings.TrimSpace(category)
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if strings.TrimSpace(attempts[i].Category) == category {
+			return attempts[i]
+		}
+	}
+	return attempts[len(attempts)-1]
 }
 
 func providerModelLabel(providerName, upstreamModel string) string {
@@ -225,10 +291,9 @@ func classifyProxyErrorFromErr(err error, message string) string {
 	lower := strings.ToLower(message)
 	status := upstreamHTTPStatus(message)
 	switch {
-	case errors.Is(err, context.Canceled) || strings.Contains(lower, "context canceled") || strings.Contains(lower, "client_gone"):
-		return "client_gone"
-	case strings.Contains(lower, "context deadline exceeded") || strings.Contains(lower, "timeout"):
-		return "timeout"
+	// 上游已经明确返回 HTTP 状态码时，优先相信状态码。
+	// 某些链路会把 “API 错误 400/413 ... context canceled” 混在同一错误文本里，
+	// 如果先匹配 context canceled，会把参数错误/大请求错误误判成 client_gone。
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return "upstream_auth_error"
 	case status == http.StatusTooManyRequests:
@@ -239,6 +304,10 @@ func classifyProxyErrorFromErr(err error, message string) string {
 		return "upstream_request_error"
 	case status >= http.StatusInternalServerError:
 		return "upstream_server_error"
+	case errors.Is(err, context.Canceled) || strings.Contains(lower, "context canceled") || strings.Contains(lower, "client_gone"):
+		return "client_gone"
+	case strings.Contains(lower, "context deadline exceeded") || strings.Contains(lower, "timeout"):
+		return "timeout"
 	case strings.Contains(lower, "connect: connection refused") ||
 		strings.Contains(lower, "no such host") ||
 		strings.Contains(lower, "network is unreachable") ||
@@ -313,30 +382,43 @@ func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requ
 	}
 	requestSize := humanBytes(requestBytes)
 	upstreamSize := humanBytes(upstreamBytes)
+	withPressure := func(action string, summary string) logDiagnosticSummary {
+		// 旧 VS Copilot session 反复失败、新 session 恢复时，最常见的强信号是请求体膨胀。
+		// 这里不把它写成确定结论，只作为“优先排查方向”补到处理建议和摘要里。
+		if note := sessionPressureDiagnosticNote(requestBytes, upstreamBytes); note != "" {
+			action += " " + note
+			summary += "；" + note
+		}
+		return logDiagnosticSummary{Action: action, Summary: summary}
+	}
 	switch code {
 	case "client_deadline_reached":
+		diag := withPressure("查上游首 token、new-api/sub2api 单渠道超时和轮换；必要时减少上下文。", compactDiagnosticSummary("VS/Copilot 接近等待上限后取消", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
 		return logDiagnosticSummary{
 			Reason:  "客户端等待上限",
-			Action:  "查上游首 token、new-api/sub2api 单渠道超时和轮换；必要时减少上下文。",
-			Summary: compactDiagnosticSummary("VS/Copilot 接近等待上限后取消", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+			Action:  diag.Action,
+			Summary: diag.Summary,
 		}
 	case "client_gone":
+		diag := withPressure("若耗时很短，多为用户取消/窗口关闭；若接近 100 秒，按客户端等待上限排查。", compactDiagnosticSummary("客户端在响应完成前断开", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
 		return logDiagnosticSummary{
 			Reason:  "客户端主动断开",
-			Action:  "若耗时很短，多为用户取消/窗口关闭；若接近 100 秒，按客户端等待上限排查。",
-			Summary: compactDiagnosticSummary("客户端在响应完成前断开", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+			Action:  diag.Action,
+			Summary: diag.Summary,
 		}
 	case "timeout":
+		diag := withPressure("检查模型 timeout_seconds、上游首 token 延迟和网关单渠道超时。", compactDiagnosticSummary("请求超过有效超时预算", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
 		return logDiagnosticSummary{
 			Reason:  "代理/上游超时",
-			Action:  "检查模型 timeout_seconds、上游首 token 延迟和网关单渠道超时。",
-			Summary: compactDiagnosticSummary("请求超过有效超时预算", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+			Action:  diag.Action,
+			Summary: diag.Summary,
 		}
 	case "upstream_payload_too_large":
+		diag := withPressure("减少历史上下文/文件内容，或切到支持更大上下文和工具声明的 provider/channel。", compactDiagnosticSummary("上游返回 413 或等价大请求错误", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
 		return logDiagnosticSummary{
 			Reason:  "上游拒绝大请求",
-			Action:  "减少历史上下文/文件内容，或切到支持更大上下文和工具声明的 provider/channel。",
-			Summary: compactDiagnosticSummary("上游返回 413 或等价大请求错误", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+			Action:  diag.Action,
+			Summary: diag.Summary,
 		}
 	case "upstream_rate_limit":
 		return logDiagnosticSummary{
@@ -345,10 +427,11 @@ func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requ
 			Summary: compactDiagnosticSummary("上游返回 429", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
 		}
 	case "upstream_server_error":
+		diag := withPressure("检查 new-api/sub2api 渠道健康、上游状态页和网关重试/轮换策略。", compactDiagnosticSummary("上游返回 5xx", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
 		return logDiagnosticSummary{
 			Reason:  "上游服务异常",
-			Action:  "检查 new-api/sub2api 渠道健康、上游状态页和网关重试/轮换策略。",
-			Summary: compactDiagnosticSummary("上游返回 5xx", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+			Action:  diag.Action,
+			Summary: diag.Summary,
 		}
 	case "upstream_request_error":
 		return logDiagnosticSummary{
@@ -363,16 +446,18 @@ func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requ
 			Summary: compactDiagnosticSummary("上游返回 401/403", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
 		}
 	case "network_error":
+		diag := withPressure("检查本机网络、DNS/CDN、Cloudflare/WAF、源站连接和代理链路。", compactDiagnosticSummary("连接被关闭、重置或网络不可达", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
 		return logDiagnosticSummary{
 			Reason:  "网络/CDN/连接异常",
-			Action:  "检查本机网络、DNS/CDN、Cloudflare/WAF、源站连接和代理链路。",
-			Summary: compactDiagnosticSummary("连接被关闭、重置或网络不可达", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+			Action:  diag.Action,
+			Summary: diag.Summary,
 		}
 	case "proxy_parse_error":
+		diag := withPressure("保存响应样本，检查是否 stream=false 返回 SSE、HTML 错误页或非 JSON 内容。", compactDiagnosticSummary("代理无法按协议解析上游响应", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
 		return logDiagnosticSummary{
 			Reason:  "上游响应格式异常",
-			Action:  "保存响应样本，检查是否 stream=false 返回 SSE、HTML 错误页或非 JSON 内容。",
-			Summary: compactDiagnosticSummary("代理无法按协议解析上游响应", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
+			Action:  diag.Action,
+			Summary: diag.Summary,
 		}
 	}
 	return logDiagnosticSummary{
@@ -380,6 +465,31 @@ func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requ
 		Action:  "查看错误正文、provider/model/upstream、请求体大小和工具声明。",
 		Summary: compactDiagnosticSummary("请求失败，需结合错误正文排查", elapsedMs, requestSize, upstreamSize, networkPeer, streamState),
 	}
+}
+
+func sessionPressureDiagnosticNote(requestBytes, upstreamBytes int64) string {
+	// requestBytes 是客户端发到代理的原始体积，upstreamBytes 是代理治理参数后发往上游的体积。
+	// 取两者较大值作为“会话压力”估计，避免参数治理或工具声明转换后体积变化导致误判。
+	pressureBytes := requestBytes
+	if upstreamBytes > pressureBytes {
+		pressureBytes = upstreamBytes
+	}
+	if pressureBytes <= 0 {
+		return ""
+	}
+	const (
+		// 这些阈值不是模型上下文硬限制，而是运维诊断阈值：
+		// 达到 512KB 后，VS/Copilot 历史、文件内容和工具声明已经足以显著放大首 token 延迟和链路中断概率。
+		largeContextThreshold      = 512 * 1024
+		extraLargeContextThreshold = 1024 * 1024
+	)
+	if pressureBytes < largeContextThreshold {
+		return ""
+	}
+	if pressureBytes >= extraLargeContextThreshold {
+		return fmt.Sprintf("本次请求体/上游体约 %s，属于超大上下文；如果新建 session 后恢复，优先怀疑旧 session 历史膨胀、文件堆积或状态污染。", humanBytes(pressureBytes))
+	}
+	return fmt.Sprintf("本次请求体/上游体约 %s，属于大上下文；如果新建 session 后恢复，优先怀疑旧 session 历史膨胀、文件堆积或状态污染。", humanBytes(pressureBytes))
 }
 
 func compactDiagnosticSummary(prefix string, elapsedMs float64, requestSize string, upstreamSize string, networkPeer string, streamState string) string {

@@ -114,6 +114,7 @@ func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
 	server := &Server{store: st, logger: log.New(&buf, log.LevelInfo, false)}
 	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Proxy-Error-Code", "upstream_server_error")
+		w.Header().Set("X-Proxy-Attempts-Summary", "useai/gpt-5.5 13s upstream_server_error")
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 
@@ -123,8 +124,203 @@ func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	out := buf.String()
-	if !strings.Contains(out, "request_id=req-log-1") || !strings.Contains(out, "error_code=upstream_server_error") {
-		t.Fatalf("server log = %q, want request_id and error_code", out)
+	for _, want := range []string{
+		"request_id=req-log-1",
+		"error_code=upstream_server_error",
+		`reason="上游服务异常"`,
+		`action="检查 new-api/sub2api 渠道健康、上游状态页和网关重试/轮换策略。"`,
+		`summary="上游返回 5xx`,
+		`attempts="useai/gpt-5.5 13s upstream_server_error"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("server log = %q, want contains %q", out, want)
+		}
+	}
+}
+
+func TestConsoleDiagnosticSuffixIncludesContextPressure(t *testing.T) {
+	diag := summarizeLogDiagnostic("network_error", http.StatusBadGateway, 22_510, 634_054, 642_181, "104.21.57.81:443", "upstream_connecting")
+	suffix := consoleDiagnosticSuffix(diag, "useai/step-router-v1 23s network_error", 634_054, 642_181)
+
+	for _, want := range []string{
+		`reason="网络/CDN/连接异常"`,
+		"旧 session",
+		`attempts="useai/step-router-v1 23s network_error"`,
+		`request_bytes="619.2 KB"`,
+		`upstream_bytes="627.1 KB"`,
+	} {
+		if !strings.Contains(suffix, want) {
+			t.Fatalf("suffix = %q, want contains %q", suffix, want)
+		}
+	}
+}
+
+func TestLoggingMiddlewareWritesContextPressureHintToServerLog(t *testing.T) {
+	var buf strings.Builder
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(&buf, log.LevelInfo, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setResponseLogFields(w, "useai", "UseAI - step-router-v1", "step-router-v1")
+		if rw, ok := w.(*responseWriter); ok {
+			rw.upstreamBytes = 642_181
+		}
+		w.Header().Set("X-Proxy-Error-Code", "network_error")
+		w.Header().Set("X-Proxy-Attempts-Summary", "useai/step-router-v1 23s network_error")
+		w.Header().Set("X-Proxy-Network-Peer", "104.21.57.81:443")
+		setProxyStreamState(w, "upstream_connecting")
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+
+	body := strings.Repeat("x", 634_054)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("X-Request-ID", "req-pressure-console")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	out := buf.String()
+	for _, want := range []string{
+		"request_id=req-pressure-console",
+		"error_code=network_error",
+		`reason="网络/CDN/连接异常"`,
+		"旧 session",
+		"大上下文",
+		`request_bytes="619.2 KB"`,
+		`upstream_bytes="627.1 KB"`,
+		`attempts="useai/step-router-v1 23s network_error"`,
+		"104.21.57.81:443",
+		"upstream_connecting",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("server log = %q, want contains %q", out, want)
+		}
+	}
+
+	logs := st.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if !strings.Contains(logs[0].DiagnosticSummary, "旧 session") || !strings.Contains(logs[0].ErrorAction, "大上下文") {
+		t.Fatalf("web/store diagnostics missing context pressure hint: %#v", logs[0])
+	}
+}
+
+func TestLoggingMiddlewareWritesDiagnosticsWhenErrorCodeHeaderMissing(t *testing.T) {
+	var buf strings.Builder
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(&buf, log.LevelInfo, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/broken", nil)
+	req.Header.Set("X-Request-ID", "req-missing-code")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	out := buf.String()
+	for _, want := range []string{
+		"request_id=req-missing-code",
+		"error_code=provider_error",
+		`reason="未分类请求失败"`,
+		`summary="请求失败，需结合错误正文排查`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("server log = %q, want contains %q", out, want)
+		}
+	}
+	logs := st.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if logs[0].ErrorCode != "provider_error" || logs[0].ErrorReason != "未分类请求失败" {
+		t.Fatalf("store fallback diagnostics missing: %#v", logs[0])
+	}
+}
+
+func TestFallbackLogErrorCodeClassifiesHTTPStatus(t *testing.T) {
+	tests := map[int]string{
+		http.StatusBadRequest:            "upstream_request_error",
+		http.StatusNotFound:              "upstream_request_error",
+		http.StatusMethodNotAllowed:      "upstream_request_error",
+		http.StatusUnauthorized:          "upstream_auth_error",
+		http.StatusForbidden:             "upstream_auth_error",
+		http.StatusTooManyRequests:       "upstream_rate_limit",
+		http.StatusRequestEntityTooLarge: "upstream_payload_too_large",
+		http.StatusInternalServerError:   "provider_error",
+		http.StatusBadGateway:            "provider_error",
+		http.StatusOK:                    "",
+	}
+	for statusCode, want := range tests {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			if got := fallbackLogErrorCode(statusCode); got != want {
+				t.Fatalf("fallbackLogErrorCode(%d) = %q, want %q", statusCode, got, want)
+			}
+		})
+	}
+}
+
+func TestLoggingMiddlewareClassifiesHTTPErrorWithoutProxyHeaders(t *testing.T) {
+	var buf strings.Builder
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(&buf, log.LevelInfo, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad json", http.StatusBadRequest)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{"))
+	req.Header.Set("X-Request-ID", "req-bad-json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	out := buf.String()
+	if !strings.Contains(out, "error_code=upstream_request_error") || !strings.Contains(out, `reason="上游拒绝参数/模型"`) {
+		t.Fatalf("server log = %q, want request-error diagnostics", out)
+	}
+	logs := st.GetLogs(1)
+	if len(logs) != 1 || logs[0].ErrorCode != "upstream_request_error" || logs[0].ErrorReason != "上游拒绝参数/模型" {
+		t.Fatalf("store diagnostics = %#v, want upstream_request_error", logs)
+	}
+}
+
+func TestLoggingMiddlewareClassifiesUnauthorizedWithoutProxyHeaders(t *testing.T) {
+	var buf strings.Builder
+	st := store.New(10)
+	server := &Server{proxyKey: "secret", store: st, logger: log.New(&buf, log.LevelInfo, false)}
+	handler := server.loggingMiddleware(server.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("X-Request-ID", "req-unauthorized")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	out := buf.String()
+	if !strings.Contains(out, "error_code=upstream_auth_error") || !strings.Contains(out, `reason="上游鉴权失败"`) {
+		t.Fatalf("server log = %q, want auth diagnostics", out)
+	}
+	logs := st.GetLogs(1)
+	if len(logs) != 1 || logs[0].ErrorCode != "upstream_auth_error" || logs[0].ErrorReason != "上游鉴权失败" {
+		t.Fatalf("store diagnostics = %#v, want upstream_auth_error", logs)
+	}
+}
+
+func TestConsoleDiagnosticSuffixRedactsAndSingleLinesValues(t *testing.T) {
+	diag := logDiagnosticSummary{
+		Reason:  "上游服务异常\nsecond line",
+		Action:  "检查 API key sk-testsecret1234567890",
+		Summary: "Bearer secret-token-value-123456\r\nsummary",
+	}
+	suffix := consoleDiagnosticSuffix(diag, "", 0, 0)
+
+	if strings.Contains(suffix, "sk-testsecret") || strings.Contains(suffix, "secret-token-value") {
+		t.Fatalf("suffix leaked secret: %q", suffix)
+	}
+	if strings.Contains(suffix, "\n") || strings.Contains(suffix, "\r") {
+		t.Fatalf("suffix contains line break: %q", suffix)
+	}
+	if !strings.Contains(suffix, "<redacted>") {
+		t.Fatalf("suffix should contain redaction marker: %q", suffix)
 	}
 }
 

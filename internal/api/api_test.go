@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -463,7 +464,7 @@ func TestLogsEndpointSupportsFiltering(t *testing.T) {
 	apiSrv.store.AddLog(store.RequestLog{Method: "POST", Path: "/v1/chat/completions", Provider: "deepseek", Model: "deepseek-v4-flash", StatusCode: 502, ErrorCode: "upstream_server_error", ErrorReason: "上游服务异常", RequestID: "req-2", DiagnosticSummary: "上游返回 5xx"})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/logs?page=1&page_size=20&provider=deepseek&status_code=502&q=5xx&request_id=req-2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?page=1&page_size=20&provider=deepseek&status_code=502&q=5xx&request_id=req-2&error_reason="+url.QueryEscape("上游服务"), nil)
 	apiSrv.engine.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
