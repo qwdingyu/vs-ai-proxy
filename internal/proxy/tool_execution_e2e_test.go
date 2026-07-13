@@ -71,7 +71,7 @@ func (r *visualStudioToolRuntime) execute(t *testing.T, calls []provider.ToolCal
 			}
 			r.files[path] = strings.Replace(content, before, after, 1)
 			results = append(results, "patched:"+path)
-		case "powershell", "terminal", "run_in_terminal":
+		case "powershell", "terminal", "run_in_terminal", "run_command_in_terminal":
 			var args struct {
 				Command string `json:"command"`
 				Cmd     string `json:"cmd"`
@@ -308,6 +308,98 @@ func TestVisualStudioToolExecutionE2EOpenAIStreamCommonCopilotToolFamilies(t *te
 	}
 }
 
+func TestVisualStudioToolExecutionE2EOpenAIStreamRunCommandInTerminalAlias(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_terminal","type":"function","function":{"name":"run_command_in_terminal","arguments":"{\"command\":\"dotnet test\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	prov := newFakeProvider("useai", true, []string{"gpt-test"}, nil, stream)
+
+	calls, finishReason := postOpenAIStreamForToolExecution(t, prov)
+	if len(calls) != 1 || finishReason != "tool_calls" {
+		t.Fatalf("VS stream client did not receive terminal tool call: calls=%#v finish=%q", calls, finishReason)
+	}
+	if calls[0].Function.Name != "run_command_in_terminal" {
+		t.Fatalf("tool canonicalized to %q, want run_command_in_terminal; calls=%#v", calls[0].Function.Name, calls)
+	}
+	results := newVisualStudioToolRuntime().execute(t, calls)
+	if strings.Join(results, ",") != "run_command_in_terminal:dotnet test" {
+		t.Fatalf("unexpected execution results: %#v", results)
+	}
+}
+
+func TestVisualStudioToolExecutionE2EOpenAIStreamRunCommandInTerminalFallsBackToDeclaredPowershell(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_terminal","type":"function","function":{"name":"run_command_in_terminal","arguments":"{\"command\":\"dotnet test\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	prov := newFakeProvider("useai", true, []string{"gpt-test"}, nil, stream)
+
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	body := `{
+		"model":"gpt-test",
+		"messages":[{"role":"user","content":"please run tests"}],
+		"tools":[{"type":"function","function":{"name":"powershell","description":"Run command","parameters":{"type":"object"}}}],
+		"stream":true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	calls, finishReason := parseOpenAIStreamToolCalls(t, rec.Body.String())
+	if len(calls) != 1 || finishReason != "tool_calls" || calls[0].Function.Name != "powershell" {
+		t.Fatalf("terminal alias should map to declared powershell: calls=%#v finish=%q body=%s", calls, finishReason, rec.Body.String())
+	}
+	results := newVisualStudioToolRuntime().execute(t, calls)
+	if strings.Join(results, ",") != "powershell:dotnet test" {
+		t.Fatalf("unexpected execution results: %#v", results)
+	}
+}
+
+func TestVisualStudioToolExecutionE2EOpenAIStreamCodeSearchFallsBackToDeclaredGrepSearch(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"code_search","arguments":"{\"query\":\"grep_search\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	prov := newFakeProvider("useai", true, []string{"gpt-test"}, nil, stream)
+
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	body := `{
+		"model":"gpt-test",
+		"messages":[{"role":"user","content":"please search"}],
+		"tools":[{"type":"function","function":{"name":"grep_search","description":"Search","parameters":{"type":"object"}}}],
+		"stream":true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	calls, finishReason := parseOpenAIStreamToolCalls(t, rec.Body.String())
+	if len(calls) != 1 || finishReason != "tool_calls" || calls[0].Function.Name != "grep_search" {
+		t.Fatalf("code_search should map to declared grep_search: calls=%#v finish=%q body=%s", calls, finishReason, rec.Body.String())
+	}
+	results := newVisualStudioToolRuntime().execute(t, calls)
+	if strings.Join(results, ",") != "grep_search:grep_search" {
+		t.Fatalf("unexpected execution results: %#v", results)
+	}
+}
+
 func TestVisualStudioToolExecutionE2EOpenAIStreamLegacyFunctionCall(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -376,9 +468,14 @@ func postOpenAIStreamForToolExecution(t *testing.T, prov *fakeProvider) ([]provi
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
+	return parseOpenAIStreamToolCalls(t, rec.Body.String())
+}
+
+func parseOpenAIStreamToolCalls(t *testing.T, body string) ([]provider.ToolCall, string) {
+	t.Helper()
 	toolChunks := map[int]map[string]any{}
 	finishReason := ""
-	for _, line := range strings.Split(rec.Body.String(), "\n") {
+	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data:") {
 			continue
@@ -412,7 +509,8 @@ func postOpenAIChatCompletion(t *testing.T, prov *fakeProvider, stream bool) *ht
 			{"type":"function","function":{"name":"create_file","description":"Create file","parameters":{"type":"object"}}},
 			{"type":"function","function":{"name":"apply_patch","description":"Apply patch","parameters":{"type":"object"}}},
 			{"type":"function","function":{"name":"get_file","description":"Read file","parameters":{"type":"object"}}},
-			{"type":"function","function":{"name":"powershell","description":"Run PowerShell command","parameters":{"type":"object"}}},
+				{"type":"function","function":{"name":"powershell","description":"Run PowerShell command","parameters":{"type":"object"}}},
+				{"type":"function","function":{"name":"run_command_in_terminal","description":"Run terminal command","parameters":{"type":"object"}}},
 			{"type":"function","function":{"name":"git","description":"Run Git command","parameters":{"type":"object"}}},
 			{"type":"function","function":{"name":"grep_search","description":"Search text","parameters":{"type":"object"}}},
 			{"type":"function","function":{"name":"code_search","description":"Search code","parameters":{"type":"object"}}},
