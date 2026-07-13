@@ -123,6 +123,7 @@ func TestAutoSelfUpdateOnStartupLaunchesWindowsApply(t *testing.T) {
 			}},
 			ExecutablePath:     `C:\\apps\\vs-ai-proxy.exe`,
 			BackupPath:         `C:\\apps\\vs-ai-proxy.exe.bak`,
+			StagedBinaryPath:   `C:\\apps\\vs-ai-proxy.exe.new`,
 			NeedsExternalApply: true,
 		}, nil
 	}
@@ -153,6 +154,50 @@ func TestAutoSelfUpdateOnStartupLaunchesWindowsApply(t *testing.T) {
 	case <-startupSelfUpdateExit:
 	case <-time.After(time.Second):
 		t.Fatalf("startup self-update should notify main process to exit")
+	}
+	for _, want := range []string{"暂存文件=", "vs-ai-proxy-self-update.ps1", "vs-ai-proxy-self-update.log"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs = %q, want contains %q", logs.String(), want)
+		}
+	}
+}
+
+func TestHandleCommandLineSelfUpdatePrintsWindowsDiagnostics(t *testing.T) {
+	oldVersion := version
+	oldSelfUpdate := selfUpdateFn
+	oldLaunchWindows := launchWindowsSelfUpdateFn
+	t.Cleanup(func() {
+		version = oldVersion
+		selfUpdateFn = oldSelfUpdate
+		launchWindowsSelfUpdateFn = oldLaunchWindows
+	})
+
+	version = "v0.2.14"
+	selfUpdateFn = func(context.Context, update.Options) (update.SelfUpdateResult, error) {
+		return update.SelfUpdateResult{
+			DownloadResult: update.DownloadResult{CheckResult: update.CheckResult{
+				CurrentVersion:  "v0.2.14",
+				LatestTag:       "v0.2.15",
+				UpdateAvailable: true,
+			}},
+			ExecutablePath:     `C:\apps\vs-ai-proxy.exe`,
+			BackupPath:         `C:\apps\vs-ai-proxy.exe.bak`,
+			StagedBinaryPath:   `C:\apps\vs-ai-proxy.exe.new`,
+			NeedsExternalApply: true,
+		}, nil
+	}
+	launchWindowsSelfUpdateFn = func(update.SelfUpdateResult, []string) error { return nil }
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	handled, exitCode := handleCommandLine([]string{"--self-update"}, &stdout, &stderr)
+	if !handled || exitCode != 0 {
+		t.Fatalf("handled=%v exitCode=%d stderr=%q", handled, exitCode, stderr.String())
+	}
+	for _, want := range []string{"暂存文件:", "替换脚本:", "脚本日志:", "vs-ai-proxy-self-update.log"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want contains %q", stdout.String(), want)
+		}
 	}
 }
 

@@ -230,11 +230,12 @@ func runStartupSelfUpdate(logger *log.Logger, opts update.Options, args []string
 	logger.Info("旧版本备份文件: %s", result.BackupPath)
 	restartArgs := restartArgsWithoutSelfUpdate(args)
 	if result.NeedsExternalApply {
+		paths := update.WindowsSelfUpdateDiagnosticPaths(result)
 		if err := launchWindowsSelfUpdateFn(result, restartArgs); err != nil {
-			logger.Warn("启动 Windows 延迟替换失败，继续运行当前版本: %v", err)
+			logger.Warn("启动 Windows 延迟替换失败，继续运行当前版本: %v；暂存文件=%s；脚本=%s；日志=%s", err, result.StagedBinaryPath, paths.ScriptPath, paths.LogPath)
 			return
 		}
-		logger.Info("已启动后台替换脚本，当前进程将自动退出以完成替换并重启。")
+		logger.Info("已启动后台替换脚本，当前进程将自动退出以完成替换并重启。暂存文件=%s；脚本=%s；日志=%s", result.StagedBinaryPath, paths.ScriptPath, paths.LogPath)
 		notifyStartupSelfUpdateExit()
 		return
 	}
@@ -321,7 +322,7 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		if *doSelfUpdate {
-			result, err := update.SelfUpdate(ctx, opts)
+			result, err := selfUpdateFn(ctx, opts)
 			if err != nil {
 				fmt.Fprintf(stderr, "自更新失败: %v\n", err)
 				return true, 1
@@ -332,13 +333,15 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 			}
 			fmt.Fprintf(stdout, "已安装新版本: %s\n", result.LatestTag)
 			fmt.Fprintf(stdout, "备份文件: %s\n", result.BackupPath)
-			restartArgs := restartArgsWithoutSelfUpdate(os.Args[1:])
+			restartArgs := restartArgsWithoutSelfUpdate(args)
 			if result.NeedsExternalApply {
-				if err := update.LaunchWindowsSelfUpdate(result, restartArgs); err != nil {
-					fmt.Fprintf(stderr, "启动 Windows 延迟替换失败: %v\n", err)
+				paths := update.WindowsSelfUpdateDiagnosticPaths(result)
+				if err := launchWindowsSelfUpdateFn(result, restartArgs); err != nil {
+					fmt.Fprintf(stderr, "启动 Windows 延迟替换失败: %v\n暂存文件: %s\n替换脚本: %s\n脚本日志: %s\n", err, result.StagedBinaryPath, paths.ScriptPath, paths.LogPath)
 					return true, 1
 				}
 				fmt.Fprintln(stdout, "已启动后台替换脚本，当前进程退出后会完成替换并重启。")
+				fmt.Fprintf(stdout, "暂存文件: %s\n替换脚本: %s\n脚本日志: %s\n", result.StagedBinaryPath, paths.ScriptPath, paths.LogPath)
 				return true, 0
 			}
 			if err := update.LaunchReplacement(result.ExecutablePath, restartArgs); err != nil {

@@ -27,7 +27,10 @@ const (
 	defaultRepoOwner     = "qwdingyu"
 	defaultRepoName      = "vs-ai-proxy"
 	appName              = "vs-ai-proxy"
+	releaseAssetRetries  = 3
 )
+
+var releaseAssetWait = 2 * time.Second
 
 type Options struct {
 	CurrentVersion string
@@ -68,6 +71,11 @@ type SelfUpdateResult struct {
 	NeedsExternalApply bool
 }
 
+type WindowsSelfUpdatePaths struct {
+	ScriptPath string
+	LogPath    string
+}
+
 type releaseResponse struct {
 	TagName    string         `json:"tag_name"`
 	HTMLURL    string         `json:"html_url"`
@@ -98,6 +106,22 @@ func Check(ctx context.Context, opts Options) (CheckResult, error) {
 
 	latest := normalizeVersion(release.TagName)
 	asset, checksum := selectAssets(release.Assets, opts.GOOS, opts.GOARCH, latest)
+	if compareVersions(latest, current) > 0 && asset.Name == "" {
+		for attempt := 0; attempt < releaseAssetRetries; attempt++ {
+			if err := sleepContext(ctx, releaseAssetWait); err != nil {
+				break
+			}
+			retryRelease, retryErr := fetchLatestRelease(ctx, opts)
+			if retryErr != nil || normalizeVersion(retryRelease.TagName) != latest {
+				continue
+			}
+			release = retryRelease
+			asset, checksum = selectAssets(release.Assets, opts.GOOS, opts.GOARCH, latest)
+			if asset.Name != "" {
+				break
+			}
+		}
+	}
 	result := CheckResult{
 		CurrentVersion:  opts.CurrentVersion,
 		LatestVersion:   latest,
@@ -113,9 +137,54 @@ func Check(ctx context.Context, opts Options) (CheckResult, error) {
 		result.ChecksumURL = checksum.BrowserDownloadURL
 	}
 	if result.UpdateAvailable && result.AssetURL == "" {
-		return result, fmt.Errorf("发现新版本 %s，但没有匹配 %s/%s 的发布资产", release.TagName, opts.GOOS, opts.GOARCH)
+		return result, fmt.Errorf(
+			"发现新版本 %s，但没有匹配 %s/%s 的发布资产；期望资产前缀 %q；Release 当前资产: %s；如果刚发布新版本，可能是 GitHub Release 资产/CDN 尚未完全可见，请稍后重试",
+			release.TagName,
+			opts.GOOS,
+			opts.GOARCH,
+			expectedAssetPrefix(opts.GOOS, opts.GOARCH, latest),
+			releaseAssetNames(release.Assets),
+		)
 	}
 	return result, nil
+}
+
+func expectedAssetPrefix(goos, goarch, version string) string {
+	alias := platformAlias(goos, goarch)
+	if alias == "" {
+		return ""
+	}
+	version = strings.TrimPrefix(version, "v")
+	return fmt.Sprintf("%s-v%s-%s", appName, version, alias)
+}
+
+func releaseAssetNames(assets []releaseAsset) string {
+	if len(assets) == 0 {
+		return "<empty>"
+	}
+	names := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		name := strings.TrimSpace(asset.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "<empty>"
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func Download(ctx context.Context, opts Options) (DownloadResult, error) {
@@ -214,17 +283,24 @@ func LaunchWindowsSelfUpdate(result SelfUpdateResult, args []string) error {
 	if !result.NeedsExternalApply {
 		return errors.New("当前更新不需要 Windows 延迟替换脚本")
 	}
-	scriptPath := filepath.Join(filepath.Dir(result.StagedBinaryPath), "vs-ai-proxy-self-update.ps1")
-	logPath := filepath.Join(filepath.Dir(result.StagedBinaryPath), "vs-ai-proxy-self-update.log")
-	script := windowsSelfUpdateScript(result, args, logPath, os.Getpid(), mustGetwd())
-	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+	paths := WindowsSelfUpdateDiagnosticPaths(result)
+	script := windowsSelfUpdateScript(result, args, paths.LogPath, os.Getpid(), mustGetwd())
+	if err := os.WriteFile(paths.ScriptPath, []byte(script), 0o600); err != nil {
 		return err
 	}
-	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", paths.ScriptPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 	return cmd.Start()
+}
+
+func WindowsSelfUpdateDiagnosticPaths(result SelfUpdateResult) WindowsSelfUpdatePaths {
+	dir := filepath.Dir(result.StagedBinaryPath)
+	return WindowsSelfUpdatePaths{
+		ScriptPath: filepath.Join(dir, "vs-ai-proxy-self-update.ps1"),
+		LogPath:    filepath.Join(dir, "vs-ai-proxy-self-update.log"),
+	}
 }
 
 func windowsSelfUpdateScript(result SelfUpdateResult, args []string, logPath string, pidToWait int, workingDir string) string {
@@ -348,12 +424,10 @@ func fetchLatestRelease(ctx context.Context, opts Options) (releaseResponse, err
 }
 
 func selectAssets(assets []releaseAsset, goos, goarch, version string) (releaseAsset, releaseAsset) {
-	alias := platformAlias(goos, goarch)
-	if alias == "" {
+	prefix := expectedAssetPrefix(goos, goarch, version)
+	if prefix == "" {
 		return releaseAsset{}, releaseAsset{}
 	}
-	version = strings.TrimPrefix(version, "v")
-	prefix := fmt.Sprintf("%s-v%s-%s", appName, version, alias)
 	var asset releaseAsset
 	var checksum releaseAsset
 	for _, candidate := range assets {

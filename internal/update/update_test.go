@@ -14,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCompareVersions(t *testing.T) {
@@ -67,6 +69,83 @@ func TestCheckSelectsMatchingReleaseAsset(t *testing.T) {
 	}
 	if result.AssetName != "vs-ai-proxy-v0.2.13-linux-x64.tar.gz" {
 		t.Fatalf("AssetName = %q", result.AssetName)
+	}
+}
+
+func TestCheckRetriesWhenLatestReleaseAssetIsTemporarilyMissing(t *testing.T) {
+	oldWait := releaseAssetWait
+	releaseAssetWait = time.Millisecond
+	t.Cleanup(func() { releaseAssetWait = oldWait })
+
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/qwdingyu/vs-ai-proxy/releases/latest" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		call := atomic.AddInt32(&calls, 1)
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"tag_name":"v0.2.47","html_url":"https://example.invalid/release","assets":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"tag_name":"v0.2.47","html_url":"https://example.invalid/release","assets":[{"name":"vs-ai-proxy-v0.2.47-windows-x64.exe.zip","browser_download_url":"https://example.invalid/windows"}]}`))
+	}))
+	defer server.Close()
+
+	result, err := Check(context.Background(), Options{
+		CurrentVersion: "v0.2.46",
+		APIBaseURL:     server.URL,
+		GOOS:           "windows",
+		GOARCH:         "amd64",
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if result.AssetName != "vs-ai-proxy-v0.2.47-windows-x64.exe.zip" || !result.UpdateAvailable {
+		t.Fatalf("result = %#v, want retried matching Windows asset", result)
+	}
+	if atomic.LoadInt32(&calls) < 2 {
+		t.Fatalf("calls = %d, want retry", calls)
+	}
+}
+
+func TestCheckReportsExpectedAssetAndActualAssetsWhenNoMatchingReleaseAsset(t *testing.T) {
+	oldWait := releaseAssetWait
+	releaseAssetWait = time.Millisecond
+	t.Cleanup(func() { releaseAssetWait = oldWait })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/qwdingyu/vs-ai-proxy/releases/latest" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"tag_name":"v0.2.47",
+			"html_url":"https://example.invalid/release",
+			"assets":[
+				{"name":"vs-ai-proxy-v0.2.47-linux-x64.tar.gz","browser_download_url":"https://example.invalid/linux"},
+				{"name":"checksums.txt","browser_download_url":"https://example.invalid/checksums"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	_, err := Check(context.Background(), Options{
+		CurrentVersion: "v0.2.46",
+		APIBaseURL:     server.URL,
+		GOOS:           "windows",
+		GOARCH:         "amd64",
+	})
+	if err == nil {
+		t.Fatalf("Check() error = nil, want missing asset diagnostic")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		`期望资产前缀 "vs-ai-proxy-v0.2.47-windows-x64"`,
+		"vs-ai-proxy-v0.2.47-linux-x64.tar.gz",
+		"GitHub Release 资产/CDN 尚未完全可见",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error = %q, want contains %q", message, want)
+		}
 	}
 }
 
