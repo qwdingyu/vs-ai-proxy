@@ -221,3 +221,56 @@ v0.2.42 的发版判断：
 - 当前修改没有偏离核心目标：让 VS Copilot 下游稳定拿到并执行工具调用。
 
 因此本次具备发布条件。
+
+## 2026-07-13 补充：工具目录化治理与执行级发布门禁
+
+### 为什么不能再按单个工具打补丁
+
+`create_file`、`get_file`、`apply_patch`、`run_tests`、`git`、`powershell`、`grep_search` 等问题属于同一类：模型返回的工具名、协议形态、参数 JSON、`finish_reason`、流式分片任一环节被代理改坏，VS/Copilot 都可能提示“无法运行工具”。因此不能看到一个失败工具就补一个 `if`，必须统一治理。
+
+### 当前统一策略
+
+- OpenAI 标准 `tool_calls`、legacy `function_call`、流式 `delta.tool_calls`、流式 `delta.function_call` 默认稳定透传。
+- 兼容性归一化只做安全别名映射，并且只映射到当前请求已经声明的工具。
+- DSML 文本方言只有在目标工具已声明时才转换为可执行工具调用。
+- 文件语义工具不降级到 shell：例如 `delete_file/remove_file` 只映射到 `delete_files`，`ls/find_file/glob` 不映射到 `powershell`，避免参数 schema 不匹配造成更隐蔽的执行失败。
+- 当前工具目录基于本项目真实日志、用户反馈和本地测试样本沉淀，不宣称是 VS/Copilot 官方公开完整列表。发现新工具时必须先补目录和测试，再发布。
+
+### 已覆盖工具族
+
+- 计划/澄清：`adapt_plan`、`ask_question`、`clarify_requirements`、`detect_memories` 及 `update_plan/plan/clarify/ask_user/detect_memorie` 等别名。
+- 终端/测试/构建：`powershell`、`terminal`、`run_in_terminal` 及 `run_tests/run_command/bash/cmd/dotnet_test/npm_test/run_lint` 等别名。
+- Git：`git` 及 `git_status/git_diff/git_log/git_command`。
+- 文件写入：`create_file`、`edit_file`、`apply_patch` 及 `write_file/create_new_file/append_file/apply_diff/apply_changes` 等别名。
+- 文件删除：`delete_files` 及 `delete_file/remove_file`。
+- 文件读取/列表：`get_file`、`file_search`、`list_files` 及 `read_file/open_file/view_file/ls/find_file/glob` 等别名。
+- 搜索/符号：`code_search`、`grep_search`、`file_search`、`find_symbol` 及 `rg/grep/ripgrep/search_symbol` 等别名。
+
+### 本次新增的执行级验证
+
+发布门禁不再只验证 HTTP 200 或响应中有字符串，而是验证“VS/Copilot 下游是否能拿到并执行结构化工具调用”：
+
+- 非流式 `tool_calls`：`create_file -> get_file`。
+- 非流式 `tool_calls`：`create_file -> apply_patch -> get_file`。
+- 非流式 legacy `function_call`：`create_file`、`get_file`。
+- 流式 `tool_calls`：`create_file -> get_file`。
+- 流式 `tool_calls`：`create_file -> apply_patch -> get_file`。
+- 流式别名：`apply_diff -> apply_patch`，并验证文件内容确实被修改。
+- 流式常见工具族：`run_tests -> powershell`、`git_status -> git`、`rg -> grep_search`、`read_file -> get_file`，并通过模拟 VS 执行器验证参数 JSON 可执行。
+- 流式 legacy `function_call`：`create_file`、`get_file`。
+- DSML：真实 `get_file` 样本、`run_tests`、常见别名、未声明工具拒绝转换。
+- Catalog 属性测试：别名无重复、别名目标必须存在、canonical 不被改写、所有 alias 在非流式 JSON / OpenAI raw JSON / OpenAI SSE / DSML 中均可按声明工具归一化。
+
+### 新增工具的准入流程
+
+1. 先保存真实 `request_tools`、`response_tools`、provider、model、stream 状态、错误码和响应片段。
+2. 判断失败工具是 canonical、alias，还是模型幻觉出的未声明工具。
+3. canonical 工具必须加入目录并补 pass-through 测试。
+4. alias 工具必须补非流式 JSON、raw OpenAI JSON、OpenAI SSE、DSML 四类归一化测试。
+5. 会触发真实执行的工具必须补执行级 E2E，证明参数 JSON 可执行。
+6. 参数 schema 不兼容时禁止映射，宁可保留原始输出并增强诊断，也不能映射到错误工具。
+7. 发布前至少通过 `make tool-check`、`go test ./...`、`go test -race` 重点包、`go vet ./...`、前端脚本语法检查和 Windows 交叉构建。
+
+### 对 `无法运行 apply_patch` 样本的审慎解释
+
+样本中同时出现 `client_gone`、`499`、`stream_state=downstream_started`、约 44 秒耗时，以及后续另一次 `200`。这说明代理曾经向 VS/Copilot 写出过下游数据，随后客户端断开或取消；44 秒也不是典型约 100 秒等待上限。它不能单独证明是工具解析失败，也不能单独证明是上游超时。但由于用户侧明确看到“无法运行 apply_patch”，本次仍按工具调用协议矩阵补强，确保代理自身不再因为工具名、finish_reason、流式分片或参数 JSON 改写造成工具不可执行。

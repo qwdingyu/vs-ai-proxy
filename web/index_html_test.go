@@ -111,8 +111,70 @@ func TestProviderProbeImportsModelsWithoutBeginnerConfirmation(t *testing.T) {
 	if !strings.Contains(html, "item.name === editingModelName && String(item.provider_id || item.provider || '') === editingModelProvider") {
 		t.Fatalf("model edit should match name plus provider to avoid touching same-name models")
 	}
-	if !strings.Contains(html, "x.name !== name || String(x.provider_id || x.provider || '') !== modelProvider") {
+	if !strings.Contains(html, "x.name !== name || modelProviderKey(x) !== modelProvider") {
 		t.Fatalf("model delete should preserve same-name models bound to other providers")
+	}
+}
+
+func TestProviderModalUsesWiderLayout(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, ".provider-modal { width: min(560px, calc(100vw - 32px)); }") {
+		t.Fatalf("provider modal should be wider than the generic modal")
+	}
+	if !strings.Contains(html, `<div class="modal provider-modal">`) {
+		t.Fatalf("provider modal should use provider-modal class")
+	}
+}
+
+func TestDeleteProviderExplainsBoundModelsAndRefreshesDependentPages(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	checks := []string{
+		"deleteProviderWithBoundModelPrompt",
+		"该提供商仍有模型绑定，直接删除会造成无效配置",
+		"是否同时删除这些模型并删除提供商",
+		"const modelRes = await fetchJSON('/models');",
+		"if (boundModels.length)",
+		"await loadProviders();",
+		"await loadModels();",
+		"await loadTestLab();",
+	}
+	for _, check := range checks {
+		if !strings.Contains(html, check) {
+			t.Fatalf("provider delete flow missing %q", check)
+		}
+	}
+	if strings.Contains(html, "loadTestProviders") {
+		t.Fatalf("provider delete flow should not call undefined loadTestProviders")
+	}
+}
+
+func TestProviderAPIKeyIsPasswordWithVisibilityToggle(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	checks := []string{
+		`<input id="pKey" type="password" autocomplete="off" />`,
+		`id="btnToggleProviderKey"`,
+		"$('btnToggleProviderKey').addEventListener('click'",
+		"$('pKey').type = show ? 'text' : 'password'",
+		"$('pKey').type = 'password';",
+		"显示 API Key",
+		"隐藏 API Key",
+	}
+	for _, check := range checks {
+		if !strings.Contains(html, check) {
+			t.Fatalf("provider API key visibility flow missing %q", check)
+		}
 	}
 }
 

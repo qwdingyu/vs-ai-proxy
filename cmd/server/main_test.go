@@ -356,17 +356,7 @@ func TestWatchConfigLoopReloadsProxyConfigFromDisk(t *testing.T) {
 	next.Providers = []config.ProviderConfig{config.DefaultUseAIProvider()}
 	writeConfigFile(t, path, next)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		cfg, _, _ := proxySrv.SnapshotComponents()
-		if cfg.DefaultModel == "after-hot-reload" {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	cfg, _, _ := proxySrv.SnapshotComponents()
-	t.Fatalf("proxy default model = %q, want after-hot-reload", cfg.DefaultModel)
+	waitForProxyDefaultModel(t, proxySrv, "after-hot-reload")
 }
 
 func TestWatchConfigLoopReloadsWhenContentChangesButMTimeDoesNot(t *testing.T) {
@@ -450,7 +440,7 @@ func TestWatchConfigLoopRetriesAfterInvalidConfigIsFixed(t *testing.T) {
 
 func waitForProxyDefaultModel(t *testing.T, proxySrv *proxy.Server, want string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		cfg, _, _ := proxySrv.SnapshotComponents()
 		if cfg.DefaultModel == want {

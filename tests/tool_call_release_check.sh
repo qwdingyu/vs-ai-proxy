@@ -8,7 +8,7 @@ echo "== 1. Provider JSON/tool fidelity =="
 go test ./internal/provider -count=1 -run 'Test.*Tool|Test.*FunctionCall|TestOpenAIProviderChatRawPreservesToolFields|TestToolCallPreservesUnknownNestedFields'
 
 echo "== 2. Proxy tool normalization / aliases / DSML =="
-go test ./internal/proxy -count=1 -run 'TestVisualStudioToolExecutionE2E|TestCanonicalToolName|TestNormalize.*RunTests|TestProbeOpenAIStreamForDSML|TestStreamOpenAI.*Tool|TestStreamOpenAI.*Undeclared|TestParseOpenAIStreamPayloadConvertsLegacy|TestPayloadTooLargeHint|Test.*DSML|Test.*Dsml'
+go test ./internal/proxy -count=1 -run 'TestVisualStudioToolExecutionE2E|TestCopilotToolCatalog|TestKnownCopilot|TestCanonicalToolName|TestNormalize.*RunTests|TestProbeOpenAIStreamForDSML|TestStreamOpenAI.*Tool|TestStreamOpenAI.*Undeclared|TestParseOpenAIStreamPayloadConvertsLegacy|TestPayloadTooLargeHint|Test.*DSML|Test.*Dsml'
 
 echo "== 3. Streaming business smoke =="
 bash tests/streaming_test.sh

@@ -256,7 +256,7 @@ tests/tool_call_release_check.sh
 
 - Provider JSON 保真：`tools`、`tool_calls`、legacy `function_call`、object arguments、嵌套 unknown 字段。
 - Proxy 归一化：OpenAI `tool_calls`、legacy `function_call`、流式工具参数分片、DSML 方言。
-- 常见 VS/Copilot 工具别名：`run_tests`、`dotnet_test`、`npm_test`、`write_file`、`read_file`、`git_diff` 等只会映射到当前请求已声明的目标工具。
+- 常见 VS/Copilot 工具别名：`run_tests`、`dotnet_test`、`npm_test`、`write_file`、`apply_diff`、`read_file`、`read_files`、`git_diff`、`search_symbol` 等只会映射到当前请求已声明且语义兼容的目标工具；不会把 `delete_file` 这类文件语义工具降级成 `powershell` 以避免参数 schema 不匹配。
 - E2E 执行语义：模拟 `create_file` 后 `get_file`，确认客户端拿到的是可执行 JSON 参数，而不是仅“不报错”。
 - 流式业务 smoke：OpenAI-compatible SSE 和 Ollama-to-OpenAI SSE 转换不丢 chunk。
 

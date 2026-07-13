@@ -70,10 +70,13 @@
     .danger { background: #da3633; border-color: #da3633; color: white; }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; }
     .modal { background: #161b22; border: 1px solid #30363d; padding: 16px; border-radius: 8px; width: 360px; display: flex; flex-direction: column; gap: 10px; }
+    .provider-modal { width: min(560px, calc(100vw - 32px)); }
     .modal.wide { width: min(980px, calc(100vw - 32px)); }
     label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #8b949e; }
     input, select, textarea { background: #0f1115; color: #e6edf3; border: 1px solid #30363d; padding: 8px; border-radius: 6px; }
     textarea { min-height: 120px; resize: vertical; font: inherit; }
+    .secret-row { display: flex; gap: 8px; align-items: center; }
+    .secret-row input { flex: 1; min-width: 0; }
     .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
     .hint { color: var(--muted); }
     .hidden { display: none; }
@@ -290,7 +293,7 @@
           </tbody>
         </table>
         <div id="providerModal" class="modal-backdrop hidden">
-          <div class="modal">
+          <div class="modal provider-modal">
             <h3 id="providerModalTitle">新增提供商</h3>
             <label>ID <input id="pId" placeholder="useai-paid" /></label>
             <label>名称 <input id="pName" placeholder="UseAI Paid" /></label>
@@ -303,7 +306,12 @@
               </select>
             </label>
             <label>Base URL <input id="pBase" /></label>
-            <label>API Key <input id="pKey" /></label>
+            <label>API Key
+              <div class="secret-row">
+                <input id="pKey" type="password" autocomplete="off" />
+                <button class="btn" type="button" id="btnToggleProviderKey" aria-label="显示 API Key" title="显示 API Key">👁</button>
+              </div>
+            </label>
             <label>优先级 <input type="number" id="pPriority" /></label>
             <label>启用 <input type="checkbox" id="pEnabled" checked /></label>
             <div class="actions">
@@ -776,6 +784,33 @@
       (validation.errors || []).forEach((item) => lines.push(`错误: [${item.code}] ${item.field} - ${item.message}`));
       (validation.warnings || []).forEach((item) => lines.push(`警告: [${item.code}] ${item.field} - ${item.message}`));
       return lines.join('\n');
+    };
+
+    const modelProviderKey = (model) => String(model?.provider_id || model?.provider || '').trim();
+
+    const deleteProviderWithBoundModelPrompt = async (providerId) => {
+      const modelRes = await fetchJSON('/models');
+      const models = modelRes.models || [];
+      const boundModels = models.filter((item) => modelProviderKey(item).toLowerCase() === String(providerId).toLowerCase());
+      if (boundModels.length) {
+        const names = boundModels.map((item) => item.name).filter(Boolean);
+        const preview = names.slice(0, 8).join(', ') || '-';
+        const more = names.length > 8 ? ` 等 ${names.length} 个` : '';
+        const message = `该提供商仍有模型绑定，直接删除会造成无效配置。\n\n绑定模型：${preview}${more}\n\n是否同时删除这些模型并删除提供商？`;
+        if (!window.confirm(message)) return false;
+        const nextModels = models.filter((item) => modelProviderKey(item).toLowerCase() !== String(providerId).toLowerCase());
+        await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(nextModels) });
+      }
+
+      try {
+        await fetchJSON('/providers/' + encodeURIComponent(providerId), { method: 'DELETE' });
+        showToast(boundModels.length ? `已删除提供商 ${providerId}，并移除 ${boundModels.length} 个绑定模型。` : `已删除提供商 ${providerId}`);
+        return true;
+      } catch (err) {
+        const validation = err.validation || err.details?.validation;
+        alert(formatValidationIssues(validation) || String(err.message || err));
+        return false;
+      }
     };
     const validateConfigPayload = async (payload) => {
       const result = await fetchJSON('/config/validate', {
@@ -1377,6 +1412,10 @@
       $('pType').value = 'openai';
       $('pBase').value = '';
       $('pKey').value = '';
+      $('pKey').type = 'password';
+      $('btnToggleProviderKey').textContent = '👁';
+      $('btnToggleProviderKey').setAttribute('aria-label', '显示 API Key');
+      $('btnToggleProviderKey').setAttribute('title', '显示 API Key');
       $('pPriority').value = 10;
       $('pEnabled').checked = true;
       lastProviderProbe = null;
@@ -1385,6 +1424,14 @@
     // 关闭新增/编辑提供商弹窗
     $('btnCancelProvider').addEventListener('click', () => {
       $('providerModal').classList.add('hidden');
+    });
+
+    $('btnToggleProviderKey').addEventListener('click', () => {
+      const show = $('pKey').type === 'password';
+      $('pKey').type = show ? 'text' : 'password';
+      $('btnToggleProviderKey').textContent = show ? '🙈' : '👁';
+      $('btnToggleProviderKey').setAttribute('aria-label', show ? '隐藏 API Key' : '显示 API Key');
+      $('btnToggleProviderKey').setAttribute('title', show ? '隐藏 API Key' : '显示 API Key');
     });
 
     const readProviderForm = () => {
@@ -1662,8 +1709,12 @@
       const name = btn.getAttribute('data-name');
       const modelProvider = btn.getAttribute('data-provider') || '';
       if (action === 'delete-provider') {
-        await fetchJSON('/providers/' + encodeURIComponent(name), { method: 'DELETE' });
-        loadProviders();
+        if (!window.confirm(`确定删除提供商 ${name} 吗？`)) return;
+        if (await deleteProviderWithBoundModelPrompt(name)) {
+          await loadProviders();
+          await loadModels();
+          await loadTestLab();
+        }
       }
       if (action === 'edit-provider') {
         editingProviderName = name;
@@ -1678,6 +1729,10 @@
         $('pType').value = item.type;
         $('pBase').value = item.base_url;
         $('pKey').value = item.api_key || '';
+        $('pKey').type = 'password';
+        $('btnToggleProviderKey').textContent = '👁';
+        $('btnToggleProviderKey').setAttribute('aria-label', '显示 API Key');
+        $('btnToggleProviderKey').setAttribute('title', '显示 API Key');
         $('pPriority').value = item.priority ?? 0;
         $('pEnabled').checked = item.enabled;
         lastProviderProbe = null;
@@ -1695,7 +1750,7 @@
       }
       if (action === 'delete-model') {
         const res = await fetchJSON('/models');
-        const next = (res.models || []).filter((x) => x.name !== name || String(x.provider_id || x.provider || '') !== modelProvider);
+        const next = (res.models || []).filter((x) => x.name !== name || modelProviderKey(x) !== modelProvider);
         await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
         loadModels();
       }

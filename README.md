@@ -136,7 +136,7 @@ C:\Users\你的用户名\.config\vs-ai-proxy\config.json
 
 请确认所选模型和上游 provider 支持工具调用。不同上游对流式、非流式、`tool_calls` 的兼容程度不同，建议优先使用测试页和请求日志定位。
 
-如果在 Visual Studio Copilot 中看到 `create_file` / `grep_search` / `powershell` 无法执行、流式工具调用参数丢失，或日志出现 `Proxy blocked undeclared tool calls`，请先升级到 `v0.2.28` 或更新版本。`v0.2.28` 统一收紧了 OpenAI `tool_calls`、legacy `function_call`、流式工具分片和 DSML 方言的工具声明边界：只有当前请求显式声明的工具才会透传；未声明工具会被阻断，并同步修正 `finish_reason` / `done_reason`，避免客户端误进入工具执行状态。
+如果在 Visual Studio Copilot 中看到 `create_file` / `apply_patch` / `get_file` / `grep_search` / `powershell` 等工具无法执行，或流式工具调用参数丢失，请先升级到最新版本。当前版本默认采用 stable 策略：OpenAI `tool_calls`、legacy `function_call` 和流式工具分片会尽量透传；DSML 文本方言会在当前请求声明了对应工具或安全别名时转换为标准工具调用。代理只做必要的工具名别名归一化与 `finish_reason` / `done_reason` 修正，不再默认注入 `Proxy blocked undeclared tool calls` 这类会干扰 Copilot 执行的内容。
 
 ## 加入 QQ 群
 

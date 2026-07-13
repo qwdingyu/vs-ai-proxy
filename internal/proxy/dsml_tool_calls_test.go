@@ -69,6 +69,35 @@ func TestParseDSMLToolCallsCanonicalizesRunTestsWhenTerminalToolDeclared(t *test
 	}
 }
 
+func TestParseDSMLToolCallsCanonicalizesCommonToolFamilies(t *testing.T) {
+	content := `<｜DSML｜tool_calls>
+<｜DSML｜invoke name="apply_diff"><｜DSML｜parameter name="patch">diff</｜DSML｜parameter></｜DSML｜invoke>
+<｜DSML｜invoke name="run_tests"><｜DSML｜parameter name="command">go test ./...</｜DSML｜parameter></｜DSML｜invoke>
+<｜DSML｜invoke name="search_symbol"><｜DSML｜parameter name="name">Handler</｜DSML｜parameter></｜DSML｜invoke>
+<｜DSML｜invoke name="read_file"><｜DSML｜parameter name="filename">a.go</｜DSML｜parameter></｜DSML｜invoke>
+</｜DSML｜tool_calls>`
+	allowed := map[string]struct{}{
+		"apply_patch": {},
+		"find_symbol": {},
+		"get_file":    {},
+		"powershell":  {},
+	}
+
+	calls, cleaned := parseDSMLToolCalls(content, allowed)
+	if len(calls) != 4 {
+		t.Fatalf("calls len = %d, want 4: %#v", len(calls), calls)
+	}
+	wantNames := []string{"apply_patch", "powershell", "find_symbol", "get_file"}
+	for i, want := range wantNames {
+		if calls[i].Function.Name != want {
+			t.Fatalf("call[%d].name = %q, want %q", i, calls[i].Function.Name, want)
+		}
+	}
+	if strings.Contains(cleaned, "DSML") {
+		t.Fatalf("converted DSML block should be removed: %q", cleaned)
+	}
+}
+
 func TestParseDSMLToolCallsRejectsWholeBlockWhenAnyToolIsUndeclared(t *testing.T) {
 	content := `<｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_file"><｜DSML｜parameter name="filename">a.cs</｜DSML｜parameter></｜DSML｜invoke>

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -526,9 +527,9 @@ func TestOpenAIProviderChatStreamRetriesTransientServerErrors(t *testing.T) {
 }
 
 func TestOpenAIProviderRetriesShareOneOperationTimeout(t *testing.T) {
-	calls := 0
+	var calls int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		atomic.AddInt32(&calls, 1)
 		time.Sleep(70 * time.Millisecond)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(`{"error":{"message":"temporarily unavailable"}}`))
@@ -544,8 +545,8 @@ func TestOpenAIProviderRetriesShareOneOperationTimeout(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
 		t.Fatalf("retries exceeded shared timeout budget: %s", elapsed)
 	}
-	if calls > 2 {
-		t.Fatalf("calls = %d, retries must not receive a fresh timeout per attempt", calls)
+	if got := atomic.LoadInt32(&calls); got > 2 {
+		t.Fatalf("calls = %d, retries must not receive a fresh timeout per attempt", got)
 	}
 }
 
