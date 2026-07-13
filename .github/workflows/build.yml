@@ -26,14 +26,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: 静态检查
-        run: go vet ./...
-
-      - name: 全量测试
-        run: go test ./... -count=1
-
-      - name: 工具调用专项核查
-        run: make tool-check
+      - name: 发布前完整核查
+        run: make release-check
 
       - name: 编译（当前平台）
         run: make build

@@ -51,6 +51,7 @@
     .logs-table .col-error { width: 190px; }
     .logs-table .col-status { width: 58px; }
     .logs-table .col-latency { width: 68px; text-align: right; }
+    .logs-table .col-action { width: 86px; }
     .logs-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .logs-table td.col-tools { white-space: normal; }
     .ok { color: #3fb950; }
@@ -196,7 +197,7 @@
         <h3>最近日志</h3>
         <table class="table logs-table">
           <colgroup>
-            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency">
+            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency"><col class="col-action">
           </colgroup>
           <thead>
             <tr>
@@ -209,10 +210,11 @@
               <th>错误</th>
               <th>状态</th>
               <th>耗时</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="dashboardLogs">
-            <tr><td colspan="9" class="empty">暂无日志</td></tr>
+            <tr><td colspan="10" class="empty">暂无日志</td></tr>
           </tbody>
         </table>
       </section>
@@ -283,13 +285,14 @@
               <th>名称</th>
               <th>类型</th>
               <th>Base URL</th>
+              <th>模型</th>
               <th>优先级</th>
               <th>启用</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody id="providerTable">
-            <tr><td colspan="7" class="empty">加载中...</td></tr>
+            <tr><td colspan="8" class="empty">加载中...</td></tr>
           </tbody>
         </table>
         <div id="providerModal" class="modal-backdrop hidden">
@@ -491,7 +494,7 @@
         </div>
         <table class="table logs-table">
           <colgroup>
-            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency">
+            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency"><col class="col-action">
           </colgroup>
           <thead>
             <tr>
@@ -504,10 +507,11 @@
               <th>错误</th>
               <th>状态</th>
               <th>耗时</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="logTable">
-            <tr><td colspan="9" class="empty">加载中...</td></tr>
+            <tr><td colspan="10" class="empty">加载中...</td></tr>
           </tbody>
         </table>
       </section>
@@ -730,6 +734,7 @@
       if (log.request_id) parts.push(`请求ID ${log.request_id}`);
       if (log.request_tools) parts.push(`请求 ${log.request_tools}`);
       if (log.response_tools) parts.push(`响应 ${log.response_tools}`);
+      if (log.request_tools && !log.response_tools && !log.is_success) parts.push('响应 无工具调用');
       if (log.fallback_mode) parts.push(`恢复 ${log.fallback_mode}`);
       if (log.normalization) parts.push(`归一化 ${log.normalization}`);
       if (log.stream_state) parts.push(`流 ${log.stream_state}`);
@@ -739,6 +744,25 @@
       const escaped = escapeHTML(text);
       const shortText = escaped.length > 96 ? escaped.slice(0, 96) + '...' : escaped;
       return `<span class="badge" title="${escaped}">${shortText}</span>`;
+    };
+    const formatLogDiagnosticCopyText = (log) => {
+      if (!log) return '';
+      return [
+        `request_id: ${log.request_id || log.id || '-'}`,
+        `time: ${formatTime(log.timestamp)}`,
+        `route: ${log.method || '-'} ${log.path || '-'}`,
+        `provider: ${log.provider || '-'} / ${formatModelRoute(log)}`,
+        `status: ${log.status_code ?? '-'} success=${log.is_success === true}`,
+        `elapsed: ${formatLatency(log.elapsed_ms)}`,
+        `error_code: ${log.error_code || '-'}`,
+        `error_reason: ${log.error_reason || '-'}`,
+        `error_action: ${log.error_action || '-'}`,
+        `diagnostic_summary: ${log.diagnostic_summary || '-'}`,
+        `request_tools: ${log.request_tools || '-'}`,
+        `response_tools: ${log.response_tools || '-'}`,
+        `stream_state: ${log.stream_state || '-'}`,
+        `attempts: ${log.attempts_summary || '-'}`,
+      ].join('\n');
     };
     const renderLogRow = (log) => {
       const fullTime = escapeHTML(formatTime(log.timestamp));
@@ -760,6 +784,7 @@
             <td class="col-error">${formatLogError(log)}</td>
             <td class="col-status"><span class="${statusClass(log.status_code)}">${escapeHTML(log.status_code ?? '-')}</span></td>
             <td class="col-latency" title="${latencyTitle}">${latency}</td>
+            <td class="col-action"><button class="btn" data-action="copy-log-diagnostic" data-id="${escapeAttr(log.id || log.request_id || '')}">复制诊断</button></td>
           </tr>`;
     };
 
@@ -787,6 +812,16 @@
     };
 
     const modelProviderKey = (model) => String(model?.provider_id || model?.provider || '').trim();
+
+    const countModelsByProvider = (models) => {
+      const counts = new Map();
+      (models || []).forEach((model) => {
+        const key = modelProviderKey(model).toLowerCase();
+        if (!key) return;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      });
+      return counts;
+    };
 
     const deleteProviderWithBoundModelPrompt = async (providerId) => {
       const modelRes = await fetchJSON('/models');
@@ -896,7 +931,7 @@
         const tbody = $('dashboardLogs');
         const logs = logsRes.logs || [];
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无日志</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无日志</td></tr>';
           return;
         }
         tbody.innerHTML = logs.map(renderLogRow).join('');
@@ -924,11 +959,13 @@
     const loadProviders = async () => {
       try {
         const res = await fetchJSON('/providers');
+        const modelRes = await fetchJSON('/models');
         const items = sortedProvidersForDisplay(res.providers || []);
+        const modelCounts = countModelsByProvider(modelRes.models || []);
         currentProviders = items;
         const tbody = $('providerTable');
         if (!items.length) {
-          tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无提供商</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无提供商</td></tr>';
           return;
         }
         tbody.innerHTML = items.map(item => {
@@ -939,6 +976,7 @@
             <td>${escapeHTML(item.display_name || item.name)}</td>
             <td>${escapeHTML(item.type)}</td>
             <td>${escapeHTML(item.base_url)}</td>
+            <td>${escapeHTML(modelCounts.get(key.toLowerCase()) || 0)}</td>
             <td>${escapeHTML(item.priority ?? 0)}</td>
             <td>${item.enabled ? '是' : '否'}</td>
             <td>
@@ -1230,6 +1268,7 @@
     const LOG_PAGE_SIZE = 20;
     let currentLogFilters = {};
     let latestFailureSnapshot = null;
+    let currentLogRows = [];
 
     const getLogFiltersFromUI = () => ({
       q: $('logFilterSearch').value,
@@ -1289,6 +1328,7 @@
         ]);
         latestFailureSnapshot = diagnosticsSummary?.latest_failure?.id ? diagnosticsSummary.latest_failure : null;
         const logs = res.logs || [];
+        currentLogRows = logs;
         const total = res.total || 0;
         const totalPages = Math.max(1, Math.ceil(total / LOG_PAGE_SIZE));
 
@@ -1301,7 +1341,7 @@
 
         const tbody = $('logTable');
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无日志</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无日志</td></tr>';
           updateLatestFailureBanner([]);
           return;
         }
@@ -1708,6 +1748,12 @@
       const action = btn.getAttribute('data-action');
       const name = btn.getAttribute('data-name');
       const modelProvider = btn.getAttribute('data-provider') || '';
+      if (action === 'copy-log-diagnostic') {
+        const id = btn.getAttribute('data-id') || '';
+        const log = currentLogRows.find((item) => String(item.id || item.request_id || '') === id);
+        await copyText('请求诊断', formatLogDiagnosticCopyText(log));
+        return;
+      }
       if (action === 'delete-provider') {
         if (!window.confirm(`确定删除提供商 ${name} 吗？`)) return;
         if (await deleteProviderWithBoundModelPrompt(name)) {

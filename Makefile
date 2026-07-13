@@ -6,6 +6,7 @@
 #   make release       构建并打包所有平台（压缩包）
 #   make release-notes 生成当前 tag 的 GitHub Release 正文
 #   make tool-check    工具调用专项核查
+#   make release-check 发布前完整核查
 #   make clean         清理构建产物
 
 APP_NAME     := vs-ai-proxy
@@ -36,7 +37,7 @@ PLATFORM_ALIAS := \
 	windows/amd64:windows-x64
 
 # ─── 默认目标 ──────────────────────────────────────────
-.PHONY: all build build-all install release release-notes tool-check windows-res ensure-windows-res clean
+.PHONY: all build build-all install release release-notes tool-check release-check windows-res ensure-windows-res clean
 
 all: build
 
@@ -103,6 +104,22 @@ release-notes:
 # ─── 工具调用专项核查 ──────────────────────────────────
 tool-check:
 	@bash tests/tool_call_release_check.sh
+
+# ─── 发布前完整核查 ────────────────────────────────────
+release-check: tool-check
+	go test ./... -count=1
+	go test -race ./cmd/server ./internal/proxy ./internal/provider ./internal/config ./internal/update ./internal/store ./internal/api ./internal/requestmeta ./web -count=1
+	go vet ./...
+	@tmp_js=$$(mktemp /tmp/vs-ai-proxy-script.XXXXXX.js); \
+		sed -n '/<script>/,/<\/script>/p' web/dist/index.html | sed '1d;$$d' > "$$tmp_js"; \
+		node --check "$$tmp_js"; \
+		rm -f "$$tmp_js"
+	@git diff --check
+	@rm -rf .bin/windows-build-check
+	@mkdir -p .bin/windows-build-check
+	GOOS=windows GOARCH=amd64 go build -ldflags='-s -w -X main.version=$(VERSION)-release-check' -o .bin/windows-build-check/vs-ai-proxy.exe $(MAIN_PATH)
+	@rm -rf .bin/windows-build-check .bin/logs.json
+	@echo "RELEASE_CHECK_OK"
 
 # ─── 清理 ──────────────────────────────────────────────
 clean:

@@ -178,6 +178,62 @@ func TestProviderAPIKeyIsPasswordWithVisibilityToggle(t *testing.T) {
 	}
 }
 
+func TestProviderListShowsBoundModelCount(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	checks := []string{
+		"<th>模型</th>",
+		"const countModelsByProvider = (models) =>",
+		"const modelCounts = countModelsByProvider(modelRes.models || [])",
+		"<td>${escapeHTML(modelCounts.get(key.toLowerCase()) || 0)}</td>",
+		`<tr><td colspan="8" class="empty">加载中...</td></tr>`,
+		`colspan="8"`,
+	}
+	for _, check := range checks {
+		if !strings.Contains(html, check) {
+			t.Fatalf("provider bound model count UI missing %q", check)
+		}
+	}
+}
+
+func TestLogToolDiagnosticsExplainsMissingResponseTools(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, "响应 无工具调用") {
+		t.Fatalf("tool diagnostics should explicitly show when request declared tools but response did not include tool calls")
+	}
+}
+
+func TestLogRowsCanCopyDiagnosticSummary(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	checks := []string{
+		`<th>操作</th>`,
+		`<tr><td colspan="10" class="empty">加载中...</td></tr>`,
+		`<tr><td colspan="10" class="empty">暂无日志</td></tr>`,
+		`.logs-table .col-action { width: 86px; }`,
+		`tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无日志</td></tr>';`,
+		`data-action="copy-log-diagnostic"`,
+		"formatLogDiagnosticCopyText",
+		"currentLogRows = logs",
+		"await copyText('请求诊断'",
+	}
+	for _, check := range checks {
+		if !strings.Contains(html, check) {
+			t.Fatalf("log diagnostic copy flow missing %q", check)
+		}
+	}
+}
+
 func TestAdvancedChildPagesKeepAdvancedNavActive(t *testing.T) {
 	data, err := fs.ReadFile(MustSubFS(), "index.html")
 	if err != nil {
@@ -224,5 +280,28 @@ func TestReleaseBuildDoesNotInstallWindowsResourceTool(t *testing.T) {
 	}
 	if strings.Contains(makefile, "GOPROXY=$${GOPROXY:-https://goproxy.cn,direct} go install") {
 		t.Fatalf("release build should not install go-winres from the network")
+	}
+}
+
+func TestMakefileReleaseCheckIncludesCoreGates(t *testing.T) {
+	data, err := os.ReadFile("../Makefile")
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makefile := string(data)
+	checks := []string{
+		"release-check: tool-check",
+		"go test ./... -count=1",
+		"go test -race ./cmd/server ./internal/proxy ./internal/provider",
+		"go vet ./...",
+		"node --check",
+		"git diff --check",
+		"GOOS=windows GOARCH=amd64 go build",
+		"RELEASE_CHECK_OK",
+	}
+	for _, check := range checks {
+		if !strings.Contains(makefile, check) {
+			t.Fatalf("release-check missing %q", check)
+		}
 	}
 }
