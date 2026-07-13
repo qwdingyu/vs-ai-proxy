@@ -26,7 +26,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const adminSessionCookieName = "vs_ai_proxy_admin_token"
+const (
+	adminSessionCookieName = "vs_ai_proxy_admin_token"
+	defaultLogPageSize     = 50
+	maxLogPageSize         = 200
+	defaultLogLimit        = 100
+)
 
 // Server API 服务器
 // 对外提供管理界面所需的配置、提供商、模型、测试、日志、统计接口，
@@ -37,6 +42,7 @@ type Server struct {
 	configMgr *config.Manager
 	proxy     *proxy.Server
 	store     *store.Store
+	storePath string
 	logger    *log.Logger
 	staticFS  fs.FS
 }
@@ -70,6 +76,13 @@ func NewServer(
 
 	s.registerRoutes()
 	return s
+}
+
+// SetStorePath 设置请求日志快照文件路径。
+// 定时持久化由 cmd/server 负责；API 层只在“清空日志”这类用户显式操作后立即落盘，
+// 避免刚清空就异常退出时又从旧 logs.json 恢复出已删除日志。
+func (s *Server) SetStorePath(path string) {
+	s.storePath = strings.TrimSpace(path)
 }
 
 func noStoreForManagementAPI() gin.HandlerFunc {
@@ -1624,7 +1637,7 @@ func (s *Server) getLogs(c *gin.Context) {
 	pageStr := c.Query("page")
 	if pageStr != "" {
 		page := 1
-		pageSize := 50
+		pageSize := defaultLogPageSize
 		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
 			page = p
 		}
@@ -1632,6 +1645,9 @@ func (s *Server) getLogs(c *gin.Context) {
 			if p, err := strconv.Atoi(ps); err == nil && p > 0 {
 				pageSize = p
 			}
+		}
+		if pageSize > maxLogPageSize {
+			pageSize = maxLogPageSize
 		}
 		filters := store.LogFilters{
 			Provider:    strings.TrimSpace(c.Query("provider")),
@@ -1652,9 +1668,15 @@ func (s *Server) getLogs(c *gin.Context) {
 	}
 
 	// 兼容旧模式：仅 limit 参数
-	limit := 100
+	limit := defaultLogLimit
 	if l := c.Query("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
+	}
+	if limit <= 0 {
+		limit = defaultLogLimit
+	}
+	if limit > maxLogPageSize {
+		limit = maxLogPageSize
 	}
 	logs := s.store.GetLogs(limit)
 	c.JSON(http.StatusOK, gin.H{"logs": logs})
@@ -1663,6 +1685,13 @@ func (s *Server) getLogs(c *gin.Context) {
 // clearLogs 清空日志
 func (s *Server) clearLogs(c *gin.Context) {
 	s.store.ClearLogs()
+	if s.storePath != "" {
+		if err := s.store.PersistToFile(s.storePath); err != nil {
+			s.logger.Warn("清空请求日志后保存快照失败: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "清空日志已在内存生效，但保存 logs.json 失败，请检查文件权限或磁盘状态。"})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 

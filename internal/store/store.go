@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/renameio/maybe"
 )
 
 // RequestLog 单条请求日志
@@ -274,10 +276,14 @@ func (s *Store) ClearLogs() {
 // PersistToFile 持久化到文件
 // 该方法是线程安全的，仅持久化日志，不会持久化统计。
 func (s *Store) PersistToFile(path string) error {
+	// 只在锁内复制当前日志快照，避免 JSON 序列化和磁盘 IO 长时间阻塞 AddLog。
+	// logs.json 是管理页的持久化快照，不是审计级 append-only 日志；因此保存最近 maxLogs 条即可。
 	s.logMu.RLock()
-	defer s.logMu.RUnlock()
+	logs := append([]RequestLog(nil), s.logs...)
+	s.logMu.RUnlock()
 
-	data, err := json.MarshalIndent(s.logs, "", "  ")
+	// 使用紧凑 JSON 控制 logs.json 体积。管理页通过 API 展示，不依赖文件人工阅读格式。
+	data, err := json.Marshal(logs)
 	if err != nil {
 		return err
 	}
@@ -287,7 +293,8 @@ func (s *Store) PersistToFile(path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	// 使用成熟的 renameio/maybe 写入快照：Unix 走原子替换，Windows 走兼容写入，避免跨平台构建失败。
+	return maybe.WriteFile(path, data, 0644)
 }
 
 // LoadFromFile 从文件加载

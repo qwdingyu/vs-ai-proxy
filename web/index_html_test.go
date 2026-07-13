@@ -2,6 +2,7 @@ package web
 
 import (
 	"io/fs"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -59,5 +60,107 @@ func TestLogsFilterInputsAreWiredToQueryPayload(t *testing.T) {
 				t.Fatalf("filter %s is not reset from filter state", queryName)
 			}
 		})
+	}
+}
+
+func TestNavigationKeepsBeginnerFlowFirst(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	wantOrder := []string{
+		`data-page="providers">提供商`,
+		`data-page="test">测试`,
+		`data-page="logs">日志`,
+		`data-page="faq">FAQ`,
+		`data-page="contact">联系我们`,
+		`data-page="advanced">高级`,
+	}
+	last := -1
+	for _, marker := range wantOrder {
+		idx := strings.Index(html, marker)
+		if idx < 0 {
+			t.Fatalf("missing nav marker %q", marker)
+		}
+		if idx <= last {
+			t.Fatalf("nav marker %q appears out of order", marker)
+		}
+		last = idx
+	}
+	if !strings.Contains(html, `id="page-advanced"`) {
+		t.Fatalf("missing advanced landing page")
+	}
+}
+
+func TestProviderProbeImportsModelsWithoutBeginnerConfirmation(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, "探测并导入模型") {
+		t.Fatalf("provider probe button should explain automatic import")
+	}
+	if strings.Contains(html, "是否自动加入模型配置") {
+		t.Fatalf("provider probe import should not ask beginners to understand model import confirmation")
+	}
+	if !strings.Contains(html, "已为 ${providerId} 自动导入") {
+		t.Fatalf("missing automatic import success message")
+	}
+	if !strings.Contains(html, "item.name === editingModelName && String(item.provider_id || item.provider || '') === editingModelProvider") {
+		t.Fatalf("model edit should match name plus provider to avoid touching same-name models")
+	}
+	if !strings.Contains(html, "x.name !== name || String(x.provider_id || x.provider || '') !== modelProvider") {
+		t.Fatalf("model delete should preserve same-name models bound to other providers")
+	}
+}
+
+func TestAdvancedChildPagesKeepAdvancedNavActive(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, "const activePage = ['config', 'models', 'monitor'].includes(currentPage) ? 'advanced' : currentPage") {
+		t.Fatalf("advanced child pages should keep the advanced nav item active")
+	}
+}
+
+func TestDynamicAdminTablesEscapeUserControlledValues(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	want := []string{
+		"<td>${escapeHTML(key)}</td>",
+		"<td>${escapeHTML(item.display_name || item.name)}</td>",
+		"data-name=\"${escapeAttr(key)}\"",
+		"<option value=\"${escapeAttr(providerKey(p))}\">${escapeHTML(providerLabel(p))} (${escapeHTML(p.type)})</option>",
+		"<option value=\"${escapeAttr(name)}\">${escapeHTML(name)}</option>",
+		"<td>${escapeHTML(item.name)}</td>",
+		"<td>${escapeHTML(modelProvider || '-')}</td>",
+		"data-provider=\"${escapeAttr(modelProvider)}\"",
+		"<td>${escapeHTML(item.provider)}</td>",
+	}
+	for _, marker := range want {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("missing escaped table marker %q", marker)
+		}
+	}
+}
+
+func TestReleaseBuildDoesNotInstallWindowsResourceTool(t *testing.T) {
+	data, err := os.ReadFile("../Makefile")
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makefile := string(data)
+	if !strings.Contains(makefile, "build-all: ensure-windows-res") {
+		t.Fatalf("build-all should use checked-in Windows resource instead of regenerating it during release")
+	}
+	if strings.Contains(makefile, "GOPROXY=$${GOPROXY:-https://goproxy.cn,direct} go install") {
+		t.Fatalf("release build should not install go-winres from the network")
 	}
 }

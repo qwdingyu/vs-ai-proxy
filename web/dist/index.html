@@ -34,6 +34,8 @@
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
     .stat { background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+    a.stat { display: block; color: inherit; text-decoration: none; transition: border-color .16s ease, transform .16s ease; }
+    a.stat:hover { border-color: rgba(88,166,255,0.55); transform: translateY(-1px); }
     .label { color: var(--muted); font-size: 12px; }
     .value { font-size: 20px; margin-top: 6px; }
     .table { width: 100%; border-collapse: collapse; margin-top: 10px; }
@@ -127,14 +129,12 @@
         <span class="brand-text"><span class="brand-title">VS AI Proxy</span><span class="brand-version" id="appVersion">版本加载中</span></span>
       </a></h1>
       <nav class="nav">
-        <a class="nav-item" href="#/config" data-page="config">配置</a>
         <a class="nav-item" href="#/providers" data-page="providers">提供商</a>
-        <a class="nav-item" href="#/models" data-page="models">模型</a>
         <a class="nav-item" href="#/test" data-page="test">测试</a>
-        <a class="nav-item" href="#/monitor" data-page="monitor">监控</a>
         <a class="nav-item" href="#/logs" data-page="logs">日志</a>
         <a class="nav-item" href="#/faq" data-page="faq">FAQ</a>
         <a class="nav-item" href="#/contact" data-page="contact">联系我们</a>
+        <a class="nav-item" href="#/advanced" data-page="advanced">高级</a>
         <a class="nav-item" href="/admin/logout">退出</a>
       </nav>
     </header>
@@ -214,6 +214,28 @@
         </table>
       </section>
 
+      <section id="page-advanced" class="panel hidden">
+        <h2>高级功能</h2>
+        <p class="hint">新手只需要完成“提供商”和“测试”。以下功能用于高级排障、模型精细配置和运行参数调整。</p>
+        <div class="grid-3">
+          <a class="stat" href="#/config" data-page="config">
+            <div class="label">系统配置</div>
+            <div class="value">配置</div>
+            <div class="hint">端口、默认模型、上游防御和超时预算。</div>
+          </a>
+          <a class="stat" href="#/models" data-page="models">
+            <div class="label">模型精调</div>
+            <div class="value">模型</div>
+            <div class="hint">手工调整模型绑定、上下文长度和最大输出。</div>
+          </a>
+          <a class="stat" href="#/monitor" data-page="monitor">
+            <div class="label">运行观测</div>
+            <div class="value">监控</div>
+            <div class="hint">查看健康状态、请求统计和 provider 状态。</div>
+          </a>
+        </div>
+      </section>
+
       <section id="page-config" class="panel hidden">
         <h2>系统配置</h2>
         <div class="grid-2">
@@ -285,7 +307,7 @@
             <label>优先级 <input type="number" id="pPriority" /></label>
             <label>启用 <input type="checkbox" id="pEnabled" checked /></label>
             <div class="actions">
-              <button class="btn" id="btnProbeProvider">探测模型</button>
+              <button class="btn" id="btnProbeProvider">探测并导入模型</button>
               <button class="btn" id="btnCancelProvider">取消</button>
               <button class="btn primary" id="btnSaveProvider">保存</button>
             </div>
@@ -577,6 +599,7 @@
       '"': '&quot;',
       "'": '&#39;'
     }[ch]));
+    const escapeAttr = escapeHTML;
     const formatPercent = (value) => {
       if (value == null || Number.isNaN(Number(value))) return '-';
       return Math.round(Number(value) * 100) + '%';
@@ -653,9 +676,10 @@
 
     const setActiveNav = (page) => {
       const currentPage = page || normalizePage();
+      const activePage = ['config', 'models', 'monitor'].includes(currentPage) ? 'advanced' : currentPage;
       document.querySelectorAll('.nav-item[href^="#"]').forEach((el) => {
         const target = el.dataset.page || el.getAttribute('href').replace(/^#\/?/, '') || 'dashboard';
-        const isActive = target === currentPage;
+        const isActive = target === activePage;
         el.classList.toggle('active', isActive);
         if (isActive) el.setAttribute('aria-current', 'page');
         else el.removeAttribute('aria-current');
@@ -794,7 +818,7 @@
     // 页面切换：根据前端 hash 路由显示对应面板
     const showPage = (page) => {
       setActiveNav(page);
-      ['dashboard', 'config', 'providers', 'models', 'test', 'monitor', 'logs', 'faq', 'contact'].forEach((name) => {
+      ['dashboard', 'advanced', 'config', 'providers', 'models', 'test', 'monitor', 'logs', 'faq', 'contact'].forEach((name) => {
         const el = $('page-' + name);
         if (!el) return;
         if (name === page) el.classList.remove('hidden');
@@ -872,21 +896,23 @@
           tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无提供商</td></tr>';
           return;
         }
-        tbody.innerHTML = items.map(item => `
+        tbody.innerHTML = items.map(item => {
+          const key = providerKey(item);
+          return `
           <tr>
-            <td>${providerKey(item)}</td>
-            <td>${item.display_name || item.name}</td>
-            <td>${item.type}</td>
-            <td>${item.base_url}</td>
-            <td>${item.priority ?? 0}</td>
+            <td>${escapeHTML(key)}</td>
+            <td>${escapeHTML(item.display_name || item.name)}</td>
+            <td>${escapeHTML(item.type)}</td>
+            <td>${escapeHTML(item.base_url)}</td>
+            <td>${escapeHTML(item.priority ?? 0)}</td>
             <td>${item.enabled ? '是' : '否'}</td>
             <td>
-              <button class="btn" data-action="edit-provider" data-name="${providerKey(item)}">编辑</button>
-              ${isBuiltInUseAI(item) ? '' : `<button class="btn danger" data-action="delete-provider" data-name="${providerKey(item)}">删除</button>`}
-              <button class="btn" data-action="test-provider" data-name="${providerKey(item)}">校验模型列表</button>
+              <button class="btn" data-action="edit-provider" data-name="${escapeAttr(key)}">编辑</button>
+              ${isBuiltInUseAI(item) ? '' : `<button class="btn danger" data-action="delete-provider" data-name="${escapeAttr(key)}">删除</button>`}
+              <button class="btn" data-action="test-provider" data-name="${escapeAttr(key)}">校验模型列表</button>
             </td>
           </tr>
-        `).join('');
+        `}).join('');
       } catch (e) {
         console.error(e);
       }
@@ -903,19 +929,21 @@
           tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无模型</td></tr>';
           return;
         }
-        tbody.innerHTML = items.map(item => `
+        tbody.innerHTML = items.map(item => {
+          const modelProvider = item.provider_id || item.provider || '';
+          return `
           <tr>
-            <td>${item.name}</td>
-            <td>${item.provider_id || item.provider || '-'}</td>
-            <td>${item.context_length}</td>
-            <td>${item.max_output_tokens}</td>
+            <td>${escapeHTML(item.name)}</td>
+            <td>${escapeHTML(modelProvider || '-')}</td>
+            <td>${escapeHTML(item.context_length)}</td>
+            <td>${escapeHTML(item.max_output_tokens)}</td>
             <td>${item.enabled ? '是' : '否'}</td>
             <td>
-              <button class="btn" data-action="edit-model" data-name="${item.name}">编辑</button>
-              <button class="btn danger" data-action="delete-model" data-name="${item.name}">删除</button>
+              <button class="btn" data-action="edit-model" data-name="${escapeAttr(item.name)}" data-provider="${escapeAttr(modelProvider)}">编辑</button>
+              <button class="btn danger" data-action="delete-model" data-name="${escapeAttr(item.name)}" data-provider="${escapeAttr(modelProvider)}">删除</button>
             </td>
           </tr>
-        `).join('');
+        `}).join('');
       } catch (e) {
         console.error(e);
       }
@@ -935,7 +963,7 @@
         if (!currentProviders.length) {
           select.innerHTML = '<option value="">暂无提供商</option>';
         } else {
-          select.innerHTML = currentProviders.map((p) => `<option value="${providerKey(p)}">${providerLabel(p)} (${p.type})</option>`).join('');
+          select.innerHTML = currentProviders.map((p) => `<option value="${escapeAttr(providerKey(p))}">${escapeHTML(providerLabel(p))} (${escapeHTML(p.type)})</option>`).join('');
         }
         await refreshTestModelOptions(configRes.default_model || '');
         if (!$('testMessage').value) {
@@ -988,7 +1016,7 @@
         return;
       }
       modelSelect.disabled = false;
-      modelSelect.innerHTML = models.map((name) => `<option value="${escapeHTML(name)}">${escapeHTML(name)}</option>`).join('');
+      modelSelect.innerHTML = models.map((name) => `<option value="${escapeAttr(name)}">${escapeHTML(name)}</option>`).join('');
       const names = new Set(models);
       const fallback = models[0] || '';
       modelSelect.value = names.has(preferredModel) ? preferredModel : fallback;
@@ -1069,7 +1097,7 @@
         const hasTraffic = (item.successes || 0) + (item.failures || 0) > 0;
         return `
           <tr>
-            <td>${item.provider}</td>
+            <td>${escapeHTML(item.provider)}</td>
             <td>${hasTraffic ? formatPercent(item.success_rate) : '<span class="badge">暂无请求</span>'}</td>
             <td>${formatLatency(item.latency_ms)}</td>
             <td class="${item.consecutive_failures ? 'warn' : 'ok'}">${item.consecutive_failures || 0}</td>
@@ -1285,7 +1313,7 @@
 
     // 导航点击处理：读取当前元素的 hash 用于前端路由切换
     // 注意：这里使用 el.hash，避免对仅包含 hash 的链接调用 new URL() 触发异常
-    document.querySelectorAll('.nav-item[href^="#"]').forEach((el) => {
+    document.querySelectorAll('.nav-item[href^="#"], a.stat[href^="#"]').forEach((el) => {
       el.addEventListener('click', (e) => {
         e.preventDefault();
         // 读取链接的 hash 值作为页面标识，例如 "#/providers" -> "providers"
@@ -1335,6 +1363,7 @@
     // 提供商弹窗状态
     let editingProviderName = null;
     let editingModelName = null;
+    let editingModelProvider = '';
     let testModelLoadSeq = 0;
 
     // 打开新增提供商弹窗
@@ -1417,9 +1446,10 @@
       const res = await fetchJSON('/models');
       const existing = res.models || [];
       const seen = new Set(existing.map((item) => `${item.name || ''}@${item.provider_id || item.provider || ''}`.toLowerCase()));
-      const additions = probe.models
+      const probedModels = probe.models
         .map((name) => String(name || '').trim())
-        .filter(Boolean)
+        .filter(Boolean);
+      const additions = probedModels
         .filter((name) => !seen.has(`${name}@${providerId}`.toLowerCase()))
         .map((name) => ({
           name,
@@ -1427,16 +1457,20 @@
           provider: providerId,
           enabled: true
         }));
-      if (!additions.length) return;
+      const existedCount = probedModels.length - additions.length;
+      if (!additions.length) {
+        setTestResult('模型已存在', `已探测到 ${probedModels.length} 个模型，均已存在于 ${providerId} 的模型配置中。`);
+        return;
+      }
 
-      if (!window.confirm(`探测到 ${additions.length} 个新模型，是否自动加入模型配置？\n\n保存后后端会自动补齐上下文、最大输出和能力元数据。`)) return;
       await fetchJSON('/models', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify([...existing, ...additions])
       });
-      setTestResult('模型已导入', `已为 ${providerId} 导入 ${additions.length} 个模型，并已热更新代理路由。`);
+      setTestResult('模型已导入', `已为 ${providerId} 自动导入 ${additions.length} 个新模型，已存在 ${existedCount} 个；后端已热更新代理路由。`);
       loadModels();
+      if ($('testProvider').value === providerId) await refreshTestModelOptions($('testModel').value.trim());
     };
 
     // 保存提供商
@@ -1526,6 +1560,7 @@
     // 打开新增模型弹窗
     $('btnAddModel').addEventListener('click', () => {
       editingModelName = null;
+      editingModelProvider = '';
       $('modelModalTitle').textContent = '新增模型';
       $('mName').value = '';
       $('mProvider').value = '';
@@ -1603,7 +1638,7 @@
       const res = await fetchJSON('/models');
       const models = res.models || [];
       const next = editingModelName
-        ? models.map((item) => item.name === editingModelName ? payload : item)
+        ? models.map((item) => item.name === editingModelName && String(item.provider_id || item.provider || '') === editingModelProvider ? payload : item)
         : [...models, payload];
       try {
         const cfg = currentConfig || await fetchJSON('/config');
@@ -1611,6 +1646,7 @@
         await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
         $('modelModal').classList.add('hidden');
         editingModelName = null;
+        editingModelProvider = '';
         loadModels();
       } catch (e) {
         const msg = formatValidationIssues(e.validation) || String(e.message || e);
@@ -1624,6 +1660,7 @@
       if (!btn) return;
       const action = btn.getAttribute('data-action');
       const name = btn.getAttribute('data-name');
+      const modelProvider = btn.getAttribute('data-provider') || '';
       if (action === 'delete-provider') {
         await fetchJSON('/providers/' + encodeURIComponent(name), { method: 'DELETE' });
         loadProviders();
@@ -1658,15 +1695,16 @@
       }
       if (action === 'delete-model') {
         const res = await fetchJSON('/models');
-        const next = (res.models || []).filter((x) => x.name !== name);
+        const next = (res.models || []).filter((x) => x.name !== name || String(x.provider_id || x.provider || '') !== modelProvider);
         await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
         loadModels();
       }
       if (action === 'edit-model') {
         editingModelName = name;
+        editingModelProvider = modelProvider;
         $('modelModalTitle').textContent = '编辑模型';
         const res = await fetchJSON('/models');
-        const item = (res.models || []).find((x) => x.name === name);
+        const item = (res.models || []).find((x) => x.name === name && String(x.provider_id || x.provider || '') === modelProvider);
         if (!item) return;
         $('mName').value = item.name;
         $('mProvider').value = item.provider_id || item.provider || '';

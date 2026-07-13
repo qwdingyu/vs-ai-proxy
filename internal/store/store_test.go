@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -46,6 +48,86 @@ func TestPersistAndLoadRoundTrip(t *testing.T) {
 	if got, want := stats.FailureCount, int64(1); got != want {
 		t.Fatalf("FailureCount = %d, want %d", got, want)
 	}
+}
+
+func TestPersistToFileWritesCompactJSONSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "logs.json")
+
+	s := New(10)
+	s.AddLog(RequestLog{Method: "POST", Path: "/v1/chat/completions", StatusCode: 502, ElapsedMs: 33.1, IsSuccess: false, ErrorReason: "上游服务异常"})
+
+	if err := s.PersistToFile(path); err != nil {
+		t.Fatalf("PersistToFile() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted file: %v", err)
+	}
+	if bytes.Contains(data, []byte("\n  ")) {
+		t.Fatalf("logs.json should be compact JSON, got %q", string(data))
+	}
+
+	loaded := New(10)
+	if err := loaded.LoadFromFile(path); err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	logs := loaded.GetLogs(1)
+	if len(logs) != 1 || logs[0].ErrorReason != "上游服务异常" {
+		t.Fatalf("loaded logs = %#v, want persisted diagnostic log", logs)
+	}
+}
+
+func TestPersistToFileRespectsMaxLogsSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "logs.json")
+
+	s := New(3)
+	for i := 0; i < 5; i++ {
+		s.AddLog(RequestLog{Method: "POST", Path: "/v1/chat/completions", Model: string(rune('a' + i)), StatusCode: 200, IsSuccess: true})
+	}
+
+	if err := s.PersistToFile(path); err != nil {
+		t.Fatalf("PersistToFile() error = %v", err)
+	}
+
+	loaded := New(10)
+	if err := loaded.LoadFromFile(path); err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	logs := loaded.GetLogs(10)
+	if got, want := len(logs), 3; got != want {
+		t.Fatalf("loaded logs len = %d, want %d", got, want)
+	}
+	if logs[0].Model != "e" || logs[1].Model != "d" || logs[2].Model != "c" {
+		t.Fatalf("loaded logs = %#v, want newest retained models e,d,c", logs)
+	}
+}
+
+func TestPersistToFileDoesNotHoldLogLockDuringDiskWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "logs.json")
+	s := New(1000)
+	for i := 0; i < 100; i++ {
+		s.AddLog(RequestLog{Method: "POST", Path: "/v1/chat/completions", StatusCode: 200, IsSuccess: true})
+	}
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < 4; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				s.AddLog(RequestLog{Method: "GET", Path: "/health", StatusCode: 200, IsSuccess: true})
+			}
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		if err := s.PersistToFile(path); err != nil {
+			t.Fatalf("PersistToFile() error = %v", err)
+		}
+	}
+	wg.Wait()
 }
 
 func TestGetLogsPageFilteredFiltersByProviderStatusAndSearch(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -505,6 +506,94 @@ func TestLogsEndpointSupportsLegacyLimit(t *testing.T) {
 	}
 	if result.Logs[0].Provider != "deepseek" {
 		t.Fatalf("newest log = %#v, want deepseek", result.Logs[0])
+	}
+}
+
+func TestLogsEndpointClampsPageSizeAndLegacyLimit(t *testing.T) {
+	apiSrv, _ := newAPITestHarnessWithStoreMax(t, 500)
+	for i := 0; i < 250; i++ {
+		apiSrv.store.AddLog(store.RequestLog{Method: "GET", Path: "/health", Provider: "useai", StatusCode: 200, IsSuccess: true})
+	}
+
+	pageRec := httptest.NewRecorder()
+	pageReq := httptest.NewRequest(http.MethodGet, "/api/logs?page=1&page_size=1000", nil)
+	apiSrv.engine.ServeHTTP(pageRec, pageReq)
+
+	if pageRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/logs page status = %d, want %d; body=%s", pageRec.Code, http.StatusOK, pageRec.Body.String())
+	}
+	var pageResult store.LogPageResult
+	if err := json.Unmarshal(pageRec.Body.Bytes(), &pageResult); err != nil {
+		t.Fatalf("unmarshal page result: %v", err)
+	}
+	if got, want := pageResult.Size, 200; got != want {
+		t.Fatalf("page size = %d, want %d", got, want)
+	}
+	if got, want := len(pageResult.Logs), 200; got != want {
+		t.Fatalf("page logs len = %d, want %d", got, want)
+	}
+
+	limitRec := httptest.NewRecorder()
+	limitReq := httptest.NewRequest(http.MethodGet, "/api/logs?limit=1000", nil)
+	apiSrv.engine.ServeHTTP(limitRec, limitReq)
+
+	if limitRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/logs limit status = %d, want %d; body=%s", limitRec.Code, http.StatusOK, limitRec.Body.String())
+	}
+	var limitResult struct {
+		Logs []store.RequestLog `json:"logs"`
+	}
+	if err := json.Unmarshal(limitRec.Body.Bytes(), &limitResult); err != nil {
+		t.Fatalf("unmarshal limit result: %v", err)
+	}
+	if got, want := len(limitResult.Logs), 200; got != want {
+		t.Fatalf("limit logs len = %d, want %d", got, want)
+	}
+}
+
+func TestClearLogsPersistsEmptySnapshot(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	path := filepath.Join(t.TempDir(), "logs.json")
+	apiSrv.SetStorePath(path)
+	apiSrv.store.AddLog(store.RequestLog{Method: "POST", Path: "/v1/chat/completions", Provider: "useai", StatusCode: 502, IsSuccess: false})
+	if err := apiSrv.store.PersistToFile(path); err != nil {
+		t.Fatalf("PersistToFile() before clear error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/logs", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE /api/logs status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	loaded := store.New(10)
+	if err := loaded.LoadFromFile(path); err != nil {
+		t.Fatalf("LoadFromFile() after clear error = %v", err)
+	}
+	if got := len(loaded.GetLogs(10)); got != 0 {
+		t.Fatalf("persisted logs len = %d, want 0", got)
+	}
+}
+
+func TestClearLogsReportsPersistFailure(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	badPath := t.TempDir()
+	apiSrv.SetStorePath(badPath)
+	apiSrv.store.AddLog(store.RequestLog{Method: "POST", Path: "/v1/chat/completions", Provider: "useai", StatusCode: 502, IsSuccess: false})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/logs", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("DELETE /api/logs status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if got := len(apiSrv.store.GetLogs(10)); got != 0 {
+		t.Fatalf("in-memory logs len = %d, want 0", got)
+	}
+	if _, err := os.Stat(badPath); err != nil {
+		t.Fatalf("badPath should still exist as directory: %v", err)
 	}
 }
 

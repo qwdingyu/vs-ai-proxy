@@ -88,6 +88,7 @@ func main() {
 	proxySrv := proxy.NewServer(cfg, configMgr, st, logger)
 	// 创建 API 服务器，对外提供配置、提供商、模型、日志、统计及静态资源服务
 	apiSrv := api.NewServer(cfg.Port, configMgr, proxySrv, st, logger, staticFS)
+	apiSrv.SetStorePath(storePath)
 	_, registry, catalog := proxySrv.SnapshotComponents()
 	benchSvc := benchmark.New(registry, catalog, logger)
 

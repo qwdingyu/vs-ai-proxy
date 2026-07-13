@@ -16,6 +16,8 @@ VERSION_TAG  := $(patsubst v%,%,$(VERSION))
 
 # 构建参数
 LDFLAGS := -s -w -X main.version=$(VERSION)
+GO_WINRES := $(shell command -v go-winres 2>/dev/null || echo "$$(go env GOPATH)/bin/go-winres")
+WINDOWS_RSRC := cmd/server/rsrc_windows_amd64.syso
 
 # 所有目标平台（GOOS/GOARCH）
 PLATFORMS := \
@@ -34,7 +36,7 @@ PLATFORM_ALIAS := \
 	windows/amd64:windows-x64
 
 # ─── 默认目标 ──────────────────────────────────────────
-.PHONY: all build build-all install release release-notes tool-check clean
+.PHONY: all build build-all install release release-notes tool-check windows-res ensure-windows-res clean
 
 all: build
 
@@ -44,8 +46,20 @@ build:
 	go build -ldflags="$(LDFLAGS)" -o $(APP_NAME)$(suffix $(shell go env GOOS))$(if $(filter windows,$(shell go env GOOS)),.exe,) $(MAIN_PATH)
 	@echo "✅ 构建完成: $(APP_NAME)$(if $(filter windows,$(shell go env GOOS)),.exe,)"
 
+# ─── 生成 Windows exe 图标资源 ─────────────────────────
+windows-res:
+	@python3 tools/generate_windows_icon.py
+	@if [ ! -x "$(GO_WINRES)" ]; then \
+		echo "go-winres not found. Install with: go install github.com/tc-hib/go-winres@v0.3.3"; \
+		exit 1; \
+	fi
+	@"$(GO_WINRES)" make --in winres/winres.json --arch amd64 --out cmd/server/rsrc
+
+ensure-windows-res:
+	@test -f "$(WINDOWS_RSRC)" || { echo "missing $(WINDOWS_RSRC); run make windows-res"; exit 1; }
+
 # ─── 构建所有平台 ──────────────────────────────────────
-build-all:
+build-all: ensure-windows-res
 	@echo "🔨 构建 $(APP_NAME) $(VERSION) 所有平台..."
 	@mkdir -p $(OUTPUT_DIR)
 	@for plat in $(PLATFORMS); do \

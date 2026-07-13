@@ -1,0 +1,36 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": [
+        "../assets/brand/vs-ai-proxy-256.png",
+        "../assets/brand/vs-ai-proxy-128.png",
+        "../assets/brand/vs-ai-proxy-64.png",
+        "../assets/brand/vs-ai-proxy-48.png",
+        "../assets/brand/vs-ai-proxy-32.png",
+        "../assets/brand/vs-ai-proxy-24.png",
+        "../assets/brand/vs-ai-proxy-16.png"
+      ]
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "VS AI Proxy",
+            "FileDescription": "VS AI Proxy - Visual Studio Copilot local AI proxy",
+            "FileVersion": "0.0.0.0",
+            "InternalName": "vs-ai-proxy",
+            "OriginalFilename": "vs-ai-proxy.exe",
+            "ProductName": "VS AI Proxy",
+            "ProductVersion": "0.0.0.0"
+          }
+        }
+      }
+    }
+  }
+}
