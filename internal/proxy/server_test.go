@@ -811,7 +811,7 @@ func TestStreamOpenAIHandlesLargeSSELine(t *testing.T) {
 
 func TestStreamOpenAINormalizesBlankFinishReasonForVisualStudio(t *testing.T) {
 	stream := strings.Join([]string{
-		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":""}]}`,
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":""}]}`,
 		`data: [DONE]`,
 		"",
 	}, "\n")

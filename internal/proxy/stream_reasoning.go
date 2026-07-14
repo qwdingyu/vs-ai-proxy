@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
@@ -10,8 +11,10 @@ type streamReasoningAccumulator struct {
 	reasoning     strings.Builder
 	toolCallIDs   []string
 	toolCallNames []string
+	hasContent    bool
 	hasToolCalls  bool
 	finished      bool
+	finishReason  string
 }
 
 func newStreamReasoningAccumulator() *streamReasoningAccumulator {
@@ -37,6 +40,9 @@ func (a *streamReasoningAccumulator) consumeOpenAISSELine(line string) {
 }
 
 func (a *streamReasoningAccumulator) consumeOpenAIChunk(chunk openAIStreamChunk) {
+	if strings.TrimSpace(chunk.Content) != "" {
+		a.hasContent = true
+	}
 	if strings.TrimSpace(chunk.Reasoning) != "" {
 		a.reasoning.WriteString(chunk.Reasoning)
 	}
@@ -48,7 +54,43 @@ func (a *streamReasoningAccumulator) consumeOpenAIChunk(chunk openAIStreamChunk)
 	}
 	if strings.TrimSpace(chunk.FinishReason) != "" {
 		a.finished = true
+		a.finishReason = strings.ToLower(strings.TrimSpace(chunk.FinishReason))
 	}
+}
+
+func validateOpenAIStreamCompletion(acc *streamReasoningAccumulator, sanitizer *openAIStreamToolSanitizer) error {
+	if acc == nil {
+		return fmt.Errorf("OpenAI SSE 缺少响应状态")
+	}
+	sawDone := sanitizer != nil && sanitizer.sawDone
+	if !acc.finished && !sawDone {
+		return fmt.Errorf("OpenAI SSE 在 finish_reason 或 [DONE] 之前结束")
+	}
+	if !acc.hasResponsePayload() && !isOpenAITruncationFinishReason(acc.finishReason) {
+		return fmt.Errorf("OpenAI SSE 没有文本、推理内容或工具调用")
+	}
+	return nil
+}
+
+func validateOllamaStreamCompletion(acc *streamReasoningAccumulator) error {
+	if acc == nil {
+		return fmt.Errorf("Ollama 流缺少响应状态")
+	}
+	if !acc.finished {
+		return fmt.Errorf("Ollama 流在 done=true 或 [DONE] 之前结束")
+	}
+	if !acc.hasResponsePayload() && !isOpenAITruncationFinishReason(acc.finishReason) {
+		return fmt.Errorf("Ollama 流没有文本、推理内容或工具调用")
+	}
+	return nil
+}
+
+func (a *streamReasoningAccumulator) hasResponsePayload() bool {
+	if a == nil {
+		return false
+	}
+	hasReasoning := strings.TrimSpace(a.reasoning.String()) != ""
+	return a.hasContent || hasReasoning || a.hasToolCalls
 }
 
 func (a *streamReasoningAccumulator) consumeOllamaChunk(chunk map[string]any) {
@@ -57,6 +99,9 @@ func (a *streamReasoningAccumulator) consumeOllamaChunk(chunk map[string]any) {
 	}
 
 	if message, ok := chunk["message"].(map[string]any); ok && message != nil {
+		if content, ok := message["content"].(string); ok && strings.TrimSpace(content) != "" {
+			a.hasContent = true
+		}
 		if reasoning, ok := message["thinking"].(string); ok && strings.TrimSpace(reasoning) != "" {
 			a.reasoning.WriteString(reasoning)
 		}
@@ -73,6 +118,8 @@ func (a *streamReasoningAccumulator) consumeOllamaChunk(chunk map[string]any) {
 
 	if done, _ := chunk["done"].(bool); done {
 		a.finished = true
+		a.finishReason, _ = chunk["done_reason"].(string)
+		a.finishReason = strings.ToLower(strings.TrimSpace(a.finishReason))
 	}
 }
 

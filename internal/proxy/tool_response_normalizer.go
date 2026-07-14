@@ -4,9 +4,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
+
+var syntheticToolCallSequence atomic.Uint64
+
+// newSyntheticToolCallID 为省略 OpenAI tool_call id 的兼容上游补充关联 ID。
+// ID 只承担同一会话内 assistant tool_call 与后续 tool message 的关联，不包含业务数据。
+func newSyntheticToolCallID() string {
+	sequence := syntheticToolCallSequence.Add(1)
+	return fmt.Sprintf("call_proxy_%x_%x", uint64(time.Now().UnixNano()), sequence)
+}
 
 // normalizeRawToolCalls 统一修正所有 raw JSON/SSE 工具调用的名称与参数类型。
 // OpenAI wire contract 要求 arguments 是“包含 JSON 的字符串”；部分 Ollama/New API
@@ -19,6 +30,9 @@ func normalizeRawToolCalls(calls []any, allowedTools map[string]struct{}) (chang
 			complete = false
 			continue
 		}
+		if normalizeRawToolCallEnvelope(call) {
+			changed = true
+		}
 		function, ok := call["function"].(map[string]any)
 		if !ok || function == nil {
 			complete = false
@@ -26,9 +40,64 @@ func normalizeRawToolCalls(calls []any, allowedTools map[string]struct{}) (chang
 		}
 		functionChanged, functionComplete := normalizeRawFunctionCall(function, allowedTools)
 		changed = changed || functionChanged
-		complete = complete && functionComplete
+		id, _ := call["id"].(string)
+		typeName, _ := call["type"].(string)
+		hasValidEnvelope := strings.TrimSpace(id) != "" && typeName == "function"
+		if !hasValidEnvelope || !functionComplete {
+			complete = false
+		}
 	}
 	return changed, complete
+}
+
+func normalizeRawStreamToolCalls(calls []any, allowedTools map[string]struct{}) bool {
+	changed := false
+	for _, raw := range calls {
+		call, _ := raw.(map[string]any)
+		function, _ := call["function"].(map[string]any)
+		if normalized, _ := normalizeRawFunctionCall(function, allowedTools); normalized {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func normalizeRawToolCallEnvelope(call map[string]any) bool {
+	if call == nil {
+		return false
+	}
+	changed := false
+	id, _ := call["id"].(string)
+	if strings.TrimSpace(id) == "" {
+		call["id"] = newSyntheticToolCallID()
+		changed = true
+	}
+	typeName, _ := call["type"].(string)
+	trimmedType := strings.TrimSpace(typeName)
+	switch {
+	case trimmedType == "":
+		call["type"] = "function"
+		changed = true
+	case strings.EqualFold(trimmedType, "function") && typeName != "function":
+		call["type"] = "function"
+		changed = true
+	}
+	return changed
+}
+
+func normalizeProviderToolCallEnvelopes(calls []provider.ToolCall) {
+	for index := range calls {
+		call := &calls[index]
+		if strings.TrimSpace(call.ID) == "" {
+			call.ID = newSyntheticToolCallID()
+		}
+		trimmedType := strings.TrimSpace(call.Type)
+		missingType := trimmedType == ""
+		isFunctionType := strings.EqualFold(trimmedType, "function")
+		if missingType || isFunctionType {
+			call.Type = "function"
+		}
+	}
 }
 
 func normalizeRawFunctionCall(function map[string]any, allowedTools map[string]struct{}) (changed bool, complete bool) {
@@ -65,14 +134,117 @@ func normalizeToolArguments(value any) (string, bool) {
 	}
 }
 
+func rawToolCallsComplete(calls []any) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	for _, raw := range calls {
+		call, _ := raw.(map[string]any)
+		if call == nil {
+			return false
+		}
+		id, _ := call["id"].(string)
+		typeName, _ := call["type"].(string)
+		function, _ := call["function"].(map[string]any)
+		hasValidEnvelope := strings.TrimSpace(id) != "" && typeName == "function"
+		if !hasValidEnvelope || !rawFunctionCallComplete(function) {
+			return false
+		}
+	}
+	return true
+}
+
+func rawFunctionCallComplete(function map[string]any) bool {
+	if function == nil {
+		return false
+	}
+	name, _ := function["name"].(string)
+	arguments, ok := function["arguments"].(string)
+	hasName := strings.TrimSpace(name) != ""
+	hasArguments := ok && strings.TrimSpace(arguments) != "" && json.Valid([]byte(arguments))
+	return hasName && hasArguments
+}
+
+func rawMessageHasResponsePayload(message map[string]any) bool {
+	for _, key := range []string{"content", "reasoning_content", "thinking"} {
+		switch value := message[key].(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+		case []any:
+			if len(value) > 0 {
+				return true
+			}
+		case map[string]any:
+			if len(value) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func validateProviderToolCalls(calls []provider.ToolCall) error {
 	for index, call := range calls {
-		if strings.TrimSpace(call.Function.Name) == "" {
-			return fmt.Errorf("incomplete tool call at index %d: missing function name", index)
+		if strings.TrimSpace(call.ID) == "" {
+			return fmt.Errorf("incomplete tool call at index %d: missing id", index)
 		}
-		arguments := strings.TrimSpace(call.Function.Arguments)
-		if arguments == "" || !json.Valid([]byte(arguments)) {
-			return fmt.Errorf("incomplete tool call at index %d: invalid function arguments", index)
+		if call.Type != "function" {
+			return fmt.Errorf("incomplete tool call at index %d: invalid type %q", index, call.Type)
+		}
+		if err := validateProviderFunctionCall(call.Function, index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateProviderFunctionCall(function provider.FunctionCall, index int) error {
+	if strings.TrimSpace(function.Name) == "" {
+		return fmt.Errorf("incomplete tool call at index %d: missing function name", index)
+	}
+	arguments := strings.TrimSpace(function.Arguments)
+	if arguments == "" || !json.Valid([]byte(arguments)) {
+		return fmt.Errorf("incomplete tool call at index %d: invalid function arguments", index)
+	}
+	return nil
+}
+
+// normalizeOllamaStreamToolCallEnvelopes 将 Ollama 省略的 id/type 补成
+// Visual Studio 可关联的 OpenAI tool_calls envelope，并在多 chunk 间保持 ID 稳定。
+func normalizeOllamaStreamToolCallEnvelopes(chunk map[string]any, stableIDs map[int]string) error {
+	message, _ := chunk["message"].(map[string]any)
+	calls, _ := message["tool_calls"].([]any)
+	for position, raw := range calls {
+		call, _ := raw.(map[string]any)
+		if call == nil {
+			continue
+		}
+		callIndex := position
+		if rawIndex, ok := call["index"].(float64); ok {
+			callIndex = int(rawIndex)
+		}
+		id, _ := call["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			id = stableIDs[callIndex]
+			if id == "" {
+				id = newSyntheticToolCallID()
+				stableIDs[callIndex] = id
+			}
+			call["id"] = id
+		} else {
+			stableIDs[callIndex] = id
+		}
+		typeName, _ := call["type"].(string)
+		trimmedType := strings.TrimSpace(typeName)
+		missingType := trimmedType == ""
+		isFunctionType := strings.EqualFold(trimmedType, "function")
+		if !missingType && !isFunctionType {
+			return fmt.Errorf("Ollama tool call %d 的 type 无效: %q", callIndex, typeName)
+		}
+		if missingType || isFunctionType {
+			call["type"] = "function"
 		}
 	}
 	return nil
@@ -98,6 +270,7 @@ func normalizeRawToolChoice(choice, message map[string]any, allowedTools map[str
 		changed, complete := normalizeRawToolCalls(calls, allowedTools)
 		if isOpenAITruncationFinishReason(finishReason) {
 			delete(message, "tool_calls")
+			delete(message, "function_call")
 			return true
 		}
 		if complete {
@@ -142,23 +315,47 @@ func validateOpenAIChatResponseBody(body []byte) error {
 	}
 
 	choices, _ := root["choices"].([]any)
+	if len(choices) == 0 {
+		return fmt.Errorf("解析响应失败: OpenAI JSON 没有 choices")
+	}
 	for index, rawChoice := range choices {
 		choice, _ := rawChoice.(map[string]any)
+		if choice == nil {
+			return fmt.Errorf("解析响应失败: invalid choice at index %d", index)
+		}
 		message, _ := choice["message"].(map[string]any)
 		if message == nil {
-			continue
+			return fmt.Errorf("解析响应失败: choice %d 没有 message", index)
 		}
-		if calls, ok := message["tool_calls"].([]any); ok && len(calls) > 0 {
-			_, complete := normalizeRawToolCalls(calls, nil)
-			if !complete {
+		finishReason, ok := choice["finish_reason"].(string)
+		hasFinishReason := ok && strings.TrimSpace(finishReason) != ""
+		if !hasFinishReason || visualStudioFinishReason(finishReason) != finishReason {
+			return fmt.Errorf("解析响应失败: choice %d 的 finish_reason 无效", index)
+		}
+		calls, hasModernCalls := message["tool_calls"].([]any)
+		hasModernCalls = hasModernCalls && len(calls) > 0
+		functionCall, hasLegacyCall := message["function_call"].(map[string]any)
+		hasLegacyCall = hasLegacyCall && functionCall != nil
+		if hasModernCalls && hasLegacyCall {
+			return fmt.Errorf("解析响应失败: choice %d 同时包含 tool_calls 和 function_call", index)
+		}
+		hasToolCall := false
+		if hasModernCalls {
+			if !rawToolCallsComplete(calls) {
 				return fmt.Errorf("解析响应失败: incomplete tool_calls at choice %d", index)
 			}
+			hasToolCall = true
 		}
-		if functionCall, ok := message["function_call"].(map[string]any); ok && functionCall != nil {
-			_, complete := normalizeRawFunctionCall(functionCall, nil)
-			if !complete {
+		if hasLegacyCall {
+			if !rawFunctionCallComplete(functionCall) {
 				return fmt.Errorf("解析响应失败: incomplete function_call at choice %d", index)
 			}
+			hasToolCall = true
+		}
+		hasPayload := rawMessageHasResponsePayload(message)
+		isEmptySuccess := !hasToolCall && !isOpenAITruncationFinishReason(finishReason) && !hasPayload
+		if isEmptySuccess {
+			return fmt.Errorf("解析响应失败: choice %d 没有文本、推理内容或工具调用", index)
 		}
 	}
 	return nil

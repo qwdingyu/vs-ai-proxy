@@ -179,7 +179,11 @@ func (p *openAIStreamEventProcessor) finish() error {
 			return err
 		}
 	}
-	if p.held.Len() == 0 {
+	return nil
+}
+
+func (p *openAIStreamEventProcessor) commit() error {
+	if p == nil || p.held.Len() == 0 {
 		return nil
 	}
 	if _, err := p.w.Write(p.held.Bytes()); err != nil {
@@ -219,8 +223,11 @@ func (p *openAIStreamEventProcessor) flushEvent(separator string) error {
 			return p.sanitizer.err
 		}
 	}
-	for _, line := range strings.Split(normalized, "\n") {
-		p.acc.consumeOpenAISSELine(line)
+	// normalized 表示一个逻辑 SSE 事件；标准多行 data 拼成的 JSON 内可含单个
+	// 换行，不能再按物理行拆开解析。只有 sanitizer 为 [DONE] 补终态时才会
+	// 用空行连接两个完整事件。
+	for _, event := range strings.Split(normalized, "\n\n") {
+		p.acc.consumeOpenAISSELine(event)
 	}
 
 	var event strings.Builder
@@ -238,7 +245,13 @@ func (p *openAIStreamEventProcessor) flushEvent(separator string) error {
 }
 
 func (p *openAIStreamEventProcessor) writeEvent(event string) error {
-	if p.held.Len() > 0 || (p.sanitizer != nil && p.sanitizer.hasTrackedToolCalls()) {
+	// [DONE] 必须等完整响应契约校验通过后再提交，避免空流或 EOF 截断
+	// 已经向 Visual Studio 宣告成功终止。
+	hasHeldEvents := p.held.Len() > 0
+	hasTrackedToolCalls := p.sanitizer != nil && p.sanitizer.hasTrackedToolCalls()
+	hasTerminalEvent := isOpenAIStreamDoneEvent(event) || isOpenAIStreamFinishEvent(event)
+	shouldHold := hasHeldEvents || hasTerminalEvent || hasTrackedToolCalls
+	if shouldHold {
 		if int64(p.held.Len()+len(event)) > p.maxBytes {
 			return fmt.Errorf("%w: maximum %d bytes", errOpenAIStreamTooLarge, p.maxBytes)
 		}
@@ -250,6 +263,30 @@ func (p *openAIStreamEventProcessor) writeEvent(event string) error {
 	}
 	p.flusher.Flush()
 	return nil
+}
+
+func isOpenAIStreamDoneEvent(event string) bool {
+	for _, line := range strings.Split(event, "\n") {
+		if isOpenAIStreamDoneLine(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOpenAIStreamFinishEvent(event string) bool {
+	for _, line := range strings.Split(event, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(trimmed[5:])
+		chunk, err := parseOpenAIStreamPayload(payload)
+		if err == nil && strings.TrimSpace(chunk.FinishReason) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *openAIStreamEventProcessor) resetEvent() {

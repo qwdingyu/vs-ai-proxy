@@ -497,13 +497,7 @@ func (a *openAIChatSSEAccumulator) consumeMessage(message openAIChatSSEMessageCh
 		if a.legacyFunctionCall == nil {
 			a.legacyFunctionCall = &openAIChatSSEToolCall{}
 		}
-		if message.FunctionCall.Name != "" {
-			currentName := a.legacyFunctionCall.name
-			if currentName != "" && currentName != message.FunctionCall.Name {
-				return fmt.Errorf("SSE legacy function_call 的函数名冲突")
-			}
-			a.legacyFunctionCall.name = message.FunctionCall.Name
-		}
+		appendOpenAIIdentityFragment(&a.legacyFunctionCall.name, message.FunctionCall.Name)
 		if err := appendOpenAIToolArguments(
 			&a.legacyFunctionCall.arguments,
 			message.FunctionCall.Arguments,
@@ -519,25 +513,35 @@ func (a *openAIChatSSEAccumulator) consumeMessage(message openAIChatSSEMessageCh
 			a.toolCalls[chunk.Index] = current
 		}
 		if chunk.ID != "" {
-			if current.id != "" && current.id != chunk.ID {
-				return fmt.Errorf("SSE 工具调用 %d 的 id 冲突", chunk.Index)
-			}
-			current.id = chunk.ID
+			appendOpenAIIdentityFragment(&current.id, chunk.ID)
 		}
 		if chunk.Type != "" {
 			current.typeName = chunk.Type
 		}
 		if chunk.Function.Name != "" {
-			if current.name != "" && current.name != chunk.Function.Name {
-				return fmt.Errorf("SSE 工具调用 %d 的函数名冲突", chunk.Index)
-			}
-			current.name = chunk.Function.Name
+			appendOpenAIIdentityFragment(&current.name, chunk.Function.Name)
 		}
 		if err := appendOpenAIToolArguments(&current.arguments, chunk.Function.Arguments); err != nil {
 			return fmt.Errorf("SSE 工具调用 %d 参数无效: %w", chunk.Index, err)
 		}
 	}
 	return nil
+}
+
+func appendOpenAIIdentityFragment(current *string, fragment string) {
+	if current == nil || fragment == "" {
+		return
+	}
+	switch {
+	case *current == "":
+		*current = fragment
+	case *current == fragment:
+		return
+	case strings.HasPrefix(fragment, *current):
+		*current = fragment
+	default:
+		*current += fragment
+	}
 }
 
 func appendOpenAIToolArguments(dst *strings.Builder, raw json.RawMessage) error {
@@ -638,6 +642,15 @@ func normalizeAndValidateChatResponseTools(resp *ChatResponse) error {
 			return fmt.Errorf("choice %d 同时包含 tool_calls 和 function_call", choiceIndex)
 		}
 		for callIndex, call := range message.ToolCalls {
+			typeName := strings.TrimSpace(call.Type)
+			if typeName != "" && !strings.EqualFold(typeName, "function") {
+				return fmt.Errorf(
+					"choice %d tool call %d 的 type 无效: %q",
+					choiceIndex,
+					callIndex,
+					call.Type,
+				)
+			}
 			if strings.TrimSpace(call.Function.Name) == "" {
 				return fmt.Errorf("choice %d tool call %d 缺少函数名", choiceIndex, callIndex)
 			}
@@ -656,6 +669,10 @@ func normalizeAndValidateChatResponseTools(resp *ChatResponse) error {
 				return fmt.Errorf("choice %d function_call 参数不完整", choiceIndex)
 			}
 			choice.FinishReason = "function_call"
+		}
+		hasNoToolCalls := len(message.ToolCalls) == 0 && message.FunctionCall == nil
+		if hasNoToolCalls && strings.TrimSpace(choice.FinishReason) == "" {
+			choice.FinishReason = "stop"
 		}
 	}
 	return nil

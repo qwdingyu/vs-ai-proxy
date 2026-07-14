@@ -99,9 +99,10 @@ func collectOpenAIStreamReader(stream io.Reader, model string, allowedTools map[
 		return nil, err
 	}
 	message := resp.Choices[0].Message
-	if strings.TrimSpace(message.Content) == "" &&
+	hasNoPayload := strings.TrimSpace(message.Content) == "" &&
 		strings.TrimSpace(message.Reasoning) == "" &&
-		len(message.ToolCalls) == 0 && message.FunctionCall == nil {
+		len(message.ToolCalls) == 0 && message.FunctionCall == nil
+	if hasNoPayload && !isOpenAITruncationFinishReason(resp.Choices[0].FinishReason) {
 		return nil, fmt.Errorf("SSE response has no content or tool calls")
 	}
 	return resp, nil
@@ -117,7 +118,44 @@ func aggregateOpenAIStreamReaderWithLimit(stream io.Reader, model string, allowe
 		return nil, err
 	}
 	normalizeProviderSpecificToolCalls(resp, allowedTools)
+	if err := validateProviderResponseToolContract(resp); err != nil {
+		return nil, err
+	}
 	return resp, nil
+}
+
+func validateProviderResponseToolContract(resp *provider.ChatResponse) error {
+	if resp == nil || len(resp.Choices) == 0 {
+		return fmt.Errorf("chat response has no choices")
+	}
+	for choiceIndex, choice := range resp.Choices {
+		message := choice.Message
+		finishReason := strings.TrimSpace(choice.FinishReason)
+		if finishReason == "" || visualStudioFinishReason(finishReason) != finishReason {
+			return fmt.Errorf("choice %d 的 finish_reason 无效", choiceIndex)
+		}
+		hasModernCalls := len(message.ToolCalls) > 0
+		hasLegacyCall := message.FunctionCall != nil
+		if hasModernCalls && hasLegacyCall {
+			return fmt.Errorf("choice %d 同时包含 tool_calls 和 function_call", choiceIndex)
+		}
+		if hasModernCalls {
+			if err := validateProviderToolCalls(message.ToolCalls); err != nil {
+				return fmt.Errorf("choice %d: %w", choiceIndex, err)
+			}
+		}
+		if hasLegacyCall {
+			if err := validateProviderFunctionCall(*message.FunctionCall, 0); err != nil {
+				return fmt.Errorf("choice %d: %w", choiceIndex, err)
+			}
+		}
+		hasText := strings.TrimSpace(message.Content) != "" || strings.TrimSpace(message.Reasoning) != ""
+		hasPayload := hasText || hasModernCalls || hasLegacyCall
+		if !hasPayload && !isOpenAITruncationFinishReason(finishReason) {
+			return fmt.Errorf("choice %d 没有文本、推理内容或工具调用", choiceIndex)
+		}
+	}
+	return nil
 }
 
 func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse, allowedTools map[string]struct{}) {
@@ -128,15 +166,20 @@ func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse, allowedTool
 			canonicalizeProviderToolCallNames(msg.ToolCalls, allowedTools)
 			canonicalizeFunctionCallName(msg.FunctionCall, allowedTools)
 			if isOpenAITruncationFinishReason(choice.FinishReason) {
+				choice.FinishReason = visualStudioFinishReason(choice.FinishReason)
 				msg.ToolCalls = nil
 				msg.FunctionCall = nil
 				continue
 			}
+			normalizeProviderToolCallEnvelopes(msg.ToolCalls)
 			if len(msg.ToolCalls) > 0 && validateProviderToolCalls(msg.ToolCalls) == nil {
 				choice.FinishReason = "tool_calls"
 			}
-			if msg.FunctionCall != nil && validateProviderToolCalls([]provider.ToolCall{{Function: *msg.FunctionCall}}) == nil {
+			if msg.FunctionCall != nil && validateProviderFunctionCall(*msg.FunctionCall, 0) == nil {
 				choice.FinishReason = "function_call"
+			}
+			if len(msg.ToolCalls) == 0 && msg.FunctionCall == nil {
+				choice.FinishReason = visualStudioFinishReason(choice.FinishReason)
 			}
 		}
 	}
@@ -163,6 +206,10 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 			continue
 		}
 		if normalizeRawToolChoice(choice, message, allowedTools) {
+			changed = true
+		}
+		if finishReason, exists := choice["finish_reason"]; !exists || finishReason == nil {
+			choice["finish_reason"] = "stop"
 			changed = true
 		}
 		if calls, ok := message["tool_calls"].([]any); ok && len(calls) > 0 {
@@ -214,8 +261,8 @@ func asString(value any) string {
 }
 
 func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, resp *provider.ChatResponse) error {
-	if resp == nil || len(resp.Choices) == 0 {
-		return fmt.Errorf("chat response has no choices")
+	if err := validateProviderResponseToolContract(resp); err != nil {
+		return err
 	}
 	choice := resp.Choices[0]
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -296,7 +343,7 @@ func mergeOpenAIStreamToolCalls(acc map[int]map[string]any, chunks []any) {
 		}
 		current := acc[index]
 		if current == nil {
-			current = map[string]any{"index": float64(index), "type": "function"}
+			current = map[string]any{"index": float64(index)}
 			acc[index] = current
 		}
 		mergeToolCallChunk(current, chunk)
@@ -317,7 +364,8 @@ func mergeToolCallChunk(current map[string]any, chunk map[string]any) {
 				current["function"] = fnCurrent
 			}
 			for fnKey, fnValue := range fnChunk {
-				if fnKey == "arguments" {
+				switch fnKey {
+				case "arguments":
 					existing, _ := fnCurrent[fnKey].(string)
 					fragment, ok := fnValue.(string)
 					if !ok {
@@ -326,17 +374,40 @@ func mergeToolCallChunk(current map[string]any, chunk map[string]any) {
 					if ok {
 						fnCurrent[fnKey] = existing + fragment
 					}
-					continue
-				}
-				if isEmptyToolChunkValue(fnCurrent[fnKey]) {
-					fnCurrent[fnKey] = fnValue
+				case "name":
+					mergeOpenAIIdentityFragment(fnCurrent, fnKey, fnValue)
+				default:
+					if isEmptyToolChunkValue(fnCurrent[fnKey]) {
+						fnCurrent[fnKey] = fnValue
+					}
 				}
 			}
+		case "id":
+			mergeOpenAIIdentityFragment(current, key, value)
 		default:
 			if isEmptyToolChunkValue(current[key]) {
 				current[key] = value
 			}
 		}
+	}
+}
+
+func mergeOpenAIIdentityFragment(target map[string]any, key string, value any) {
+	fragment, ok := value.(string)
+	if !ok || fragment == "" {
+		return
+	}
+	existing, _ := target[key].(string)
+	switch {
+	case existing == "":
+		target[key] = fragment
+	case existing == fragment:
+		return
+	case strings.HasPrefix(fragment, existing):
+		// 少数兼容上游发送累计值而不是纯 delta。
+		target[key] = fragment
+	default:
+		target[key] = existing + fragment
 	}
 }
 
@@ -452,6 +523,7 @@ type openAIStreamToolSanitizer struct {
 	toolChunks    map[int]map[int]map[string]any
 	toolKinds     map[int]string
 	finishReasons map[int]string
+	syntheticIDs  map[int]map[int]string
 	sawDone       bool
 	started       bool
 	err           error
@@ -463,6 +535,7 @@ func newOpenAIStreamToolSanitizer(allowedTools map[string]struct{}) *openAIStrea
 		toolChunks:    map[int]map[int]map[string]any{},
 		toolKinds:     map[int]string{},
 		finishReasons: map[int]string{},
+		syntheticIDs:  map[int]map[int]string{},
 	}
 }
 
@@ -539,14 +612,33 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 			choiceToolChunks = map[int]map[string]any{}
 			s.toolChunks[choiceIndex] = choiceToolChunks
 		}
-		if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
+		calls, hasModernCalls := delta["tool_calls"].([]any)
+		hasModernCalls = hasModernCalls && len(calls) > 0
+		functionCall, hasLegacyCall := delta["function_call"].(map[string]any)
+		hasLegacyCall = hasLegacyCall && functionCall != nil
+		if hasModernCalls && hasLegacyCall {
+			s.err = fmt.Errorf("SSE choice %d 同时包含 tool_calls 和 function_call", choiceIndex)
+			return line
+		}
+		if hasModernCalls {
+			if s.toolKinds[choiceIndex] == "function_call" {
+				s.err = fmt.Errorf("SSE choice %d 混用了 tool_calls 和 function_call", choiceIndex)
+				return line
+			}
 			s.toolKinds[choiceIndex] = "tool_calls"
-			if normalized, _ := normalizeRawToolCalls(calls, s.allowedTools); normalized {
+			if s.normalizeStreamToolCallEnvelopes(choiceIndex, calls, choiceToolChunks) {
+				changed = true
+			}
+			if normalizeRawStreamToolCalls(calls, s.allowedTools) {
 				changed = true
 			}
 			mergeOpenAIStreamToolCalls(choiceToolChunks, calls)
 		}
-		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
+		if hasLegacyCall {
+			if s.toolKinds[choiceIndex] == "tool_calls" {
+				s.err = fmt.Errorf("SSE choice %d 混用了 tool_calls 和 function_call", choiceIndex)
+				return line
+			}
 			if s.toolKinds[choiceIndex] == "" {
 				s.toolKinds[choiceIndex] = "function_call"
 			}
@@ -580,6 +672,53 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 		return line
 	}
 	return "data: " + string(normalized)
+}
+
+func (s *openAIStreamToolSanitizer) normalizeStreamToolCallEnvelopes(
+	choiceIndex int,
+	calls []any,
+	currentCalls map[int]map[string]any,
+) bool {
+	generated := s.syntheticIDs[choiceIndex]
+	if generated == nil {
+		generated = map[int]string{}
+		s.syntheticIDs[choiceIndex] = generated
+	}
+	changed := false
+	for _, raw := range calls {
+		call, _ := raw.(map[string]any)
+		if call == nil {
+			continue
+		}
+		callIndex := openAIStreamToolCallIndex(call)
+		current := currentCalls[callIndex]
+		if current == nil {
+			id, _ := call["id"].(string)
+			if strings.TrimSpace(id) == "" {
+				id = newSyntheticToolCallID()
+				call["id"] = id
+				generated[callIndex] = id
+				changed = true
+			}
+			typeName, _ := call["type"].(string)
+			trimmedType := strings.TrimSpace(typeName)
+			missingType := trimmedType == ""
+			nonCanonicalFunctionType := strings.EqualFold(trimmedType, "function") && typeName != "function"
+			if missingType || nonCanonicalFunctionType {
+				call["type"] = "function"
+				changed = true
+			}
+			continue
+		}
+		if generated[callIndex] != "" {
+			if _, exists := call["id"]; exists {
+				// 已向下游发送 synthetic id 后不能再混入迟到的上游 id。
+				delete(call, "id")
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func (s *openAIStreamToolSanitizer) hasCompleteToolCalls(choiceIndex int) bool {

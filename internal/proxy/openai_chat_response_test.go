@@ -130,34 +130,15 @@ func TestLooksLikeSSEBodyRejectsOrdinaryBodiesWithSSELikeText(t *testing.T) {
 	}
 }
 
-func TestOpenAIStreamBodyToChatResponseConvertsEmptyChoiceSSE(t *testing.T) {
+func TestOpenAIStreamBodyToChatResponseRejectsEmptyChoiceSSE(t *testing.T) {
 	body := []byte(strings.Join([]string{
 		`data: {"id":"","object":"chat.completion.chunk","model":"gpt-5.5","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":0,"total_tokens":12}}`,
 		`data: [DONE]`,
 		``,
 	}, "\n"))
 
-	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
-	if err != nil {
-		t.Fatalf("openAIStreamBodyToChatResponse returned error: %v", err)
-	}
-	if strings.Contains(string(converted), "data:") {
-		t.Fatalf("converted response must be JSON, got %s", string(converted))
-	}
-	var parsed struct {
-		Choices []struct {
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(converted, &parsed); err != nil {
-		t.Fatalf("unmarshal converted response: %v", err)
-	}
-	if len(parsed.Choices) != 1 || parsed.Choices[0].Message.Role != "assistant" || parsed.Choices[0].FinishReason != "stop" {
-		t.Fatalf("converted response = %s", string(converted))
+	if converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil); err == nil {
+		t.Fatalf("empty SSE choices returned success: %s", string(converted))
 	}
 }
 

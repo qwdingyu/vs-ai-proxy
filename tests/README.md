@@ -89,6 +89,9 @@ STREAMING_OLLAMA_OK
 - 运行 provider、converter、proxy 的正式工具协议契约测试。
 - 覆盖 modern/legacy、raw/SSE、BOM、错误帧、截断、object arguments、DSML 和 Ollama。
 - 覆盖 alternate mode 的 legacy `function_call` 保真，以及截断 DSML 不得重新变成可执行工具。
+- 覆盖任意声明工具、复杂 schema/history/tool_choice、缺失 id/type 修复、parallel tool calls、identity/arguments 分片、固定种子随机压力和 5 MiB 单 SSE 事件。
+- 覆盖 OpenAI/Ollama 空响应、无终态 EOF，以及截断响应同时残留 modern/legacy 调用的防执行规则。
+- 覆盖 OpenAI/Ollama 双向转换的逻辑多行 SSE、synthetic finish、截断/残缺工具尾部和 typed fallback 空响应。
 - 再运行 OpenAI/Ollama 本地流式冒烟。
 
 运行：
@@ -104,6 +107,8 @@ TOOL_CALL_RELEASE_CHECK_OK
 ```
 
 维护规则：能稳定复现工具调用核心缺陷的测试必须保存在仓库，并以 `TestToolProtocolContract` 或对应低层正式测试进入本脚本；禁止只写 `/tmp` 测试或 overlay，验证后再删除。
+
+通用工具契约测试位于 `internal/proxy/copilot_tool_contract_matrix_test.go`。测试中的常规工具名只用于覆盖不同使用场景；生产实现不得读取这份列表或要求新工具先登记。
 
 ### 2.4 `i18n_runtime_test.js`
 

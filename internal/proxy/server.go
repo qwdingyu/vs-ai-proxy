@@ -1315,6 +1315,12 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 	if err := eventProcessor.finish(); err != nil {
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 	}
+	if err := validateOpenAIStreamCompletion(acc, streamToolSanitizer); err != nil {
+		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+	}
+	if err := eventProcessor.commit(); err != nil {
+		return fmt.Errorf("写入响应失败: OpenAI SSE: %w", err)
+	}
 	s.cacheStreamAccumulator(acc)
 	setStreamToolDiagnosticHeader(w, acc)
 	return nil
@@ -1339,7 +1345,12 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 	}
 
 	scanner := newStreamScanner(stream)
-	acc := newStreamReasoningAccumulator()
+	ollamaAcc := newStreamReasoningAccumulator()
+	openAIAcc := newStreamReasoningAccumulator()
+	streamToolSanitizer := newOpenAIStreamToolSanitizer(allowedToolNames(req))
+	eventProcessor := newOpenAIStreamEventProcessor(w, flusher, openAIAcc, streamToolSanitizer)
+	ollamaToolCallIDs := map[int]string{}
+	var terminalChunk []byte
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
@@ -1349,21 +1360,27 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 		chunk, parseErr := converter.ParseOllamaStreamChunk(line)
 		if parseErr != nil {
 			if errors.Is(parseErr, converter.ErrStreamDone) {
+				ollamaAcc.finished = true
 				break
 			}
 			return fmt.Errorf("解析 Ollama 流失败: %w", parseErr)
 		}
-		acc.consumeOllamaChunk(chunk)
+		if normalizeErr := normalizeOllamaStreamToolCallEnvelopes(chunk, ollamaToolCallIDs); normalizeErr != nil {
+			return fmt.Errorf("解析 Ollama 流失败: %w", normalizeErr)
+		}
+		ollamaAcc.consumeOllamaChunk(chunk)
 
 		out, convErr := converter.ConvertOllamaChunkToOpenAISSE(chunk, req.Model)
 		if convErr != nil {
 			return convErr
 		}
-
-		if _, writeErr := w.Write(append(out, '\n')); writeErr != nil {
-			return writeErr
+		if done, _ := chunk["done"].(bool); done {
+			terminalChunk = out
+			break
 		}
-		flusher.Flush()
+		if processErr := consumeConvertedOpenAISSEEvent(eventProcessor, out); processErr != nil {
+			return fmt.Errorf("解析 Ollama 工具流失败: %w", processErr)
+		}
 
 		if r.Context().Err() != nil {
 			return r.Context().Err()
@@ -1373,12 +1390,31 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-	s.cacheStreamAccumulator(acc)
-	setStreamToolDiagnosticHeader(w, acc)
-	if _, writeErr := io.WriteString(w, "data: [DONE]\n\n"); writeErr != nil {
-		return writeErr
+	if err := validateOllamaStreamCompletion(ollamaAcc); err != nil {
+		return fmt.Errorf("解析 Ollama 流失败: %w", err)
 	}
-	flusher.Flush()
+	if len(terminalChunk) > 0 {
+		if err := consumeConvertedOpenAISSEEvent(eventProcessor, terminalChunk); err != nil {
+			return fmt.Errorf("解析 Ollama 工具终态失败: %w", err)
+		}
+	}
+	if err := eventProcessor.consumeLine("data: [DONE]"); err != nil {
+		return fmt.Errorf("解析 Ollama 工具终态失败: %w", err)
+	}
+	if err := eventProcessor.consumeLine(""); err != nil {
+		return fmt.Errorf("解析 Ollama 工具终态失败: %w", err)
+	}
+	if err := eventProcessor.finish(); err != nil {
+		return fmt.Errorf("解析 Ollama 工具流失败: %w", err)
+	}
+	if err := validateOpenAIStreamCompletion(openAIAcc, streamToolSanitizer); err != nil {
+		return fmt.Errorf("解析 Ollama 工具流失败: %w", err)
+	}
+	if err := eventProcessor.commit(); err != nil {
+		return fmt.Errorf("写入 Ollama 工具流失败: %w", err)
+	}
+	s.cacheStreamAccumulator(ollamaAcc)
+	setStreamToolDiagnosticHeader(w, ollamaAcc)
 	return nil
 }
 
@@ -1435,60 +1471,47 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	finishReason := "stop"
 	scanner := newStreamScanner(stream)
 	acc := newStreamReasoningAccumulator()
 	streamToolSanitizer := newOpenAIStreamToolSanitizer(allowedToolNames(req))
+	ollamaWriter := &openAIToOllamaStreamWriter{
+		writer:       w,
+		model:        req.Model,
+		finishReason: "stop",
+	}
+	eventProcessor := newOpenAIStreamEventProcessor(
+		ollamaWriter,
+		flusher,
+		acc,
+		streamToolSanitizer,
+	)
 	for scanner.Scan() {
-		line := normalizeOpenAIStreamLineForVisualStudioWithToolState(scanner.Text(), streamToolSanitizer)
-		if streamToolSanitizer.err != nil {
-			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", streamToolSanitizer.err)
-		}
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-
-		payload := strings.TrimSpace(line[5:])
-		if payload == "[DONE]" {
-			break
-		}
-
-		chunk, err := parseOpenAIStreamPayload(payload)
-		if err != nil {
+		if err := eventProcessor.consumeLine(scanner.Text()); err != nil {
 			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 		}
-		acc.consumeOpenAIChunk(chunk)
-		if chunk.FinishReason != "" {
-			finishReason = chunk.FinishReason
-		}
-		if chunk.Content == "" && len(chunk.ToolCalls) == 0 {
-			continue
-		}
-
-		out, err := buildOllamaStreamChunk(req.Model, chunk.Content, chunk.ToolCalls, false, "")
-		if err != nil {
-			return err
-		}
-		if _, writeErr := w.Write(append(out, '\n')); writeErr != nil {
-			return writeErr
-		}
-		flusher.Flush()
-
 		if r.Context().Err() != nil {
 			return r.Context().Err()
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if flushErr := eventProcessor.flushPendingBeforeReadError(); flushErr != nil {
+			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", flushErr)
+		}
 		return err
+	}
+	if err := eventProcessor.finish(); err != nil {
+		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+	}
+	if err := validateOpenAIStreamCompletion(acc, streamToolSanitizer); err != nil {
+		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+	}
+	if err := eventProcessor.commit(); err != nil {
+		return fmt.Errorf("写入响应失败: Ollama NDJSON: %w", err)
 	}
 	s.cacheStreamAccumulator(acc)
 	setStreamToolDiagnosticHeader(w, acc)
 
-	out, err := buildOllamaStreamChunk(req.Model, "", nil, true, finishReason)
+	out, err := buildOllamaStreamChunk(req.Model, "", nil, true, ollamaWriter.finishReason)
 	if err != nil {
 		return err
 	}
@@ -1499,9 +1522,88 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 	return nil
 }
 
+func consumeConvertedOpenAISSEEvent(processor *openAIStreamEventProcessor, event []byte) error {
+	line := strings.TrimRight(string(event), "\r\n")
+	if err := processor.consumeLine(line); err != nil {
+		return err
+	}
+	return processor.consumeLine("")
+}
+
+type openAIToOllamaStreamWriter struct {
+	writer       io.Writer
+	model        string
+	finishReason string
+}
+
+func (w *openAIToOllamaStreamWriter) Write(data []byte) (int, error) {
+	var payload strings.Builder
+	flushPayload := func() error {
+		if payload.Len() == 0 {
+			return nil
+		}
+		err := w.writePayload(strings.TrimSpace(payload.String()))
+		payload.Reset()
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "data:") {
+			if payload.Len() > 0 {
+				if err := flushPayload(); err != nil {
+					return 0, err
+				}
+			}
+			payload.WriteString(strings.TrimSpace(trimmed[5:]))
+			continue
+		}
+		if payload.Len() == 0 {
+			continue
+		}
+		if trimmed == "" && (json.Valid([]byte(payload.String())) || strings.TrimSpace(payload.String()) == "[DONE]") {
+			if err := flushPayload(); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		payload.WriteByte('\n')
+		payload.WriteString(line)
+	}
+	if err := flushPayload(); err != nil {
+		return 0, err
+	}
+	return len(data), nil
+}
+
+func (w *openAIToOllamaStreamWriter) writePayload(payload string) error {
+	if payload == "" || payload == "[DONE]" {
+		return nil
+	}
+	chunk, err := parseOpenAIStreamPayload(payload)
+	if err != nil {
+		return err
+	}
+	if chunk.FinishReason != "" {
+		w.finishReason = chunk.FinishReason
+	}
+	if chunk.Content == "" && len(chunk.ToolCalls) == 0 {
+		return nil
+	}
+	out, err := buildOllamaStreamChunk(w.model, chunk.Content, chunk.ToolCalls, false, "")
+	if err != nil {
+		return err
+	}
+	if _, err := w.writer.Write(append(out, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
 func newStreamScanner(r io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	// direct SSE 的单事件上限必须和完整工具尾部的 64 MiB 总上限一致；
+	// Scanner 按需扩容，不会为普通小 chunk 预分配 64 MiB。
+	scanner.Buffer(make([]byte, 64*1024), int(maxAggregatedOpenAIStreamBytes))
 	return scanner
 }
 

@@ -104,8 +104,11 @@ func (s *Server) applyExecutionDefaults(
 
 	modelCfg, ok := findModelConfig(cfg, requestedModel, req.Model, prov.Name())
 	caps := provider.GetCapabilities(provider.CapabilityNameOf(prov))
+	hasDeclaredTools := len(req.Tools) > 0 || len(req.Extra["functions"]) > 0
 	if !ok {
-		s.applyGlobalDefaults(req)
+		if !hasDeclaredTools {
+			s.applyGlobalDefaults(req)
+		}
 		if !caps.SupportsTopK {
 			req.TopK = nil
 		}
@@ -152,7 +155,9 @@ func (s *Server) applyExecutionDefaults(
 		req.ReasoningEffort = ""
 	}
 
-	s.applyGlobalDefaults(req)
+	if !hasDeclaredTools {
+		s.applyGlobalDefaults(req)
+	}
 }
 
 func (s *Server) applyGlobalDefaults(req *provider.ChatRequest) {

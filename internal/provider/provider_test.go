@@ -536,6 +536,76 @@ func TestCollectOpenAIChatSSEAggregatesLegacyFunctionCall(t *testing.T) {
 	}
 }
 
+func TestCollectOpenAIChatSSEAggregatesFragmentedToolIdentity(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{` +
+			`"index":0,"id":"call_","type":"function","function":{` +
+			`"name":"mcp_workspace_","arguments":"{\"query\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{` +
+			`"index":0,"id":"42","function":{` +
+			`"name":"symbol","arguments":"\"needle\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	resp, err := CollectOpenAIChatSSE(strings.NewReader(body), "gpt-test", 0)
+	if err != nil {
+		t.Fatalf("collect fragmented tool identity: %v", err)
+	}
+	call := resp.Choices[0].Message.ToolCalls[0]
+	hasExpectedEnvelope := call.ID == "call_42" && call.Type == "function"
+	hasExpectedFunction := call.Function.Name == "mcp_workspace_symbol" &&
+		call.Function.Arguments == `{"query":"needle"}`
+	if !hasExpectedEnvelope || !hasExpectedFunction {
+		t.Fatalf("fragmented tool identity was not merged: %#v", call)
+	}
+}
+
+func TestCollectOpenAIChatSSEAggregatesFragmentedLegacyFunctionName(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"function_call":{` +
+			`"name":"workspace_","arguments":"{\"query\":"}},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"function_call":{` +
+			`"name":"lookup","arguments":"\"needle\"}"}},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"function_call"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	resp, err := CollectOpenAIChatSSE(strings.NewReader(body), "gpt-test", 0)
+	if err != nil {
+		t.Fatalf("collect fragmented legacy function name: %v", err)
+	}
+	call := resp.Choices[0].Message.FunctionCall
+	if call == nil {
+		t.Fatal("fragmented legacy function call is missing")
+	}
+	hasExpectedFunction := call.Name == "workspace_lookup" &&
+		call.Arguments == `{"query":"needle"}`
+	if !hasExpectedFunction {
+		t.Fatalf("fragmented legacy function name was not merged: %#v", call)
+	}
+}
+
+func TestNormalizeAndValidateChatResponseToolsRejectsInvalidToolType(t *testing.T) {
+	resp := &ChatResponse{Choices: []Choice{{
+		Message: Message{ToolCalls: []ToolCall{{
+			ID:   "call_invalid",
+			Type: "computer",
+			Function: FunctionCall{
+				Name:      "create_file",
+				Arguments: `{"path":"a.txt"}`,
+			},
+		}}},
+		FinishReason: "tool_calls",
+	}}}
+
+	if err := normalizeAndValidateChatResponseTools(resp); err == nil {
+		t.Fatal("invalid provider tool type must not pass the typed response boundary")
+	}
+}
+
 func TestCollectOpenAIChatSSEHidesIncompleteToolCallOnTruncation(t *testing.T) {
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,

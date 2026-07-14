@@ -51,6 +51,68 @@ func TestApplyExecutionDefaultsStripsUnsupportedTopK(t *testing.T) {
 	}
 }
 
+func TestApplyExecutionDefaultsDoesNotInventCopilotOutputLimit(t *testing.T) {
+	server := &Server{
+		config:         &config.AppConfig{},
+		reasoningCache: newReasoningCache(),
+	}
+	req := &provider.ChatRequest{
+		Model: "gpt-tool-model",
+		Tools: []provider.Tool{{
+			Type:     "function",
+			Function: provider.ToolFunc{Name: "mcp_generate_source"},
+		}},
+	}
+
+	server.applyExecutionDefaults(server.config, req, "gpt-tool-model", &stubProvider{name: "openai"})
+
+	if req.MaxTokens != nil || req.Temperature != nil {
+		t.Fatalf("global defaults must remain unset: max_tokens=%v temperature=%v", req.MaxTokens, req.Temperature)
+	}
+	profileMax := 131072
+	server.applyProfileDefaults(req, provider.ModelProfile{MaxTokens: &profileMax}, &stubProvider{name: "openai"})
+	if req.MaxTokens == nil || *req.MaxTokens != profileMax {
+		t.Fatalf("profile max_tokens = %v, want %d", req.MaxTokens, profileMax)
+	}
+
+	legacyReq := &provider.ChatRequest{
+		Model: "gpt-legacy-tool-model",
+		Extra: map[string]json.RawMessage{
+			"functions": json.RawMessage(`[{"name":"legacy_generate_source"}]`),
+		},
+	}
+	server.applyExecutionDefaults(
+		server.config,
+		legacyReq,
+		"gpt-legacy-tool-model",
+		&stubProvider{name: "openai"},
+	)
+	if legacyReq.MaxTokens != nil || legacyReq.Temperature != nil {
+		t.Fatalf(
+			"legacy tool defaults must remain unset: max_tokens=%v temperature=%v",
+			legacyReq.MaxTokens,
+			legacyReq.Temperature,
+		)
+	}
+}
+
+func TestApplyExecutionDefaultsRetainsPlainChatDefaults(t *testing.T) {
+	server := &Server{
+		config:         &config.AppConfig{},
+		reasoningCache: newReasoningCache(),
+	}
+	req := &provider.ChatRequest{Model: "gpt-chat-model"}
+
+	server.applyExecutionDefaults(server.config, req, "gpt-chat-model", &stubProvider{name: "openai"})
+
+	if req.MaxTokens == nil || *req.MaxTokens != 4096 {
+		t.Fatalf("plain chat max_tokens = %v, want 4096", req.MaxTokens)
+	}
+	if req.Temperature == nil || *req.Temperature != 0.7 {
+		t.Fatalf("plain chat temperature = %v, want 0.7", req.Temperature)
+	}
+}
+
 func TestApplyExecutionDefaultsOverrideClientParams(t *testing.T) {
 	server := &Server{
 		config: &config.AppConfig{
