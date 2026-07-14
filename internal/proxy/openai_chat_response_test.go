@@ -191,8 +191,8 @@ func TestOpenAIStreamBodyToChatResponsePreservesToolCalls(t *testing.T) {
 	}
 }
 
-func TestOpenAIStreamBodyToChatResponsePreservesExplicitNonToolFinishReason(t *testing.T) {
-	for _, finishReason := range []string{"length", "content_filter", "stop"} {
+func TestOpenAIStreamBodyToChatResponsePreservesExplicitTruncationFinishReason(t *testing.T) {
+	for _, finishReason := range []string{"length", "content_filter"} {
 		t.Run(finishReason, func(t *testing.T) {
 			body := []byte(strings.Join([]string{
 				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
@@ -212,7 +212,24 @@ func TestOpenAIStreamBodyToChatResponsePreservesExplicitNonToolFinishReason(t *t
 			if got := parsed.Choices[0].FinishReason; got != finishReason {
 				t.Fatalf("finish_reason = %q, want %q; body=%s", got, finishReason, string(converted))
 			}
+			if calls := parsed.Choices[0].Message.ToolCalls; len(calls) != 0 {
+				t.Fatalf("truncated tool calls must not be executable: %#v", calls)
+			}
 		})
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseRejectsIncompleteToolCallWithStop(t *testing.T) {
+	body := []byte(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", map[string]struct{}{"create_file": {}})
+	if err == nil || converted != nil {
+		t.Fatalf("incomplete tool call with stop must fail: converted=%s err=%v", string(converted), err)
 	}
 }
 
@@ -740,8 +757,8 @@ func TestNormalizeOpenAIStreamLinePreservesLegacyContinuationForUndeclaredFuncti
 		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 		sanitizer,
 	)
-	if !strings.Contains(finish, `"finish_reason":"tool_calls"`) {
-		t.Fatalf("legacy finish_reason should remain tool_calls in stable mode: %s", finish)
+	if !strings.Contains(finish, `"finish_reason":"function_call"`) {
+		t.Fatalf("legacy finish_reason should match function_call payload: %s", finish)
 	}
 }
 

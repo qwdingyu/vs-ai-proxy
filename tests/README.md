@@ -81,7 +81,29 @@ bash tests/streaming_ollama_test.sh
 STREAMING_OLLAMA_OK
 ```
 
-### 2.3 `useai_large_request_diagnostic.sh`
+### 2.3 `tool_call_release_check.sh`
+
+用途：
+
+- 运行 provider、converter、proxy 的正式工具协议契约测试。
+- 覆盖 modern/legacy、raw/SSE、BOM、错误帧、截断、object arguments、DSML 和 Ollama。
+- 再运行 OpenAI/Ollama 本地流式冒烟。
+
+运行：
+
+```bash
+make tool-check
+```
+
+成功标志：
+
+```text
+TOOL_CALL_RELEASE_CHECK_OK
+```
+
+维护规则：能稳定复现工具调用核心缺陷的测试必须保存在仓库，并以 `TestToolProtocolContract` 或对应低层正式测试进入本脚本；禁止只写 `/tmp` 测试或 overlay，验证后再删除。
+
+### 2.4 `useai_large_request_diagnostic.sh`
 
 用途：
 
@@ -177,7 +199,7 @@ tests/useai_large_request_diagnostic.sh
 - `stream_state=upstream_connected`：已连上上游但未向 VS 写出首个 chunk；优先查上游首 token 或 new-api 渠道排队。
 - `stream_state=downstream_started`：已经向 VS 写出过 chunk；后续失败不能安全自动重试。
 
-### 2.4 `large_request_matrix_diagnostic.sh`
+### 2.5 `large_request_matrix_diagnostic.sh`
 
 用途：
 

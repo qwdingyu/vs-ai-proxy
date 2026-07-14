@@ -434,7 +434,7 @@ func TestVisualStudioToolExecutionE2EOpenAIStreamLegacyFunctionCall(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			prov := newFakeProvider("useai", true, []string{"gpt-test"}, nil, tt.stream)
 			calls, finishReason := postOpenAIStreamForToolExecution(t, prov)
-			if len(calls) != 1 || calls[0].Function.Name != tt.name || finishReason != "tool_calls" {
+			if len(calls) != 1 || calls[0].Function.Name != tt.name || finishReason != "function_call" {
 				t.Fatalf("VS stream client did not receive executable legacy function_call: calls=%#v finish=%q", calls, finishReason)
 			}
 			runtime := newVisualStudioToolRuntime()

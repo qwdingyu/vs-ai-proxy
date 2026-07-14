@@ -1009,3 +1009,11 @@ Windows 后台替换脚本启动成功后，主进程必须主动退出，让脚
 2. 查看 `response_tools` 是否返回了 `create_file`。
 3. 如果响应是 `function_call` 而不是 `tool_calls`，确认版本是否包含本修复。
 4. 如果代理日志显示 4xx/5xx/timeout，则问题发生在模型响应前，不是 `create_file` 执行阶段。
+
+## 2026-07-14 追加：工具响应协议统一与正式契约测试
+
+后续全局审查确认，旧门禁对错误帧、参数截断、HTTP 200 error、BOM、late DSML、Ollama 非流式工具和 object arguments 的覆盖不足。曾用于复现的 `/tmp` overlay 测试不应删除，现已重建为仓库正式 `TestToolProtocolContract` 并纳入 `make tool-check`。
+
+本次不再按 provider 打补丁：标准 OpenAI SSE 统一由 `internal/provider.CollectOpenAIChatSSE` 解析，proxy 只保留 VS/DSML 业务归一化。完整工具调用统一使用工具结束原因；`length/content_filter` 不暴露可执行工具；顶层/SSE error 不再记为成功。
+
+详细背景、根因、排查过程、解决方案、测试矩阵和剩余边界见：`22_VS_Copilot工具调用响应协议统一与测试盲区_20260714.md`。

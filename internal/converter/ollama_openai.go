@@ -64,10 +64,17 @@ func ConvertOllamaChunkToOpenAISSE(chunk map[string]any, requestModel string) ([
 	}
 
 	if done, _ := chunk["done"].(bool); done {
+		finishReason := getFinishReason(chunk)
+		finishDelta := map[string]any{}
+		if finishReason == "tool_calls" {
+			if calls, ok := message["tool_calls"]; ok && calls != nil {
+				finishDelta["tool_calls"] = calls
+			}
+		}
 		streamChunk["choices"] = []map[string]any{{
 			"index":         0,
-			"delta":         map[string]any{},
-			"finish_reason": getFinishReason(chunk),
+			"delta":         finishDelta,
+			"finish_reason": finishReason,
 		}}
 
 		promptTokens := int(getFloat(chunk, "prompt_eval_count", 0))
@@ -128,6 +135,10 @@ func OllamaChatResponse2OpenAI(body []byte, requestModel string) ([]byte, error)
 
 	message := buildAssistantMessage(src)
 	created := int64(getFloat(src, "created_at", float64(timeNowUnix())))
+	finishReason := getFinishReason(src)
+	if isTruncatedFinishReason(finishReason) {
+		delete(message, "tool_calls")
+	}
 
 	resp := map[string]any{
 		"id":      buildChatCompletionID(),
@@ -137,7 +148,7 @@ func OllamaChatResponse2OpenAI(body []byte, requestModel string) ([]byte, error)
 		"choices": []map[string]any{{
 			"index":         0,
 			"message":       message,
-			"finish_reason": getFinishReason(src),
+			"finish_reason": finishReason,
 		}},
 	}
 
@@ -333,7 +344,7 @@ func buildAssistantMessage(src map[string]any) map[string]any {
 	}
 
 	if v, ok := messageSrc["tool_calls"]; ok && v != nil {
-		message["tool_calls"] = v
+		message["tool_calls"] = normalizeToolCallArguments(v)
 	}
 	if reasoning, ok := messageSrc["thinking"].(string); ok && reasoning != "" {
 		message["reasoning_content"] = reasoning
@@ -344,14 +355,78 @@ func buildAssistantMessage(src map[string]any) map[string]any {
 	return message
 }
 
+func normalizeToolCallArguments(value any) any {
+	calls, ok := value.([]any)
+	if !ok {
+		return value
+	}
+
+	normalized := make([]any, 0, len(calls))
+	for _, item := range calls {
+		call, ok := item.(map[string]any)
+		if !ok {
+			normalized = append(normalized, item)
+			continue
+		}
+
+		callCopy := make(map[string]any, len(call))
+		for key, field := range call {
+			callCopy[key] = field
+		}
+		function, ok := call["function"].(map[string]any)
+		if !ok {
+			normalized = append(normalized, callCopy)
+			continue
+		}
+
+		functionCopy := make(map[string]any, len(function))
+		for key, field := range function {
+			functionCopy[key] = field
+		}
+		arguments, exists := function["arguments"]
+		if exists && arguments != nil {
+			if _, isString := arguments.(string); !isString {
+				// OpenAI 工具协议要求 arguments 是 JSON 字符串；Ollama 原生接口常直接返回对象。
+				if encoded, err := json.Marshal(arguments); err == nil {
+					functionCopy["arguments"] = string(encoded)
+				}
+			}
+		}
+		callCopy["function"] = functionCopy
+		normalized = append(normalized, callCopy)
+	}
+
+	return normalized
+}
+
 func getFinishReason(src map[string]any) string {
+	finishReason := "stop"
 	switch v := src["done_reason"].(type) {
 	case string:
 		if strings.TrimSpace(v) != "" {
-			return v
+			finishReason = strings.ToLower(strings.TrimSpace(v))
 		}
 	}
-	return "stop"
+	if isTruncatedFinishReason(finishReason) {
+		return finishReason
+	}
+	messageSrc := src
+	if nested, ok := src["message"].(map[string]any); ok && nested != nil {
+		messageSrc = nested
+	}
+	if calls, ok := messageSrc["tool_calls"].([]any); ok && len(calls) > 0 {
+		return "tool_calls"
+	}
+	return finishReason
+}
+
+func isTruncatedFinishReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "content_filter":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildChatCompletionID() string {

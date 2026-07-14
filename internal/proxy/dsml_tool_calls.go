@@ -153,7 +153,7 @@ func isAllowedDSMLTool(name string, allowedTools map[string]struct{}) bool {
 	if len(allowedTools) == 0 {
 		return false
 	}
-	_, ok := allowedTools[strings.ToLower(strings.TrimSpace(name))]
+	_, ok := declaredToolName(name, allowedTools)
 	return ok
 }
 
@@ -188,7 +188,7 @@ func allowedToolNames(req *provider.ChatRequest) map[string]struct{} {
 		return allowed
 	}
 	for _, tool := range req.Tools {
-		name := strings.ToLower(strings.TrimSpace(tool.Function.Name))
+		name := strings.TrimSpace(tool.Function.Name)
 		if name != "" {
 			allowed[name] = struct{}{}
 		}
@@ -199,7 +199,7 @@ func allowedToolNames(req *provider.ChatRequest) map[string]struct{} {
 		}
 		if json.Unmarshal(raw, &functions) == nil {
 			for _, function := range functions {
-				name := strings.ToLower(strings.TrimSpace(function.Name))
+				name := strings.TrimSpace(function.Name)
 				if name != "" {
 					allowed[name] = struct{}{}
 				}

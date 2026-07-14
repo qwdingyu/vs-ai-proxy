@@ -1,24 +1,21 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
 
 const maxAggregatedOpenAIStreamBytes int64 = 64 << 20
 
-var errOpenAIStreamTooLarge = errors.New("SSE response exceeds aggregation limit")
+var errOpenAIStreamTooLarge = provider.ErrOpenAIStreamTooLarge
 
 type rawOpenAIChatProvider interface {
 	ChatRaw(ctx context.Context, req *provider.ChatRequest) ([]byte, error)
@@ -102,7 +99,9 @@ func collectOpenAIStreamReader(stream io.Reader, model string, allowedTools map[
 		return nil, err
 	}
 	message := resp.Choices[0].Message
-	if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.Reasoning) == "" && len(message.ToolCalls) == 0 {
+	if strings.TrimSpace(message.Content) == "" &&
+		strings.TrimSpace(message.Reasoning) == "" &&
+		len(message.ToolCalls) == 0 && message.FunctionCall == nil {
 		return nil, fmt.Errorf("SSE response has no content or tool calls")
 	}
 	return resp, nil
@@ -113,121 +112,32 @@ func aggregateOpenAIStreamReader(stream io.Reader, model string, allowedTools ma
 }
 
 func aggregateOpenAIStreamReaderWithLimit(stream io.Reader, model string, allowedTools map[string]struct{}, maxBytes int64) (*provider.ChatResponse, error) {
-	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var content strings.Builder
-	var reasoning strings.Builder
-	toolChunks := map[int]map[string]any{}
-	finishReason := "stop"
-	explicitFinishReason := false
-	parsedPayload := false
-	sawDone := false
-	var scannedBytes int64
-
-	for scanner.Scan() {
-		scannedBytes += int64(len(scanner.Bytes())) + 1
-		if scannedBytes > maxBytes {
-			return nil, fmt.Errorf("%w: maximum %d bytes", errOpenAIStreamTooLarge, maxBytes)
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(line[5:])
-		if payload == "" {
-			continue
-		}
-		if payload == "[DONE]" {
-			sawDone = true
-			break
-		}
-		chunk, err := parseOpenAIStreamPayload(payload)
-		if err != nil {
-			return nil, fmt.Errorf("invalid SSE data payload: %w", err)
-		}
-		parsedPayload = true
-		content.WriteString(chunk.Content)
-		reasoning.WriteString(chunk.Reasoning)
-		mergeOpenAIStreamToolCalls(toolChunks, chunk.ToolCalls)
-		if chunk.FinishReason != "" {
-			finishReason = chunk.FinishReason
-			explicitFinishReason = true
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	resp, err := provider.CollectOpenAIChatSSE(stream, model, maxBytes)
+	if err != nil {
 		return nil, err
-	}
-	if !parsedPayload {
-		return nil, fmt.Errorf("SSE response has no JSON data payload")
-	}
-	if !explicitFinishReason && !sawDone {
-		return nil, fmt.Errorf("SSE response ended without finish_reason or [DONE]")
-	}
-
-	message := provider.Message{Role: "assistant", Content: content.String(), Reasoning: reasoning.String()}
-	if calls := buildProviderToolCalls(toolChunks); len(calls) > 0 {
-		message.ToolCalls = calls
-		if !explicitFinishReason || isOpenAIToolFinishReason(finishReason) {
-			if err := validateInferredToolCalls(calls); err != nil {
-				return nil, err
-			}
-			finishReason = "tool_calls"
-		}
-	}
-	if len(message.ToolCalls) == 0 {
-		calls, cleaned := parseDSMLToolCalls(message.Content, allowedTools)
-		if len(calls) > 0 {
-			message.Content = cleaned
-			message.ToolCalls = calls
-			if !explicitFinishReason || isOpenAIToolFinishReason(finishReason) {
-				finishReason = "tool_calls"
-			}
-		}
-	}
-
-	resp := &provider.ChatResponse{
-		ID:      fmt.Sprintf("chatcmpl-sse-%d", time.Now().Unix()),
-		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []provider.Choice{{
-			Index:        0,
-			Message:      message,
-			FinishReason: visualStudioFinishReason(finishReason),
-		}},
 	}
 	normalizeProviderSpecificToolCalls(resp, allowedTools)
 	return resp, nil
 }
 
-func isOpenAIToolFinishReason(finishReason string) bool {
-	switch strings.ToLower(strings.TrimSpace(finishReason)) {
-	case "tool_calls", "function_call":
-		return true
-	default:
-		return false
-	}
-}
-
-func validateInferredToolCalls(calls []provider.ToolCall) error {
-	for index, call := range calls {
-		if strings.TrimSpace(call.Function.Name) == "" {
-			return fmt.Errorf("incomplete tool call at index %d: missing function name", index)
-		}
-		arguments := strings.TrimSpace(call.Function.Arguments)
-		if arguments == "" || !json.Valid([]byte(arguments)) {
-			return fmt.Errorf("incomplete tool call at index %d: invalid function arguments", index)
-		}
-	}
-	return nil
-}
-
 func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse, allowedTools map[string]struct{}) {
 	if resp != nil {
 		for i := range resp.Choices {
-			msg := &resp.Choices[i].Message
+			choice := &resp.Choices[i]
+			msg := &choice.Message
 			canonicalizeProviderToolCallNames(msg.ToolCalls, allowedTools)
 			canonicalizeFunctionCallName(msg.FunctionCall, allowedTools)
+			if isOpenAITruncationFinishReason(choice.FinishReason) {
+				msg.ToolCalls = nil
+				msg.FunctionCall = nil
+				continue
+			}
+			if len(msg.ToolCalls) > 0 && validateProviderToolCalls(msg.ToolCalls) == nil {
+				choice.FinishReason = "tool_calls"
+			}
+			if msg.FunctionCall != nil && validateProviderToolCalls([]provider.ToolCall{{Function: *msg.FunctionCall}}) == nil {
+				choice.FinishReason = "function_call"
+			}
 		}
 	}
 	normalizeDSMLToolCallsInChatResponse(resp, allowedTools)
@@ -252,16 +162,13 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 		if message == nil {
 			continue
 		}
+		if normalizeRawToolChoice(choice, message, allowedTools) {
+			changed = true
+		}
 		if calls, ok := message["tool_calls"].([]any); ok && len(calls) > 0 {
-			if canonicalizeRawToolCallNames(calls, allowedTools) {
-				changed = true
-			}
 			continue
 		}
 		if functionCall, ok := message["function_call"].(map[string]any); ok && functionCall != nil {
-			if canonicalizeRawLegacyFunctionCall(functionCall, allowedTools) {
-				changed = true
-			}
 			name, _ := functionCall["name"].(string)
 			if strings.TrimSpace(name) == "" {
 				delete(message, "function_call")
@@ -403,7 +310,13 @@ func mergeToolCallChunk(current map[string]any, chunk map[string]any) {
 			for fnKey, fnValue := range fnChunk {
 				if fnKey == "arguments" {
 					existing, _ := fnCurrent[fnKey].(string)
-					fnCurrent[fnKey] = existing + fmt.Sprint(fnValue)
+					fragment, ok := fnValue.(string)
+					if !ok {
+						fragment, ok = normalizeToolArguments(fnValue)
+					}
+					if ok {
+						fnCurrent[fnKey] = existing + fragment
+					}
 					continue
 				}
 				if isEmptyToolChunkValue(fnCurrent[fnKey]) {
@@ -526,12 +439,21 @@ func normalizeOpenAIStreamFinishReasonForVisualStudio(line string) string {
 }
 
 type openAIStreamToolSanitizer struct {
-	allowedTools map[string]struct{}
+	allowedTools  map[string]struct{}
+	toolChunks    map[int]map[int]map[string]any
+	toolKinds     map[int]string
+	finishReasons map[int]string
+	sawDone       bool
+	started       bool
+	err           error
 }
 
 func newOpenAIStreamToolSanitizer(allowedTools map[string]struct{}) *openAIStreamToolSanitizer {
 	return &openAIStreamToolSanitizer{
-		allowedTools: allowedTools,
+		allowedTools:  allowedTools,
+		toolChunks:    map[int]map[int]map[string]any{},
+		toolKinds:     map[int]string{},
+		finishReasons: map[int]string{},
 	}
 }
 
@@ -539,16 +461,53 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 	if s == nil {
 		return line
 	}
+	if !s.started {
+		line = strings.TrimPrefix(line, "\ufeff")
+		s.started = true
+	}
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, ":") || !strings.HasPrefix(trimmed, "data:") {
 		return line
 	}
 	payload := strings.TrimSpace(trimmed[5:])
-	if payload == "" || payload == "[DONE]" {
+	if payload == "" {
+		return line
+	}
+	if payload == "[DONE]" {
+		s.sawDone = true
+		finishChoices := []map[string]any{}
+		choiceIndexes := make([]int, 0, len(s.toolChunks))
+		for choiceIndex := range s.toolChunks {
+			choiceIndexes = append(choiceIndexes, choiceIndex)
+		}
+		sort.Ints(choiceIndexes)
+		for _, choiceIndex := range choiceIndexes {
+			if s.finishReasons[choiceIndex] == "" && s.hasCompleteToolCalls(choiceIndex) {
+				finishReason := s.toolFinishReason(choiceIndex)
+				s.finishReasons[choiceIndex] = finishReason
+				finishChoices = append(finishChoices, map[string]any{
+					"index":         choiceIndex,
+					"delta":         map[string]any{},
+					"finish_reason": finishReason,
+				})
+			}
+		}
+		if len(finishChoices) > 0 {
+			finishPayload, err := json.Marshal(map[string]any{"choices": finishChoices})
+			if err == nil {
+				return "data: " + string(finishPayload) + "\n\n" + line
+			}
+		}
 		return line
 	}
 	var root map[string]any
-	if json.Unmarshal([]byte(payload), &root) != nil {
+	if err := json.Unmarshal([]byte(payload), &root); err != nil {
+		s.err = fmt.Errorf("invalid SSE data payload: %w", err)
+		return line
+	}
+	if streamErr, exists := root["error"]; exists && streamErr != nil {
+		encoded, _ := json.Marshal(streamErr)
+		s.err = fmt.Errorf("upstream SSE error: %s", sanitizeDiagnosticMessage(string(encoded)))
 		return line
 	}
 	choices, _ := root["choices"].([]any)
@@ -563,16 +522,44 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 			delta, _ = choice["message"].(map[string]any)
 		}
 		if delta == nil {
-			continue
+			delta = map[string]any{}
+		}
+		choiceIndex := openAIStreamChoiceIndex(choice)
+		choiceToolChunks := s.toolChunks[choiceIndex]
+		if choiceToolChunks == nil {
+			choiceToolChunks = map[int]map[string]any{}
+			s.toolChunks[choiceIndex] = choiceToolChunks
 		}
 		if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
-			if canonicalizeRawToolCallNames(calls, s.allowedTools) {
+			s.toolKinds[choiceIndex] = "tool_calls"
+			if normalized, _ := normalizeRawToolCalls(calls, s.allowedTools); normalized {
 				changed = true
 			}
+			mergeOpenAIStreamToolCalls(choiceToolChunks, calls)
 		}
 		if functionCall, ok := delta["function_call"].(map[string]any); ok && functionCall != nil {
-			if canonicalizeRawLegacyFunctionCall(functionCall, s.allowedTools) {
+			if s.toolKinds[choiceIndex] == "" {
+				s.toolKinds[choiceIndex] = "function_call"
+			}
+			if normalized, _ := normalizeRawFunctionCall(functionCall, s.allowedTools); normalized {
 				changed = true
+			}
+			mergeOpenAIStreamToolCalls(choiceToolChunks, []any{map[string]any{
+				"index":    float64(0),
+				"id":       "function_call",
+				"type":     "function",
+				"function": functionCall,
+			}})
+		}
+		if finishReason, ok := choice["finish_reason"].(string); ok && strings.TrimSpace(finishReason) != "" {
+			s.finishReasons[choiceIndex] = visualStudioFinishReason(finishReason)
+			if s.hasCompleteToolCalls(choiceIndex) && !isOpenAITruncationFinishReason(finishReason) {
+				expectedFinish := s.toolFinishReason(choiceIndex)
+				if s.finishReasons[choiceIndex] != expectedFinish {
+					choice["finish_reason"] = expectedFinish
+					changed = true
+				}
+				s.finishReasons[choiceIndex] = expectedFinish
 			}
 		}
 	}
@@ -584,6 +571,59 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 		return line
 	}
 	return "data: " + string(normalized)
+}
+
+func (s *openAIStreamToolSanitizer) hasCompleteToolCalls(choiceIndex int) bool {
+	if s == nil {
+		return false
+	}
+	calls := buildProviderToolCalls(s.toolChunks[choiceIndex])
+	return len(calls) > 0 && validateProviderToolCalls(calls) == nil
+}
+
+func (s *openAIStreamToolSanitizer) hasTrackedToolCalls() bool {
+	if s == nil {
+		return false
+	}
+	for _, chunks := range s.toolChunks {
+		if len(chunks) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *openAIStreamToolSanitizer) toolFinishReason(choiceIndex int) string {
+	if s != nil && s.toolKinds[choiceIndex] == "function_call" {
+		return "function_call"
+	}
+	return "tool_calls"
+}
+
+func (s *openAIStreamToolSanitizer) validateFinal() error {
+	if s == nil {
+		return nil
+	}
+	if s.err != nil {
+		return s.err
+	}
+	for choiceIndex, chunks := range s.toolChunks {
+		calls := buildProviderToolCalls(chunks)
+		if len(calls) == 0 {
+			continue
+		}
+		finishReason := s.finishReasons[choiceIndex]
+		if isOpenAITruncationFinishReason(finishReason) {
+			return fmt.Errorf("SSE tool stream choice %d was truncated: finish_reason=%s", choiceIndex, finishReason)
+		}
+		if err := validateProviderToolCalls(calls); err != nil {
+			return fmt.Errorf("SSE tool stream choice %d: %w", choiceIndex, err)
+		}
+		if finishReason == "" && !s.sawDone {
+			return fmt.Errorf("SSE tool stream choice %d ended without finish_reason or [DONE]", choiceIndex)
+		}
+	}
+	return nil
 }
 
 func openAIStreamChoiceIndex(choice map[string]any) int {
@@ -635,11 +675,12 @@ func visualStudioFinishReason(value string) string {
 	// Visual Studio Copilot 适配：
 	// VS 已知可接受 OpenAI 标准结束原因；空字符串、"unknown" 或 provider 私有值
 	// 会导致客户端失败，因此统一收敛为 stop。
-	switch strings.ToLower(strings.TrimSpace(value)) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
 	case "", "null", "unknown":
 		return "stop"
 	case "stop", "length", "tool_calls", "content_filter", "function_call":
-		return strings.TrimSpace(value)
+		return normalized
 	default:
 		return "stop"
 	}

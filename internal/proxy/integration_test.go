@@ -805,8 +805,8 @@ func TestOpenAIStreamPassesThroughLegacyFunctionCallContinuationAtHandler(t *tes
 	if strings.Contains(body, "Proxy blocked undeclared tool calls") || strings.Contains(body, "<empty>") {
 		t.Fatalf("stable mode must not inject block notice: %s", body)
 	}
-	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
-		t.Fatalf("legacy stable stream should preserve tool_calls finish: %s", body)
+	if !strings.Contains(body, `"finish_reason":"function_call"`) {
+		t.Fatalf("legacy stable stream should use function_call finish: %s", body)
 	}
 }
 

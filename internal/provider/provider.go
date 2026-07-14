@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -166,6 +167,9 @@ const (
 
 var errProviderResponseBodyTooLarge = errors.New("上游响应体超过大小限制")
 
+// ErrOpenAIStreamTooLarge 表示待聚合的 OpenAI SSE 超过调用方指定的总字节上限。
+var ErrOpenAIStreamTooLarge = errors.New("OpenAI SSE 响应超过大小限制")
+
 func (e *providerHTTPError) Error() string {
 	if e == nil {
 		return ""
@@ -221,78 +225,440 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		}
 		return nil, fmt.Errorf("解析响应失败: %w; body_preview=%q", err, responseBodyPreview(respBody))
 	}
+	if err := normalizeAndValidateChatResponseTools(&chatResp); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
 
 	return &chatResp, nil
 }
 
 func parseOpenAIChatSSEAsResponse(body []byte, model string) (*ChatResponse, error) {
+	resp, err := CollectOpenAIChatSSE(bytes.NewReader(body), model, maxProviderResponseBodyBytes)
+	if err != nil {
+		return nil, err
+	}
+	message := resp.Choices[0].Message
+	if strings.TrimSpace(message.Content) == "" &&
+		strings.TrimSpace(message.Reasoning) == "" &&
+		len(message.ToolCalls) == 0 && message.FunctionCall == nil {
+		return nil, fmt.Errorf("SSE 响应没有文本、推理内容或工具调用")
+	}
+	return resp, nil
+}
+
+// CollectOpenAIChatSSE 将 OpenAI-compatible SSE 聚合为一个完整响应。
+// maxBytes 限制读取的原始流总量；传入非正数时使用 provider 的默认响应上限。
+func CollectOpenAIChatSSE(reader io.Reader, model string, maxBytes int64) (*ChatResponse, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("SSE reader 不能为空")
+	}
+	if maxBytes <= 0 {
+		maxBytes = maxProviderResponseBodyBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取 SSE 响应失败: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("%w: 最大允许 %d 字节", ErrOpenAIStreamTooLarge, maxBytes)
+	}
+	body = bytes.TrimPrefix(body, []byte{0xEF, 0xBB, 0xBF})
 	if !bytes.Contains(body, []byte("data:")) {
 		return nil, fmt.Errorf("响应不是 SSE")
 	}
+
 	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var content strings.Builder
-	finishReason := "stop"
+	// 总量已经受 maxBytes 保护，单个 data 行可以安全放宽到本次实际响应大小，
+	// 避免大型但合法的工具参数被 Scanner 的固定 token 上限误判为截断。
+	scanner.Buffer(make([]byte, 64*1024), len(body)+1)
+	acc := openAIChatSSEAccumulator{
+		toolCalls:    map[int]*openAIChatSSEToolCall{},
+		finishReason: "stop",
+	}
+	parsedPayload := false
+	sawDone := false
+	eventType := ""
+	dataLines := []string{}
+	consumeEvent := func() error {
+		if len(dataLines) == 0 {
+			eventType = ""
+			return nil
+		}
+
+		payload := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		currentEvent := strings.TrimSpace(eventType)
+		dataLines = dataLines[:0]
+		eventType = ""
+		if payload == "" {
+			return nil
+		}
+		if payload == "[DONE]" {
+			sawDone = true
+			return nil
+		}
+		if strings.EqualFold(currentEvent, "error") {
+			message := openAIResponseErrorMessage(json.RawMessage(payload))
+			return fmt.Errorf("上游 SSE 错误: %s", message)
+		}
+		if err := acc.consume([]byte(payload)); err != nil {
+			return err
+		}
+		parsedPayload = true
+		return nil
+	}
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
+		if line == "" {
+			if err := consumeEvent(); err != nil {
+				return nil, err
+			}
+			if sawDone {
+				break
+			}
 			continue
 		}
-		payload := strings.TrimSpace(line[5:])
-		if payload == "[DONE]" {
-			break
-		}
-		chunkContent, chunkFinish, err := parseOpenAIChatSSEChunk(payload)
-		if err != nil {
+		if strings.HasPrefix(line, ":") {
 			continue
 		}
-		content.WriteString(chunkContent)
-		if chunkFinish != "" {
-			finishReason = chunkFinish
+		if strings.HasPrefix(line, "event:") {
+			if len(dataLines) > 0 {
+				if err := consumeEvent(); err != nil {
+					return nil, err
+				}
+			}
+			eventType = strings.TrimSpace(line[6:])
+			continue
 		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		// 部分兼容网关省略 SSE 事件间的空行。若已缓存的数据本身是完整 JSON，
+		// 下一条 data 到来时先结算上一事件；无效 JSON 则继续按标准多行 data 拼接。
+		if len(dataLines) > 0 {
+			pending := strings.TrimSpace(strings.Join(dataLines, "\n"))
+			if pending == "[DONE]" || json.Valid([]byte(pending)) {
+				if err := consumeEvent(); err != nil {
+					return nil, err
+				}
+				if sawDone {
+					break
+				}
+			}
+		}
+		dataLines = append(dataLines, strings.TrimSpace(line[5:]))
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(content.String()) == "" {
-		return nil, fmt.Errorf("SSE 响应没有文本内容")
+	if !sawDone {
+		if err := consumeEvent(); err != nil {
+			return nil, err
+		}
 	}
+	if !parsedPayload {
+		return nil, fmt.Errorf("SSE 响应没有 JSON 数据")
+	}
+	if !acc.explicitFinish && !sawDone {
+		return nil, fmt.Errorf("SSE 响应在 finish_reason 或 [DONE] 之前结束")
+	}
+
+	truncated := isOpenAITruncationFinishReason(acc.finishReason)
+	toolCalls, toolErr := acc.buildToolCalls()
+	if toolErr != nil {
+		if !truncated {
+			return nil, toolErr
+		}
+		toolCalls = []ToolCall{}
+	}
+	legacyFunctionCall, legacyErr := acc.buildLegacyFunctionCall()
+	if legacyErr != nil {
+		if !truncated {
+			return nil, legacyErr
+		}
+		legacyFunctionCall = nil
+	}
+	if truncated && (len(acc.toolCalls) > 0 || acc.legacyFunctionCall != nil) {
+		// length/content_filter 表示模型输出没有正常完成。即使当前参数片段恰好是
+		// 合法 JSON，也不能证明 schema 所需字段已经生成完毕，因此禁止下游执行。
+		toolCalls = []ToolCall{}
+		legacyFunctionCall = nil
+	}
+
+	if len(toolCalls) > 0 {
+		switch strings.ToLower(strings.TrimSpace(acc.finishReason)) {
+		case "", "stop", "function_call", "tool_calls":
+			acc.finishReason = "tool_calls"
+		}
+	}
+	if legacyFunctionCall != nil && len(toolCalls) == 0 {
+		switch strings.ToLower(strings.TrimSpace(acc.finishReason)) {
+		case "", "stop", "function_call":
+			acc.finishReason = "function_call"
+		}
+	}
+	now := time.Now().Unix()
 	return &ChatResponse{
-		ID:      fmt.Sprintf("chatcmpl-sse-%d", time.Now().Unix()),
+		ID:      fmt.Sprintf("chatcmpl-sse-%d", now),
 		Object:  "chat.completion",
-		Created: time.Now().Unix(),
+		Created: now,
 		Model:   model,
 		Choices: []Choice{{
-			Index:        0,
-			Message:      Message{Role: "assistant", Content: content.String()},
-			FinishReason: finishReason,
+			Index: 0,
+			Message: Message{
+				Role:         "assistant",
+				Content:      acc.content.String(),
+				Reasoning:    acc.reasoning.String(),
+				ToolCalls:    toolCalls,
+				FunctionCall: legacyFunctionCall,
+			},
+			FinishReason: acc.finishReason,
 		}},
 	}, nil
 }
 
-func parseOpenAIChatSSEChunk(payload string) (string, string, error) {
+// openAIChatSSEAccumulator 是非流请求收到 SSE 时的最小协议状态机。
+// 它只负责 provider 层必须保证的完整性：事件错误不能吞、工具分片按 index 合并、
+// arguments 必须在返回前成为完整 JSON；工具名白名单等业务规则仍由 proxy 层处理。
+type openAIChatSSEAccumulator struct {
+	content            strings.Builder
+	reasoning          strings.Builder
+	toolCalls          map[int]*openAIChatSSEToolCall
+	legacyFunctionCall *openAIChatSSEToolCall
+	finishReason       string
+	explicitFinish     bool
+}
+
+type openAIChatSSEToolCall struct {
+	id        string
+	typeName  string
+	name      string
+	arguments strings.Builder
+}
+
+type openAIChatSSEMessageChunk struct {
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content"`
+	Thinking         string `json:"thinking"`
+	FunctionCall     *struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"function_call"`
+	ToolCalls []struct {
+		Index    int    `json:"index"`
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		} `json:"function"`
+	} `json:"tool_calls"`
+}
+
+func (a *openAIChatSSEAccumulator) consume(payload []byte) error {
 	var root struct {
+		Error   json.RawMessage `json:"error"`
 		Choices []struct {
-			Delta struct {
-				Content string `json:"content"`
-			} `json:"delta"`
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
+			Delta        openAIChatSSEMessageChunk `json:"delta"`
+			Message      openAIChatSSEMessageChunk `json:"message"`
+			FinishReason string                    `json:"finish_reason"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal([]byte(payload), &root); err != nil {
-		return "", "", err
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return fmt.Errorf("解析 SSE 数据失败: %w", err)
+	}
+	if message := openAIResponseErrorMessage(root.Error); message != "" {
+		return fmt.Errorf("上游 SSE 错误: %s", message)
 	}
 	if len(root.Choices) == 0 {
-		return "", "", nil
+		return nil
 	}
+
 	choice := root.Choices[0]
-	if choice.Delta.Content != "" {
-		return choice.Delta.Content, choice.FinishReason, nil
+	if err := a.consumeMessage(choice.Delta); err != nil {
+		return err
 	}
-	return choice.Message.Content, choice.FinishReason, nil
+	if err := a.consumeMessage(choice.Message); err != nil {
+		return err
+	}
+	if strings.TrimSpace(choice.FinishReason) != "" {
+		a.finishReason = choice.FinishReason
+		a.explicitFinish = true
+	}
+	return nil
+}
+
+func (a *openAIChatSSEAccumulator) consumeMessage(message openAIChatSSEMessageChunk) error {
+	a.content.WriteString(message.Content)
+	a.reasoning.WriteString(message.ReasoningContent)
+	a.reasoning.WriteString(message.Thinking)
+	if message.FunctionCall != nil {
+		if a.legacyFunctionCall == nil {
+			a.legacyFunctionCall = &openAIChatSSEToolCall{}
+		}
+		if message.FunctionCall.Name != "" {
+			currentName := a.legacyFunctionCall.name
+			if currentName != "" && currentName != message.FunctionCall.Name {
+				return fmt.Errorf("SSE legacy function_call 的函数名冲突")
+			}
+			a.legacyFunctionCall.name = message.FunctionCall.Name
+		}
+		if err := appendOpenAIToolArguments(
+			&a.legacyFunctionCall.arguments,
+			message.FunctionCall.Arguments,
+		); err != nil {
+			return fmt.Errorf("SSE legacy function_call 参数无效: %w", err)
+		}
+	}
+
+	for _, chunk := range message.ToolCalls {
+		current := a.toolCalls[chunk.Index]
+		if current == nil {
+			current = &openAIChatSSEToolCall{typeName: "function"}
+			a.toolCalls[chunk.Index] = current
+		}
+		if chunk.ID != "" {
+			if current.id != "" && current.id != chunk.ID {
+				return fmt.Errorf("SSE 工具调用 %d 的 id 冲突", chunk.Index)
+			}
+			current.id = chunk.ID
+		}
+		if chunk.Type != "" {
+			current.typeName = chunk.Type
+		}
+		if chunk.Function.Name != "" {
+			if current.name != "" && current.name != chunk.Function.Name {
+				return fmt.Errorf("SSE 工具调用 %d 的函数名冲突", chunk.Index)
+			}
+			current.name = chunk.Function.Name
+		}
+		if err := appendOpenAIToolArguments(&current.arguments, chunk.Function.Arguments); err != nil {
+			return fmt.Errorf("SSE 工具调用 %d 参数无效: %w", chunk.Index, err)
+		}
+	}
+	return nil
+}
+
+func appendOpenAIToolArguments(dst *strings.Builder, raw json.RawMessage) error {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+
+	var fragment string
+	if err := json.Unmarshal(raw, &fragment); err == nil {
+		dst.WriteString(fragment)
+		return nil
+	}
+	if !json.Valid(raw) {
+		return fmt.Errorf("不是有效 JSON")
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return err
+	}
+	dst.Write(compact.Bytes())
+	return nil
+}
+
+func (a *openAIChatSSEAccumulator) buildToolCalls() ([]ToolCall, error) {
+	if len(a.toolCalls) == 0 {
+		return []ToolCall{}, nil
+	}
+
+	indexes := make([]int, 0, len(a.toolCalls))
+	for index := range a.toolCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+
+	calls := make([]ToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		call := a.toolCalls[index]
+		if strings.TrimSpace(call.name) == "" {
+			return nil, fmt.Errorf("SSE 工具调用 %d 缺少函数名", index)
+		}
+		arguments := strings.TrimSpace(call.arguments.String())
+		if arguments == "" || !json.Valid([]byte(arguments)) {
+			return nil, fmt.Errorf("SSE 工具调用 %d 的参数不完整", index)
+		}
+		calls = append(calls, ToolCall{
+			ID:   call.id,
+			Type: call.typeName,
+			Function: FunctionCall{
+				Name:      call.name,
+				Arguments: arguments,
+			},
+		})
+	}
+	return calls, nil
+}
+
+func (a *openAIChatSSEAccumulator) buildLegacyFunctionCall() (*FunctionCall, error) {
+	if a.legacyFunctionCall == nil {
+		return nil, nil
+	}
+	if strings.TrimSpace(a.legacyFunctionCall.name) == "" {
+		return nil, fmt.Errorf("SSE legacy function_call 缺少函数名")
+	}
+	arguments := strings.TrimSpace(a.legacyFunctionCall.arguments.String())
+	if arguments == "" || !json.Valid([]byte(arguments)) {
+		return nil, fmt.Errorf("SSE legacy function_call 参数不完整")
+	}
+	return &FunctionCall{
+		Name:      a.legacyFunctionCall.name,
+		Arguments: arguments,
+	}, nil
+}
+
+func isOpenAITruncationFinishReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "content_filter":
+		return true
+	default:
+		return false
+	}
+}
+
+// normalizeAndValidateChatResponseTools 是 typed provider 响应的统一工具协议边界。
+// fallback 可能直接调用 Provider.Chat，不能依赖 proxy raw JSON 路径再做一次校验。
+func normalizeAndValidateChatResponseTools(resp *ChatResponse) error {
+	if resp == nil {
+		return fmt.Errorf("聊天响应为空")
+	}
+	for choiceIndex := range resp.Choices {
+		choice := &resp.Choices[choiceIndex]
+		message := &choice.Message
+		if isOpenAITruncationFinishReason(choice.FinishReason) {
+			message.ToolCalls = nil
+			message.FunctionCall = nil
+			continue
+		}
+		if len(message.ToolCalls) > 0 && message.FunctionCall != nil {
+			return fmt.Errorf("choice %d 同时包含 tool_calls 和 function_call", choiceIndex)
+		}
+		for callIndex, call := range message.ToolCalls {
+			if strings.TrimSpace(call.Function.Name) == "" {
+				return fmt.Errorf("choice %d tool call %d 缺少函数名", choiceIndex, callIndex)
+			}
+			arguments := strings.TrimSpace(call.Function.Arguments)
+			if arguments == "" || !json.Valid([]byte(arguments)) {
+				return fmt.Errorf("choice %d tool call %d 参数不完整", choiceIndex, callIndex)
+			}
+		}
+		if len(message.ToolCalls) > 0 {
+			choice.FinishReason = "tool_calls"
+		}
+		if message.FunctionCall != nil {
+			name := strings.TrimSpace(message.FunctionCall.Name)
+			arguments := strings.TrimSpace(message.FunctionCall.Arguments)
+			if name == "" || arguments == "" || !json.Valid([]byte(arguments)) {
+				return fmt.Errorf("choice %d function_call 参数不完整", choiceIndex)
+			}
+			choice.FinishReason = "function_call"
+		}
+	}
+	return nil
 }
 
 func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte, error) {
@@ -354,6 +720,15 @@ func (p *OpenAIProvider) doChatRaw(ctx context.Context, body []byte) ([]byte, er
 			Body:       respBody,
 			RetryAfter: retryAfter,
 			Message:    providerHTTPErrorMessage(resp.StatusCode, respBody, retryAfter),
+		}
+	}
+	if message := openAIResponseErrorFromBody(respBody); message != "" {
+		// OpenAI-compatible 网关有时用 HTTP 200 包装顶层 error；必须在原始 provider
+		// 边界转为错误，否则上层会把没有 choices 的响应误记为成功并停止故障转移。
+		return nil, &providerHTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       respBody,
+			Message:    fmt.Sprintf("API 错误 %d: %s", resp.StatusCode, message),
 		}
 	}
 
@@ -429,6 +804,36 @@ func responseBodyPreview(body []byte) string {
 		preview = preview[:maxPreviewBytes] + "..."
 	}
 	return preview
+}
+
+func openAIResponseErrorFromBody(body []byte) string {
+	trimmed := bytes.TrimPrefix(bytes.TrimSpace(body), []byte{0xEF, 0xBB, 0xBF})
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return ""
+	}
+	return openAIResponseErrorMessage(envelope.Error)
+}
+
+func openAIResponseErrorMessage(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+
+	var detail struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(trimmed, &detail); err == nil && strings.TrimSpace(detail.Message) != "" {
+		return detail.Message
+	}
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil && strings.TrimSpace(text) != "" {
+		return text
+	}
+	return responseBodyPreview(trimmed)
 }
 
 func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.ReadCloser, error) {
@@ -822,21 +1227,31 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		return nil, err
 	}
 
-	// 转换为 OpenAI 格式
-	var ollamaResp map[string]any
+	// 原生 Ollama 的工具参数既可能是 JSON 字符串，也可能直接是对象。
+	// 使用 provider 的强类型工具结构统一解码，避免 map 路径丢失 tool_calls 或输出非 JSON 参数。
+	var ollamaResp struct {
+		Message struct {
+			Role             string     `json:"role"`
+			Content          string     `json:"content"`
+			Thinking         string     `json:"thinking"`
+			ReasoningContent string     `json:"reasoning_content"`
+			ToolCalls        []ToolCall `json:"tool_calls"`
+		} `json:"message"`
+		DoneReason      string `json:"done_reason"`
+		PromptEvalCount int    `json:"prompt_eval_count"`
+		EvalCount       int    `json:"eval_count"`
+	}
 	if err := json.Unmarshal(respBody, &ollamaResp); err != nil {
 		return nil, err
 	}
 
-	message, _ := ollamaResp["message"].(map[string]any)
-	content := ""
-	reasoning := ""
-	if message != nil {
-		content, _ = message["content"].(string)
-		reasoning, _ = message["thinking"].(string)
-		if reasoning == "" {
-			reasoning, _ = message["reasoning_content"].(string)
-		}
+	reasoning := ollamaResp.Message.Thinking
+	if reasoning == "" {
+		reasoning = ollamaResp.Message.ReasoningContent
+	}
+	finishReason := strings.TrimSpace(ollamaResp.DoneReason)
+	if finishReason == "" {
+		finishReason = "stop"
 	}
 
 	chatResp := &ChatResponse{
@@ -845,23 +1260,26 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		Created: time.Now().Unix(),
 		Model:   req.Model,
 		Choices: []Choice{{
-			Index:        0,
-			Message:      Message{Role: "assistant", Content: content, Reasoning: reasoning},
-			FinishReason: "stop",
+			Index: 0,
+			Message: Message{
+				Role:      "assistant",
+				Content:   ollamaResp.Message.Content,
+				ToolCalls: ollamaResp.Message.ToolCalls,
+				Reasoning: reasoning,
+			},
+			FinishReason: finishReason,
 		}},
 	}
 
-	if usage, ok := ollamaResp["prompt_eval_count"].(float64); ok {
-		promptTokens := int(usage)
-		completionTokens := 0
-		if evalCount, ok := ollamaResp["eval_count"].(float64); ok {
-			completionTokens = int(evalCount)
-		}
+	if ollamaResp.PromptEvalCount != 0 || ollamaResp.EvalCount != 0 {
 		chatResp.Usage = &Usage{
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      promptTokens + completionTokens,
+			PromptTokens:     ollamaResp.PromptEvalCount,
+			CompletionTokens: ollamaResp.EvalCount,
+			TotalTokens:      ollamaResp.PromptEvalCount + ollamaResp.EvalCount,
 		}
+	}
+	if err := normalizeAndValidateChatResponseTools(chatResp); err != nil {
+		return nil, fmt.Errorf("解析 Ollama 响应失败: %w", err)
 	}
 
 	return chatResp, nil

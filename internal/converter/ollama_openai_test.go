@@ -43,6 +43,68 @@ func TestConvertOllamaChunkToOpenAISSEWritesDataLine(t *testing.T) {
 	}
 }
 
+func TestConvertOllamaChunkToOpenAISSEConvertsObjectToolArgumentsToJSONString(t *testing.T) {
+	chunk, err := ParseOllamaStreamChunk(`{
+		"model":"llama",
+		"message":{"role":"assistant","content":"","tool_calls":[{
+			"id":"call_1",
+			"type":"function",
+			"function":{"name":"read_file","arguments":{"path":"a.txt"}}
+		}]},
+		"done":false
+	}`)
+	if err != nil {
+		t.Fatalf("ParseOllamaStreamChunk returned error: %v", err)
+	}
+	out, err := ConvertOllamaChunkToOpenAISSE(chunk, "llama")
+	if err != nil {
+		t.Fatalf("ConvertOllamaChunkToOpenAISSE returned error: %v", err)
+	}
+
+	payload := strings.TrimSpace(strings.TrimPrefix(string(out), "data:"))
+	var converted map[string]any
+	if err := json.Unmarshal([]byte(payload), &converted); err != nil {
+		t.Fatalf("decode converted chunk: %v", err)
+	}
+	choice := converted["choices"].([]any)[0].(map[string]any)
+	delta := choice["delta"].(map[string]any)
+	call := delta["tool_calls"].([]any)[0].(map[string]any)
+	function := call["function"].(map[string]any)
+	if function["arguments"] != `{"path":"a.txt"}` {
+		t.Fatalf("arguments = %#v, want JSON object string", function["arguments"])
+	}
+}
+
+func TestConvertOllamaDoneChunkPreservesToolCallsAndRepairsFinish(t *testing.T) {
+	chunk, err := ParseOllamaStreamChunk(`{
+		"model":"llama",
+		"message":{"role":"assistant","content":"","tool_calls":[{
+			"id":"call_1","type":"function",
+			"function":{"name":"read_file","arguments":{"path":"a.txt"}}
+		}]},
+		"done":true,
+		"done_reason":"stop"
+	}`)
+	if err != nil {
+		t.Fatalf("ParseOllamaStreamChunk returned error: %v", err)
+	}
+	out, err := ConvertOllamaChunkToOpenAISSE(chunk, "llama")
+	if err != nil {
+		t.Fatalf("ConvertOllamaChunkToOpenAISSE returned error: %v", err)
+	}
+
+	payload := strings.TrimSpace(strings.TrimPrefix(string(out), "data:"))
+	var converted map[string]any
+	if err := json.Unmarshal([]byte(payload), &converted); err != nil {
+		t.Fatalf("decode converted chunk: %v", err)
+	}
+	choice := converted["choices"].([]any)[0].(map[string]any)
+	delta := choice["delta"].(map[string]any)
+	if choice["finish_reason"] != "tool_calls" || len(delta["tool_calls"].([]any)) != 1 {
+		t.Fatalf("done tool chunk was lost: %s", string(out))
+	}
+}
+
 func TestOllamaChatResponse2OpenAIReadsNestedMessageAndThinking(t *testing.T) {
 	out, err := OllamaChatResponse2OpenAI([]byte(`{
 		"model":"llama",
@@ -90,6 +152,34 @@ func TestOllamaChatResponse2OpenAIReadsToolCalls(t *testing.T) {
 	calls, _ := message["tool_calls"].([]any)
 	if len(calls) != 1 {
 		t.Fatalf("tool calls missing: %s", string(out))
+	}
+}
+
+func TestOllamaChatResponse2OpenAIConvertsObjectToolArgumentsToJSONString(t *testing.T) {
+	out, err := OllamaChatResponse2OpenAI([]byte(`{
+		"model":"llama",
+		"message":{"role":"assistant","content":"","tool_calls":[{
+			"id":"call_1",
+			"type":"function",
+			"function":{"name":"read_file","arguments":{"path":"a.txt"}}
+		}]},
+		"done":true,
+		"done_reason":"tool_calls"
+	}`), "llama")
+	if err != nil {
+		t.Fatalf("OllamaChatResponse2OpenAI returned error: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	choice := resp["choices"].([]any)[0].(map[string]any)
+	message := choice["message"].(map[string]any)
+	call := message["tool_calls"].([]any)[0].(map[string]any)
+	function := call["function"].(map[string]any)
+	if function["arguments"] != `{"path":"a.txt"}` {
+		t.Fatalf("arguments = %#v, want JSON object string", function["arguments"])
 	}
 }
 

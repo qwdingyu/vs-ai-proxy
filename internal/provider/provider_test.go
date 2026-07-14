@@ -432,6 +432,226 @@ func TestOpenAIProviderChatAcceptsSSEBodyForNonStreamRequest(t *testing.T) {
 	}
 }
 
+func TestToolProtocolContractFallbackSSEParserPreservesToolCalls(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			"\ufeff" + `data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	resp, err := prov.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: "user", Content: "read a.txt"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if len(resp.Choices) != 1 {
+		t.Fatalf("choices = %#v, want one choice", resp.Choices)
+	}
+	choice := resp.Choices[0]
+	if choice.FinishReason != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls", choice.FinishReason)
+	}
+	if len(choice.Message.ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %#v, want one call", choice.Message.ToolCalls)
+	}
+	call := choice.Message.ToolCalls[0]
+	if call.ID != "call_1" || call.Function.Name != "read_file" {
+		t.Fatalf("unexpected tool call: %#v", call)
+	}
+	if call.Function.Arguments != `{"path":"a.txt"}` {
+		t.Fatalf("arguments = %q, want complete JSON object", call.Function.Arguments)
+	}
+}
+
+func TestCollectOpenAIChatSSESupportsStandardMultilineEvents(t *testing.T) {
+	stream := "\ufeff" + strings.Join([]string{
+		"event: message",
+		`data: {"choices":[{"delta":{"content":`,
+		`data: "Hello"},"finish_reason":"stop"}]}`,
+		``,
+		"event: done",
+		"data: [DONE]",
+		``,
+	}, "\n")
+
+	resp, err := CollectOpenAIChatSSE(strings.NewReader(stream), "gpt-5.5", 1<<20)
+	if err != nil {
+		t.Fatalf("CollectOpenAIChatSSE returned error: %v", err)
+	}
+	if got := resp.Choices[0].Message.Content; got != "Hello" {
+		t.Fatalf("content = %q, want Hello", got)
+	}
+	if got := resp.Choices[0].FinishReason; got != "stop" {
+		t.Fatalf("finish_reason = %q, want stop", got)
+	}
+}
+
+func TestCollectOpenAIChatSSERejectsErrorEvent(t *testing.T) {
+	stream := strings.Join([]string{
+		"event: error",
+		`data: {"message":"upstream unavailable"}`,
+		``,
+	}, "\n")
+
+	_, err := CollectOpenAIChatSSE(strings.NewReader(stream), "gpt-5.5", 1<<20)
+	if err == nil || !strings.Contains(err.Error(), "upstream unavailable") {
+		t.Fatalf("CollectOpenAIChatSSE error = %v, want upstream error event", err)
+	}
+}
+
+func TestCollectOpenAIChatSSEAggregatesLegacyFunctionCall(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"function_call":{"name":"read_file","arguments":"{\"path\":"}},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"function_call":{"arguments":"\"a.txt\"}"}},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"function_call"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	resp, err := CollectOpenAIChatSSE(strings.NewReader(stream), "gpt-4", 1<<20)
+	if err != nil {
+		t.Fatalf("CollectOpenAIChatSSE returned error: %v", err)
+	}
+	choice := resp.Choices[0]
+	if choice.FinishReason != "function_call" {
+		t.Fatalf("finish_reason = %q, want function_call", choice.FinishReason)
+	}
+	if choice.Message.FunctionCall == nil {
+		t.Fatal("legacy function_call was not preserved")
+	}
+	if got := choice.Message.FunctionCall.Name; got != "read_file" {
+		t.Fatalf("function name = %q, want read_file", got)
+	}
+	if got := choice.Message.FunctionCall.Arguments; got != `{"path":"a.txt"}` {
+		t.Fatalf("arguments = %q, want complete JSON object", got)
+	}
+}
+
+func TestCollectOpenAIChatSSEHidesIncompleteToolCallOnTruncation(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"length"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	resp, err := CollectOpenAIChatSSE(strings.NewReader(stream), "gpt-5.5", 1<<20)
+	if err != nil {
+		t.Fatalf("CollectOpenAIChatSSE returned error: %v", err)
+	}
+	choice := resp.Choices[0]
+	if choice.FinishReason != "length" {
+		t.Fatalf("finish_reason = %q, want length", choice.FinishReason)
+	}
+	if len(choice.Message.ToolCalls) != 0 {
+		t.Fatalf("incomplete tool calls must not be exposed: %#v", choice.Message.ToolCalls)
+	}
+}
+
+func TestCollectOpenAIChatSSERejectsIncompleteToolCallOnStop(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	_, err := CollectOpenAIChatSSE(strings.NewReader(stream), "gpt-5.5", 1<<20)
+	if err == nil {
+		t.Fatal("CollectOpenAIChatSSE should reject incomplete tool call on stop")
+	}
+}
+
+func TestCollectOpenAIChatSSERejectsOversizedStream(t *testing.T) {
+	_, err := CollectOpenAIChatSSE(strings.NewReader("data: {}\n\n"), "gpt-5.5", 8)
+	if !errors.Is(err, ErrOpenAIStreamTooLarge) {
+		t.Fatalf("CollectOpenAIChatSSE error = %v, want ErrOpenAIStreamTooLarge", err)
+	}
+}
+
+func TestOpenAIProviderChatRejectsSSEErrorFrameAfterContent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`,
+			`data: {"error":{"message":"tool backend failed","type":"upstream_error"}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: "user", Content: "read a.txt"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "tool backend failed") {
+		t.Fatalf("Chat error = %v, want in-band upstream error", err)
+	}
+}
+
+func TestOpenAIProviderChatRejectsTruncatedSSEToolArguments(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"content":"preparing"},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+			``,
+		}, "\n\n")))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: "user", Content: "read a.txt"}},
+	})
+	if err == nil {
+		t.Fatal("Chat should reject truncated tool arguments")
+	}
+}
+
+func TestOpenAIProviderChatRejectsIncompleteJSONToolArguments(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.Chat(context.Background(), &ChatRequest{Model: "gpt-5.5"})
+	if err == nil {
+		t.Fatal("Chat should reject incomplete JSON tool arguments")
+	}
+}
+
+func TestOpenAIProviderChatRawRejectsHTTP200ErrorObject(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"error":{"message":"model unavailable","type":"upstream_error","code":"model_unavailable"}}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	_, err := prov.ChatRaw(context.Background(), &ChatRequest{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "model unavailable") {
+		t.Fatalf("ChatRaw error = %v, want HTTP 200 error object", err)
+	}
+}
+
 func TestOpenAIProviderChatRawRetriesTransientServerErrors(t *testing.T) {
 	calls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -959,6 +1179,100 @@ func TestOllamaProviderBuildsNativeChatRequest(t *testing.T) {
 	}
 	if _, ok := options["custom_option"]; !ok {
 		t.Fatalf("custom_option was not preserved: %#v", options)
+	}
+}
+
+func TestToolProtocolContractOllamaChatPreservesToolCalls(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"model":"qwen3",
+			"message":{"role":"assistant","content":"","tool_calls":[{
+				"id":"call_1",
+				"type":"function",
+				"function":{"name":"read_file","arguments":{"path":"a.txt"}}
+			}]},
+			"done":true,
+			"done_reason":"tool_calls"
+		}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOllamaProvider("ollama", upstream.URL, true, time.Second)
+	resp, err := prov.Chat(context.Background(), &ChatRequest{
+		Model:    "qwen3",
+		Messages: []Message{{Role: "user", Content: "read a.txt"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if len(resp.Choices) != 1 {
+		t.Fatalf("choices = %#v, want one choice", resp.Choices)
+	}
+	choice := resp.Choices[0]
+	if choice.FinishReason != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls", choice.FinishReason)
+	}
+	if len(choice.Message.ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %#v, want one call", choice.Message.ToolCalls)
+	}
+	call := choice.Message.ToolCalls[0]
+	if call.ID != "call_1" || call.Type != "function" || call.Function.Name != "read_file" {
+		t.Fatalf("unexpected tool call: %#v", call)
+	}
+	if call.Function.Arguments != `{"path":"a.txt"}` {
+		t.Fatalf("arguments = %q, want JSON object string", call.Function.Arguments)
+	}
+}
+
+func TestOllamaProviderChatInfersToolFinishWhenDoneReasonIsStop(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"model":"qwen3",
+			"message":{"role":"assistant","content":"","tool_calls":[{
+				"id":"call_1","type":"function",
+				"function":{"name":"read_file","arguments":{"path":"a.txt"}}
+			}]},
+			"done":true,
+			"done_reason":"stop"
+		}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOllamaProvider("ollama", upstream.URL, true, time.Second)
+	resp, err := prov.Chat(context.Background(), &ChatRequest{Model: "qwen3"})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	choice := resp.Choices[0]
+	if choice.FinishReason != "tool_calls" || len(choice.Message.ToolCalls) != 1 {
+		t.Fatalf("Ollama tool finish was not repaired: %#v", choice)
+	}
+}
+
+func TestOllamaProviderChatRejectsIncompleteToolArguments(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"model":"qwen3",
+			"message":{"role":"assistant","content":"","tool_calls":[{
+				"id":"call_1","type":"function",
+				"function":{"name":"read_file","arguments":"{\"path\":"}
+			}]},
+			"done":true,
+			"done_reason":"stop"
+		}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOllamaProvider("ollama", upstream.URL, true, time.Second)
+	_, err := prov.Chat(context.Background(), &ChatRequest{Model: "qwen3"})
+	if err == nil {
+		t.Fatal("Chat should reject incomplete Ollama tool arguments")
 	}
 }
 

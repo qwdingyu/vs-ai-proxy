@@ -15,15 +15,26 @@ func canonicalToolName(name string, allowedTools map[string]struct{}) string {
 		return trimmed
 	}
 	key := strings.ToLower(trimmed)
-	if _, ok := allowedTools[key]; ok {
-		return trimmed
+	if declared, ok := declaredToolName(key, allowedTools); ok {
+		return declared
 	}
 	for _, target := range toolAliasTargets[key] {
-		if _, ok := allowedTools[target]; ok {
-			return target
+		if declared, ok := declaredToolName(target, allowedTools); ok {
+			return declared
 		}
 	}
 	return trimmed
+}
+
+// declaredToolName 使用大小写不敏感匹配，但返回请求中声明的原始拼写。
+// Visual Studio 会用声明表按精确名称查找工具，返回全小写名称可能导致工具查找失败。
+func declaredToolName(name string, allowedTools map[string]struct{}) (string, bool) {
+	for declared := range allowedTools {
+		if strings.EqualFold(strings.TrimSpace(declared), strings.TrimSpace(name)) {
+			return strings.TrimSpace(declared), true
+		}
+	}
+	return "", false
 }
 
 func canonicalizeFunctionCallName(function *provider.FunctionCall, allowedTools map[string]struct{}) bool {
@@ -31,7 +42,7 @@ func canonicalizeFunctionCallName(function *provider.FunctionCall, allowedTools 
 		return false
 	}
 	canonical := canonicalToolName(function.Name, allowedTools)
-	if strings.EqualFold(strings.TrimSpace(function.Name), strings.TrimSpace(canonical)) {
+	if strings.TrimSpace(function.Name) == strings.TrimSpace(canonical) {
 		return false
 	}
 	function.Name = canonical
@@ -54,7 +65,7 @@ func canonicalizeRawFunctionName(function map[string]any, allowedTools map[strin
 	}
 	name, _ := function["name"].(string)
 	canonical := canonicalToolName(name, allowedTools)
-	if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(canonical)) {
+	if strings.TrimSpace(name) == strings.TrimSpace(canonical) {
 		return false
 	}
 	function["name"] = canonical

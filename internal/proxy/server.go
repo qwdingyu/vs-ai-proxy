@@ -820,7 +820,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if streamWriter.HasWritten() {
-					registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+					// 已经写出 SSE 后不能切换候选，但协议截断/错误帧仍然是 provider 失败，
+					// 不能记成成功污染健康排序和后续诊断。
+					registry.RecordCandidateFailure(prov.Name(), err)
 					return
 				}
 				registry.RecordCandidateFailure(prov.Name(), err)
@@ -890,6 +892,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				// finish_reason 比 Web/ curl 更严格，写回前需要做最小兼容归一化。
 				body = normalizeOpenAIChatResponseForVisualStudio(body)
 				body = normalizeProviderSpecificToolCallsInOpenAIJSON(body, allowedToolNames(req))
+				if validationErr := validateOpenAIChatResponseBody(body); validationErr != nil {
+					lastErr = validationErr
+					attempt := newAttemptDiagnostic(
+						prov.Name(),
+						modelID,
+						time.Since(attemptStart).Seconds()*1000,
+						validationErr,
+					)
+					attempts = append(attempts, attempt)
+					s.logger.Warn("模型 %s 在提供商 %s 返回无效 OpenAI 响应: %v", modelID, prov.Name(), validationErr)
+					registry.RecordCandidateFailure(prov.Name(), validationErr)
+					if shouldStopCandidateFallback(attempt.Category) {
+						break
+					}
+					continue
+				}
 				setRawResponseToolDiagnosticHeader(w, body)
 				s.cacheRawOpenAIChatResponse(body)
 				w.Header().Set("Content-Type", "application/json")
@@ -1260,7 +1278,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 	acc := newStreamReasoningAccumulator()
 	buffered, dsmlResp, detectedDSML, probeErr := probeOpenAIStreamForDSML(scanner, allowedToolNames(req))
 	if probeErr != nil {
-		return probeErr
+		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", probeErr)
 	}
 	if detectedDSML {
 		setProxyToolNormalization(w, "dsml")
@@ -1271,29 +1289,29 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		return writeOpenAIChatResponseAsSSE(w, flusher, dsmlResp)
 	}
 	streamToolSanitizer := newOpenAIStreamToolSanitizer(allowedToolNames(req))
-	if err := writeBufferedOpenAIStreamLinesWithToolState(w, flusher, buffered, acc, streamToolSanitizer); err != nil {
-		return err
+	eventProcessor := newOpenAIStreamEventProcessor(w, flusher, acc, streamToolSanitizer)
+	for _, line := range buffered {
+		if err := eventProcessor.consumeLine(line); err != nil {
+			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+		}
 	}
 	for scanner.Scan() {
-		line := scanner.Text()
-		// Visual Studio Copilot 适配：
-		// VS 的 OpenAI .NET SDK 在流式模式下会逐个解析 SSE chunk；
-		// 如果上游在任意 chunk 中返回 finish_reason:""，VS 会在客户端直接抛
-		// Unknown ChatFinishReason value。非流式响应归一化不能覆盖这里。
-		line = normalizeOpenAIStreamLineForVisualStudioWithToolState(line, streamToolSanitizer)
-		acc.consumeOpenAISSELine(line)
-		if _, writeErr := w.Write([]byte(line + "\n")); writeErr != nil {
-			return writeErr
+		if err := eventProcessor.consumeLine(scanner.Text()); err != nil {
+			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 		}
-		flusher.Flush()
-
 		if r.Context().Err() != nil {
 			return r.Context().Err()
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
+		if flushErr := eventProcessor.flushPendingBeforeReadError(); flushErr != nil {
+			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", flushErr)
+		}
 		return err
+	}
+	if err := eventProcessor.finish(); err != nil {
+		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 	}
 	s.cacheStreamAccumulator(acc)
 	setStreamToolDiagnosticHeader(w, acc)
@@ -1322,12 +1340,16 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 	acc := newStreamReasoningAccumulator()
 	for scanner.Scan() {
 		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, ":") {
+			continue
+		}
 		chunk, parseErr := converter.ParseOllamaStreamChunk(line)
 		if parseErr != nil {
-			if parseErr == converter.ErrStreamDone {
+			if errors.Is(parseErr, converter.ErrStreamDone) {
 				break
 			}
-			continue
+			return fmt.Errorf("解析 Ollama 流失败: %w", parseErr)
 		}
 		acc.consumeOllamaChunk(chunk)
 
