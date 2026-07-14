@@ -166,7 +166,7 @@ func rawFunctionCallComplete(function map[string]any) bool {
 }
 
 func rawMessageHasResponsePayload(message map[string]any) bool {
-	for _, key := range []string{"content", "reasoning_content", "thinking"} {
+	for _, key := range []string{"content", "reasoning_content", "thinking", "refusal"} {
 		switch value := message[key].(type) {
 		case string:
 			if strings.TrimSpace(value) != "" {

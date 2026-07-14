@@ -12,9 +12,11 @@ type streamReasoningAccumulator struct {
 	toolCallIDs   []string
 	toolCallNames []string
 	hasContent    bool
-	hasToolCalls  bool
-	finished      bool
-	finishReason  string
+	// hasRefusal 单独记录拒绝响应，避免 content 为空时把合法终态误判成空成功。
+	hasRefusal   bool
+	hasToolCalls bool
+	finished     bool
+	finishReason string
 }
 
 func newStreamReasoningAccumulator() *streamReasoningAccumulator {
@@ -45,6 +47,9 @@ func (a *streamReasoningAccumulator) consumeOpenAIChunk(chunk openAIStreamChunk)
 	}
 	if strings.TrimSpace(chunk.Reasoning) != "" {
 		a.reasoning.WriteString(chunk.Reasoning)
+	}
+	if strings.TrimSpace(chunk.Refusal) != "" {
+		a.hasRefusal = true
 	}
 	if len(chunk.ToolCalls) > 0 {
 		a.hasToolCalls = true
@@ -90,7 +95,7 @@ func (a *streamReasoningAccumulator) hasResponsePayload() bool {
 		return false
 	}
 	hasReasoning := strings.TrimSpace(a.reasoning.String()) != ""
-	return a.hasContent || hasReasoning || a.hasToolCalls
+	return a.hasContent || a.hasRefusal || hasReasoning || a.hasToolCalls
 }
 
 func (a *streamReasoningAccumulator) consumeOllamaChunk(chunk map[string]any) {

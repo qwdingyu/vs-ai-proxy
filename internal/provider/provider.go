@@ -10,10 +10,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/requestmeta"
@@ -37,14 +39,16 @@ type ChatRequest struct {
 
 // Message 消息
 type Message struct {
-	Role         string                     `json:"role"`
-	Content      string                     `json:"content"`
-	ContentRaw   json.RawMessage            `json:"-"`
-	ToolCalls    []ToolCall                 `json:"tool_calls,omitempty"`
-	ToolCallID   string                     `json:"tool_call_id,omitempty"`
-	FunctionCall *FunctionCall              `json:"function_call,omitempty"`
-	Reasoning    string                     `json:"reasoning_content,omitempty"`
-	Extra        map[string]json.RawMessage `json:"-"`
+	Role         string          `json:"role"`
+	Content      string          `json:"content"`
+	ContentRaw   json.RawMessage `json:"-"`
+	ToolCalls    []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID   string          `json:"tool_call_id,omitempty"`
+	FunctionCall *FunctionCall   `json:"function_call,omitempty"`
+	Reasoning    string          `json:"reasoning_content,omitempty"`
+	// Refusal 是 OpenAI 标准的拒绝内容；它可以在 content 为空时独立构成合法响应。
+	Refusal string                     `json:"refusal,omitempty"`
+	Extra   map[string]json.RawMessage `json:"-"`
 }
 
 // ToolCall 工具调用
@@ -240,6 +244,7 @@ func parseOpenAIChatSSEAsResponse(body []byte, model string) (*ChatResponse, err
 	message := resp.Choices[0].Message
 	if strings.TrimSpace(message.Content) == "" &&
 		strings.TrimSpace(message.Reasoning) == "" &&
+		strings.TrimSpace(message.Refusal) == "" &&
 		len(message.ToolCalls) == 0 && message.FunctionCall == nil {
 		return nil, fmt.Errorf("SSE 响应没有文本、推理内容或工具调用")
 	}
@@ -410,6 +415,7 @@ func CollectOpenAIChatSSE(reader io.Reader, model string, maxBytes int64) (*Chat
 				Role:         "assistant",
 				Content:      acc.content.String(),
 				Reasoning:    acc.reasoning.String(),
+				Refusal:      acc.refusal.String(),
 				ToolCalls:    toolCalls,
 				FunctionCall: legacyFunctionCall,
 			},
@@ -424,6 +430,7 @@ func CollectOpenAIChatSSE(reader io.Reader, model string, maxBytes int64) (*Chat
 type openAIChatSSEAccumulator struct {
 	content            strings.Builder
 	reasoning          strings.Builder
+	refusal            strings.Builder
 	toolCalls          map[int]*openAIChatSSEToolCall
 	legacyFunctionCall *openAIChatSSEToolCall
 	finishReason       string
@@ -441,6 +448,7 @@ type openAIChatSSEMessageChunk struct {
 	Content          string `json:"content"`
 	ReasoningContent string `json:"reasoning_content"`
 	Thinking         string `json:"thinking"`
+	Refusal          string `json:"refusal"`
 	FunctionCall     *struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -493,6 +501,7 @@ func (a *openAIChatSSEAccumulator) consumeMessage(message openAIChatSSEMessageCh
 	a.content.WriteString(message.Content)
 	a.reasoning.WriteString(message.ReasoningContent)
 	a.reasoning.WriteString(message.Thinking)
+	a.refusal.WriteString(message.Refusal)
 	if message.FunctionCall != nil {
 		if a.legacyFunctionCall == nil {
 			a.legacyFunctionCall = &openAIChatSSEToolCall{}
@@ -986,7 +995,106 @@ func (p *OpenAIProvider) doChatHTTPRequest(req *http.Request) (*http.Response, e
 	// 仍会被默认 60 秒提前截断，重试又可能为每次尝试重新获得 60 秒。
 	client := *p.Client
 	client.Timeout = 0
-	return client.Do(req)
+	tracedReq, requestTrace := traceUpstreamHTTPRequest(req)
+	resp, err := client.Do(tracedReq)
+	if err != nil {
+		return nil, fmt.Errorf("upstream_stage=%s: %w", requestTrace.name(), err)
+	}
+	return resp, nil
+}
+
+type upstreamHTTPStage int32
+
+const (
+	// 阶段值按一次 HTTP 请求的正常时序递增；trace 回调只能前进，不能因并发回调回退。
+	upstreamStagePreparing upstreamHTTPStage = iota
+	// upstreamStageResolvingDNS 表示正在把上游主机名解析为网络地址。
+	upstreamStageResolvingDNS
+	// upstreamStageConnecting 表示正在建立 TCP 连接或连接到系统配置的 HTTP 代理。
+	upstreamStageConnecting
+	// upstreamStageTLSHandshake 表示已建立底层连接，正在协商 TLS。
+	upstreamStageTLSHandshake
+	// upstreamStageWritingRequest 表示已取得连接，正在发送请求头或请求正文。
+	upstreamStageWritingRequest
+	// upstreamStageWaitingResponseHeaders 表示请求已完整写出，正在等待响应头首字节。
+	upstreamStageWaitingResponseHeaders
+	// upstreamStageReceivingResponseHeaders 表示已收到响应头首字节，Client.Do 正在完成响应建立。
+	upstreamStageReceivingResponseHeaders
+)
+
+// upstreamHTTPTrace 只记录不含 URL、Header、正文的网络阶段。
+// 现场超时时可据此区分 Windows 本机网络问题、请求上传卡住和上游迟迟不返回响应头。
+type upstreamHTTPTrace struct {
+	stage atomic.Int32
+}
+
+// traceUpstreamHTTPRequest 只替换请求 context 来挂载标准库 trace；Clone 会保留
+// Body、GetBody、Header 和 ContentLength，因此不会改变发送给上游的业务请求。
+func traceUpstreamHTTPRequest(req *http.Request) (*http.Request, *upstreamHTTPTrace) {
+	traceState := &upstreamHTTPTrace{}
+	setStage := func(stage upstreamHTTPStage) {
+		next := int32(stage)
+		for {
+			current := traceState.stage.Load()
+			if next <= current || traceState.stage.CompareAndSwap(current, next) {
+				return
+			}
+		}
+	}
+	trace := &httptrace.ClientTrace{
+		GetConn: func(string) {
+			// 一个 Client.Do 可能跟随重定向发起多个 HTTP hop；每个 hop
+			// 都必须从准备阶段重新计时，不能把上一跳的最远阶段带过来。
+			traceState.stage.Store(int32(upstreamStagePreparing))
+		},
+		DNSStart: func(httptrace.DNSStartInfo) {
+			setStage(upstreamStageResolvingDNS)
+		},
+		ConnectStart: func(_, _ string) {
+			setStage(upstreamStageConnecting)
+		},
+		TLSHandshakeStart: func() {
+			setStage(upstreamStageTLSHandshake)
+		},
+		GotConn: func(httptrace.GotConnInfo) {
+			setStage(upstreamStageWritingRequest)
+		},
+		WroteHeaders: func() {
+			setStage(upstreamStageWritingRequest)
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				setStage(upstreamStageWaitingResponseHeaders)
+			}
+		},
+		GotFirstResponseByte: func() {
+			setStage(upstreamStageReceivingResponseHeaders)
+		},
+	}
+	ctx := httptrace.WithClientTrace(req.Context(), trace)
+	return req.Clone(ctx), traceState
+}
+
+func (t *upstreamHTTPTrace) name() string {
+	if t == nil {
+		return "preparing_request"
+	}
+	switch upstreamHTTPStage(t.stage.Load()) {
+	case upstreamStageResolvingDNS:
+		return "resolving_dns"
+	case upstreamStageConnecting:
+		return "connecting"
+	case upstreamStageTLSHandshake:
+		return "tls_handshake"
+	case upstreamStageWritingRequest:
+		return "writing_request"
+	case upstreamStageWaitingResponseHeaders:
+		return "waiting_response_headers"
+	case upstreamStageReceivingResponseHeaders:
+		return "receiving_response_headers"
+	default:
+		return "preparing_request"
+	}
 }
 
 func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {

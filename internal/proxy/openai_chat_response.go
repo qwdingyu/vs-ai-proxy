@@ -101,6 +101,7 @@ func collectOpenAIStreamReader(stream io.Reader, model string, allowedTools map[
 	message := resp.Choices[0].Message
 	hasNoPayload := strings.TrimSpace(message.Content) == "" &&
 		strings.TrimSpace(message.Reasoning) == "" &&
+		strings.TrimSpace(message.Refusal) == "" &&
 		len(message.ToolCalls) == 0 && message.FunctionCall == nil
 	if hasNoPayload && !isOpenAITruncationFinishReason(resp.Choices[0].FinishReason) {
 		return nil, fmt.Errorf("SSE response has no content or tool calls")
@@ -149,7 +150,9 @@ func validateProviderResponseToolContract(resp *provider.ChatResponse) error {
 				return fmt.Errorf("choice %d: %w", choiceIndex, err)
 			}
 		}
-		hasText := strings.TrimSpace(message.Content) != "" || strings.TrimSpace(message.Reasoning) != ""
+		hasText := strings.TrimSpace(message.Content) != "" ||
+			strings.TrimSpace(message.Reasoning) != "" ||
+			strings.TrimSpace(message.Refusal) != ""
 		hasPayload := hasText || hasModernCalls || hasLegacyCall
 		if !hasPayload && !isOpenAITruncationFinishReason(finishReason) {
 			return fmt.Errorf("choice %d 没有文本、推理内容或工具调用", choiceIndex)
@@ -285,6 +288,9 @@ func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, r
 	}
 	if choice.Message.Reasoning != "" {
 		delta["reasoning_content"] = choice.Message.Reasoning
+	}
+	if choice.Message.Refusal != "" {
+		delta["refusal"] = choice.Message.Refusal
 	}
 	if len(choice.Message.ToolCalls) > 0 {
 		delta["tool_calls"] = choice.Message.ToolCalls

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -473,27 +474,125 @@ func postOpenAIStreamForToolExecution(t *testing.T, prov *fakeProvider) ([]provi
 
 func parseOpenAIStreamToolCalls(t *testing.T, body string) ([]provider.ToolCall, string) {
 	t.Helper()
-	toolChunks := map[int]map[string]any{}
+	type wireFunction struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	type wireToolCall struct {
+		Index    int          `json:"index"`
+		ID       string       `json:"id"`
+		Type     string       `json:"type"`
+		Function wireFunction `json:"function"`
+	}
+	type wireDelta struct {
+		ToolCalls    []wireToolCall `json:"tool_calls"`
+		FunctionCall *wireFunction  `json:"function_call"`
+	}
+	type wireEvent struct {
+		Choices []struct {
+			Index        int       `json:"index"`
+			Delta        wireDelta `json:"delta"`
+			FinishReason string    `json:"finish_reason"`
+		} `json:"choices"`
+	}
+
+	// 这段解码器刻意不复用任何生产 parser/merge/normalizer。
+	// 它模拟客户端只按 wire JSON 聚合 delta，避免生产和测试共享同一个错误实现。
+	states := map[int]*provider.ToolCall{}
+	legacy := (*provider.ToolCall)(nil)
 	finishReason := ""
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
+	sawDone := false
+	normalizedBody := strings.ReplaceAll(body, "\r\n", "\n")
+	for _, sseEvent := range strings.Split(normalizedBody, "\n\n") {
+		dataLines := []string{}
+		for _, line := range strings.Split(sseEvent, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "data:") {
+				dataLines = append(dataLines, strings.TrimSpace(trimmed[len("data:"):]))
+			}
+		}
+		if len(dataLines) == 0 {
 			continue
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
+		payload := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		if payload == "" {
 			continue
 		}
-		chunk, err := parseOpenAIStreamPayload(payload)
-		if err != nil {
+		if payload == "[DONE]" {
+			sawDone = true
+			continue
+		}
+		var wirePayload wireEvent
+		if err := json.Unmarshal([]byte(payload), &wirePayload); err != nil {
 			t.Fatalf("VS stream client could not parse SSE payload: %v; payload=%s", err, payload)
 		}
-		if chunk.FinishReason != "" {
-			finishReason = chunk.FinishReason
+		for _, choice := range wirePayload.Choices {
+			if choice.Index != 0 {
+				continue
+			}
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+			for _, chunk := range choice.Delta.ToolCalls {
+				call := states[chunk.Index]
+				if call == nil {
+					call = &provider.ToolCall{}
+					states[chunk.Index] = call
+				}
+				call.ID = appendWireIdentity(call.ID, chunk.ID)
+				if chunk.Type != "" {
+					call.Type = chunk.Type
+				}
+				call.Function.Name = appendWireIdentity(call.Function.Name, chunk.Function.Name)
+				call.Function.Arguments += decodeWireArgumentFragment(t, chunk.Function.Arguments)
+			}
+			if function := choice.Delta.FunctionCall; function != nil {
+				if legacy == nil {
+					legacy = &provider.ToolCall{Type: "function"}
+				}
+				legacy.Function.Name = appendWireIdentity(legacy.Function.Name, function.Name)
+				legacy.Function.Arguments += decodeWireArgumentFragment(t, function.Arguments)
+			}
 		}
-		mergeOpenAIStreamToolCalls(toolChunks, chunk.ToolCalls)
 	}
-	return buildProviderToolCalls(toolChunks), finishReason
+	if !sawDone {
+		t.Fatal("VS stream client did not receive [DONE]")
+	}
+	if legacy != nil {
+		return []provider.ToolCall{*legacy}, finishReason
+	}
+	indexes := make([]int, 0, len(states))
+	for index := range states {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	calls := make([]provider.ToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		calls = append(calls, *states[index])
+	}
+	return calls, finishReason
+}
+
+func appendWireIdentity(current, fragment string) string {
+	if fragment == "" || current == fragment {
+		return current
+	}
+	if current == "" || strings.HasPrefix(fragment, current) {
+		return fragment
+	}
+	return current + fragment
+}
+
+func decodeWireArgumentFragment(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return ""
+	}
+	var fragment string
+	if err := json.Unmarshal(raw, &fragment); err != nil {
+		t.Fatalf("VS stream client requires string tool arguments: %s", raw)
+	}
+	return fragment
 }
 
 func postOpenAIChatCompletion(t *testing.T, prov *fakeProvider, stream bool) *httptest.ResponseRecorder {

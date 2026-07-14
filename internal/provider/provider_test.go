@@ -536,6 +536,30 @@ func TestCollectOpenAIChatSSEAggregatesLegacyFunctionCall(t *testing.T) {
 	}
 }
 
+func TestCollectOpenAIChatSSEPreservesRefusal(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"refusal":"policy "},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"refusal":"refusal"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	resp, err := CollectOpenAIChatSSE(strings.NewReader(body), "gpt-test", 0)
+	if err != nil {
+		t.Fatalf("collect refusal stream: %v", err)
+	}
+	if got := resp.Choices[0].Message.Refusal; got != "policy refusal" {
+		t.Fatalf("refusal = %q, want policy refusal", got)
+	}
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal refusal response: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"refusal":"policy refusal"`) {
+		t.Fatalf("refusal was lost from response JSON: %s", encoded)
+	}
+}
+
 func TestCollectOpenAIChatSSEAggregatesFragmentedToolIdentity(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"choices":[{"delta":{"tool_calls":[{` +
@@ -856,26 +880,129 @@ func TestOpenAIProviderChatStreamRetriesTransientServerErrors(t *testing.T) {
 }
 
 func TestOpenAIProviderRetriesShareOneOperationTimeout(t *testing.T) {
-	var calls int32
+	prov := NewOpenAIProviderWithCapability(
+		"openai",
+		"openai",
+		"sk-test",
+		"https://example.invalid",
+		true,
+		2*time.Second,
+	)
+	deadlines := []time.Time{}
+	missingDeadline := false
+	prov.Client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			missingDeadline = true
+			return nil, errors.New("retry request is missing operation deadline")
+		}
+		deadlines = append(deadlines, deadline)
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"error":{"message":"temporarily unavailable"}}`,
+			)),
+			Request: req,
+		}, nil
+	})
+
+	_, err := prov.ChatRaw(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("ChatRaw should return the final transient error")
+	}
+	if missingDeadline {
+		t.Fatal("retry request should have an operation deadline")
+	}
+	if len(deadlines) != prov.openAIProviderMaxAttempts() {
+		t.Fatalf("retry calls = %d, want %d", len(deadlines), prov.openAIProviderMaxAttempts())
+	}
+	for index := 1; index < len(deadlines); index++ {
+		if !deadlines[index].Equal(deadlines[0]) {
+			t.Fatalf(
+				"retry %d received a fresh deadline: first=%s current=%s",
+				index,
+				deadlines[0],
+				deadlines[index],
+			)
+		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestOpenAIProviderTimeoutReportsWaitingResponseHeaders(t *testing.T) {
+	requestBytes := make(chan int, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		time.Sleep(70 * time.Millisecond)
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":{"message":"temporarily unavailable"}}`))
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			requestBytes <- 0
+			return
+		}
+		requestBytes <- len(body)
+		<-r.Context().Done()
 	}))
 	defer upstream.Close()
 
-	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, 100*time.Millisecond)
-	started := time.Now()
-	_, err := prov.ChatRaw(context.Background(), &ChatRequest{Model: "gpt-5.5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	prov := NewOpenAIProviderWithCapability(
+		"openai",
+		"openai",
+		"sk-test",
+		upstream.URL,
+		true,
+		time.Second,
+	)
+	_, err := prov.ChatStream(context.Background(), &ChatRequest{
+		Model: "gpt-5.6-sol",
+		Messages: []Message{{
+			Role:    "user",
+			Content: strings.Repeat("x", 1<<20),
+		}},
+	})
 	if err == nil {
-		t.Fatal("ChatRaw should fail when the shared operation budget expires")
+		t.Fatal("ChatStream should time out while the upstream withholds response headers")
 	}
-	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
-		t.Fatalf("retries exceeded shared timeout budget: %s", elapsed)
+	if !strings.Contains(err.Error(), "upstream_stage=waiting_response_headers") {
+		t.Fatalf("timeout stage = %v, want waiting_response_headers", err)
 	}
-	if got := atomic.LoadInt32(&calls); got > 2 {
-		t.Fatalf("calls = %d, retries must not receive a fresh timeout per attempt", got)
+	if got := <-requestBytes; got < 1<<20 {
+		t.Fatalf("upstream request bytes = %d, want at least 1 MiB", got)
+	}
+}
+
+func TestOpenAIProviderTraceResetsForRedirectedHop(t *testing.T) {
+	var requests int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&requests, 1) == 1 {
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+			return
+		}
+		_, _ = io.ReadAll(r.Body)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability(
+		"openai",
+		"openai",
+		"sk-test",
+		upstream.URL,
+		true,
+		100*time.Millisecond,
+	)
+	_, err := prov.ChatStream(context.Background(), &ChatRequest{
+		Model:    "gpt-test",
+		Messages: []Message{{Role: "user", Content: "redirect"}},
+	})
+	if err == nil {
+		t.Fatal("redirected ChatStream should time out while the second hop withholds headers")
+	}
+	if !strings.Contains(err.Error(), "upstream_stage=waiting_response_headers") {
+		t.Fatalf("redirected hop stage = %v, want waiting_response_headers", err)
 	}
 }
 

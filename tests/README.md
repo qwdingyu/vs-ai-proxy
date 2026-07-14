@@ -92,6 +92,7 @@ STREAMING_OLLAMA_OK
 - 覆盖任意声明工具、复杂 schema/history/tool_choice、缺失 id/type 修复、parallel tool calls、identity/arguments 分片、固定种子随机压力和 5 MiB 单 SSE 事件。
 - 覆盖 OpenAI/Ollama 空响应、无终态 EOF，以及截断响应同时残留 modern/legacy 调用的防执行规则。
 - 覆盖 OpenAI/Ollama 双向转换的逻辑多行 SSE、synthetic finish、截断/残缺工具尾部和 typed fallback 空响应。
+- 覆盖有无空行的 `[DONE]` 后上游延迟 EOF、DSML 探测终态、SSE 元数据含 `data:`、refusal-only 合法响应、空 legacy functions 普通聊天回归和独立 wire 客户端解析。
 - 再运行 OpenAI/Ollama 本地流式冒烟。
 
 运行：
@@ -216,6 +217,7 @@ tests/useai_large_request_diagnostic.sh
 | `cancel_reason` | 499/取消类请求的进一步原因 | `client_deadline_reached` 表示接近 VS/Copilot 等待上限 |
 | `network_peer` | 网络错误中解析出的远端 IP:port | 如果是 `104.21.x.x` / `172.67.x.x`，通常是 Cloudflare/CDN 边缘 IP，不是源站 IP |
 | `stream_state` | 流式请求进度 | `upstream_connecting`、`upstream_connected`、`downstream_started` |
+| `upstream_stage` | provider HTTP 失败时当前 hop 的最后网络阶段 | `preparing_request`、`resolving_dns`、`connecting`、`tls_handshake`、`writing_request`、`waiting_response_headers`、`receiving_response_headers` |
 
 判断规则：
 
@@ -227,6 +229,10 @@ tests/useai_large_request_diagnostic.sh
 - `error_code=network_error` 且 `network_peer` 是 CDN IP：优先排查客户端到 CDN、CDN 到源站、Cloudflare/WAF 或边缘连接关闭，不要直接当成 new-api 源站 IP。
 - `direct_elapsed_ms` 和 `proxy_elapsed_ms` 都接近 100 秒：优先查上游/客户端等待上限；只有 proxy 明显更慢时才优先怀疑代理。
 - `stream_state=upstream_connecting`：尚未收到上游 HTTP 响应头/可读流；可能包含上传、连接、TLS、CDN/WAF、网关排队和首 token 等待，不能只凭该字段归因 DNS/TCP。
+- `upstream_stage=waiting_response_headers`：请求已经写完但没有收到响应头首字节；优先查网关排队、渠道选择、模型首响应和大上下文能力，不再优先怀疑本地上传。
+- `upstream_stage=preparing_request`：请求尚未进入可观测网络阶段，优先检查 URL 解析、请求构造或极短预算。
+- `upstream_stage=receiving_response_headers`：已经收到响应头首字节但响应建立未完成，优先查重定向、代理中间层和连接关闭。
+- `upstream_stage=resolving_dns/connecting/tls_handshake`：优先查 Windows DNS、系统代理、安全软件、证书链和 CDN 网络。
 - `stream_state=upstream_connected`：已连上上游但未向 VS 写出首个 chunk；优先查上游首 token 或 new-api 渠道排队。
 - `stream_state=downstream_started`：已经向 VS 写出过 chunk；后续失败不能安全自动重试。
 

@@ -51,6 +51,9 @@ func buildOllamaChatResponse(model string, resp *provider.ChatResponse) map[stri
 	if resp != nil && len(resp.Choices) > 0 {
 		src := resp.Choices[0].Message
 		content := src.Content
+		if content == "" && src.Refusal != "" {
+			content = src.Refusal
+		}
 		if content == "" && src.Reasoning != "" {
 			content = src.Reasoning
 		}

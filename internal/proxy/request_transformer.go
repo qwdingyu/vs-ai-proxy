@@ -104,7 +104,7 @@ func (s *Server) applyExecutionDefaults(
 
 	modelCfg, ok := findModelConfig(cfg, requestedModel, req.Model, prov.Name())
 	caps := provider.GetCapabilities(provider.CapabilityNameOf(prov))
-	hasDeclaredTools := len(req.Tools) > 0 || len(req.Extra["functions"]) > 0
+	hasDeclaredTools := requestDeclaresTools(req)
 	if !ok {
 		if !hasDeclaredTools {
 			s.applyGlobalDefaults(req)
@@ -167,6 +167,22 @@ func (s *Server) applyGlobalDefaults(req *provider.ChatRequest) {
 	if req.MaxTokens == nil {
 		req.MaxTokens = intPtr(4096)
 	}
+}
+
+// requestDeclaresTools 只在 modern tools 或 legacy functions 实际非空时
+// 关闭代理猜测的输出/采样默认值；[] 和 null 仍属于普通聊天，必须保持旧行为。
+func requestDeclaresTools(req *provider.ChatRequest) bool {
+	if req == nil {
+		return false
+	}
+	if len(req.Tools) > 0 {
+		return true
+	}
+	var functions []json.RawMessage
+	if err := json.Unmarshal(req.Extra["functions"], &functions); err != nil {
+		return false
+	}
+	return len(functions) > 0
 }
 
 func (s *Server) applyProfileDefaults(

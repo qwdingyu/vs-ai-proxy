@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
@@ -490,6 +493,238 @@ func TestCopilotDirectStreamRejectsEmptyOrUnterminatedSuccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCopilotDirectStreamStopsReadingAfterDone(t *testing.T) {
+	release := make(chan struct{})
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		"data: [DONE]",
+	}, "\n") + "\n"
+	prov := &heldEOFStreamProvider{
+		fakeStreamProvider: &fakeStreamProvider{name: "openai"},
+		stream:             stream,
+		release:            release,
+	}
+	server := &Server{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	result := make(chan error, 1)
+	go func() {
+		result <- server.streamOpenAI(
+			rec,
+			req,
+			prov,
+			&provider.ChatRequest{Model: "gpt-test"},
+			rec,
+		)
+	}()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			close(release)
+			t.Fatalf("valid stream failed before upstream EOF: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		close(release)
+		err := <-result
+		t.Fatalf("proxy waited for transport EOF after [DONE]: %v", err)
+	}
+	close(release)
+	if !strings.Contains(rec.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("validated terminal event was not committed: %s", rec.Body.String())
+	}
+}
+
+func TestCopilotDirectStreamDoesNotExposeMultilineEmptyFinish(t *testing.T) {
+	stream := strings.Join([]string{
+		`id: trace-data: misleading-metadata`,
+		`data: {"choices":[`,
+		`data: {"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	err := server.streamOpenAI(
+		rec,
+		req,
+		prov,
+		&provider.ChatRequest{Model: "gpt-test"},
+		rec,
+	)
+	if err == nil {
+		t.Fatalf("empty multiline terminal returned success: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"finish_reason":"stop"`) ||
+		strings.Contains(rec.Body.String(), "data: [DONE]") {
+		t.Fatalf("invalid multiline terminal was exposed before validation: %s", rec.Body.String())
+	}
+}
+
+func TestCopilotOpenAIToOllamaStopsReadingAfterDone(t *testing.T) {
+	release := make(chan struct{})
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		"data: [DONE]",
+	}, "\n") + "\n"
+	prov := &heldEOFStreamProvider{
+		fakeStreamProvider: &fakeStreamProvider{name: "openai"},
+		stream:             stream,
+		release:            release,
+	}
+	server := &Server{}
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
+	rec := httptest.NewRecorder()
+	result := make(chan error, 1)
+	go func() {
+		result <- server.streamOpenAIToOllama(
+			rec,
+			req,
+			prov,
+			&provider.ChatRequest{Model: "gpt-test"},
+			rec,
+		)
+	}()
+
+	select {
+	case err := <-result:
+		close(release)
+		if err != nil {
+			t.Fatalf("valid OpenAI-to-Ollama stream failed before upstream EOF: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		err := <-result
+		t.Fatalf("OpenAI-to-Ollama waited for transport EOF after [DONE]: %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), `"done":true`) {
+		t.Fatalf("validated Ollama terminal was not committed: %s", rec.Body.String())
+	}
+}
+
+func TestCopilotDSMLProbeStopsReadingAfterDone(t *testing.T) {
+	release := make(chan struct{})
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"<｜DSML｜tool_calls><｜DSML｜invoke name=\"get_file\"><｜DSML｜parameter name=\"filename\">a.cs</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		"data: [DONE]",
+	}, "\n") + "\n"
+	prov := &heldEOFStreamProvider{
+		fakeStreamProvider: &fakeStreamProvider{name: "openai"},
+		stream:             stream,
+		release:            release,
+	}
+	server := &Server{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	chatReq := &provider.ChatRequest{
+		Model: "gpt-test",
+		Tools: []provider.Tool{{
+			Type:     "function",
+			Function: provider.ToolFunc{Name: "get_file"},
+		}},
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- server.streamOpenAI(rec, req, prov, chatReq, rec)
+	}()
+
+	select {
+	case err := <-result:
+		close(release)
+		if err != nil {
+			t.Fatalf("valid DSML stream failed before upstream EOF: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		err := <-result
+		t.Fatalf("DSML probe waited for transport EOF after [DONE]: %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), `"name":"get_file"`) ||
+		!strings.Contains(rec.Body.String(), "data: [DONE]") {
+		t.Fatalf("validated DSML tool call was not committed: %s", rec.Body.String())
+	}
+}
+
+func TestCopilotRefusalOnlyResponsesRemainValid(t *testing.T) {
+	raw := []byte(
+		`{"choices":[{"message":{"role":"assistant","content":null,` +
+			`"refusal":"policy refusal"},"finish_reason":"stop"}]}`,
+	)
+	if err := validateOpenAIChatResponseBody(raw); err != nil {
+		t.Fatalf("raw refusal-only response should be valid: %v", err)
+	}
+
+	typed := &provider.ChatResponse{Choices: []provider.Choice{{
+		Message: provider.Message{
+			Role:    "assistant",
+			Refusal: "policy refusal",
+		},
+		FinishReason: "stop",
+	}}}
+	typedRec := httptest.NewRecorder()
+	if err := writeOpenAIChatResponseAsSSE(typedRec, typedRec, typed); err != nil {
+		t.Fatalf("typed refusal-only fallback should be valid: %v", err)
+	}
+	if !strings.Contains(typedRec.Body.String(), `"refusal":"policy refusal"`) {
+		t.Fatalf("typed fallback lost refusal: %s", typedRec.Body.String())
+	}
+
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"refusal":"policy refusal"},"finish_reason":"stop"}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n")
+	streamRec := httptest.NewRecorder()
+	server := &Server{}
+	prov := &fakeStreamProvider{name: "openai", body: stream}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	if err := server.streamOpenAI(
+		streamRec,
+		req,
+		prov,
+		&provider.ChatRequest{Model: "gpt-test"},
+		streamRec,
+	); err != nil {
+		t.Fatalf("direct refusal-only stream should be valid: %v", err)
+	}
+	if !strings.Contains(streamRec.Body.String(), `"refusal":"policy refusal"`) {
+		t.Fatalf("direct stream lost refusal: %s", streamRec.Body.String())
+	}
+}
+
+type heldEOFStreamProvider struct {
+	*fakeStreamProvider
+	stream  string
+	release <-chan struct{}
+}
+
+func (p *heldEOFStreamProvider) ChatStream(
+	context.Context,
+	*provider.ChatRequest,
+) (io.ReadCloser, error) {
+	return io.NopCloser(&heldEOFReader{
+		stream:  strings.NewReader(p.stream),
+		release: p.release,
+	}), nil
+}
+
+type heldEOFReader struct {
+	stream  *strings.Reader
+	release <-chan struct{}
+}
+
+func (r *heldEOFReader) Read(dst []byte) (int, error) {
+	if r.stream.Len() > 0 {
+		return r.stream.Read(dst)
+	}
+	<-r.release
+	return 0, io.EOF
 }
 
 func TestCopilotExplicitTruncationTerminalMayBeEmpty(t *testing.T) {

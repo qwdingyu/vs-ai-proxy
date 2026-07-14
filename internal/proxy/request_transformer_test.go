@@ -113,6 +113,39 @@ func TestApplyExecutionDefaultsRetainsPlainChatDefaults(t *testing.T) {
 	}
 }
 
+func TestApplyExecutionDefaultsTreatsEmptyLegacyFunctionsAsPlainChat(t *testing.T) {
+	tests := []struct {
+		name      string
+		functions json.RawMessage
+	}{
+		{name: "empty array", functions: json.RawMessage(`[]`)},
+		{name: "null", functions: json.RawMessage(`null`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &Server{config: &config.AppConfig{}}
+			req := &provider.ChatRequest{
+				Model: "gpt-chat-model",
+				Extra: map[string]json.RawMessage{"functions": tt.functions},
+			}
+
+			server.applyExecutionDefaults(
+				server.config,
+				req,
+				"gpt-chat-model",
+				&stubProvider{name: "openai"},
+			)
+
+			if req.MaxTokens == nil || *req.MaxTokens != 4096 {
+				t.Fatalf("plain legacy chat max_tokens = %v, want 4096", req.MaxTokens)
+			}
+			if req.Temperature == nil || *req.Temperature != 0.7 {
+				t.Fatalf("plain legacy chat temperature = %v, want 0.7", req.Temperature)
+			}
+		})
+	}
+}
+
 func TestApplyExecutionDefaultsOverrideClientParams(t *testing.T) {
 	server := &Server{
 		config: &config.AppConfig{

@@ -74,6 +74,11 @@ func drainOpenAIStreamProbeWithLimit(
 		*buffered = append(*buffered, line)
 		raw.WriteString(line)
 		raw.WriteByte('\n')
+		if isOpenAIStreamDoneLine(line) {
+			// DSML 探测也遵守 SSE 应用层终态；上游可能在 DONE 后保持
+			// HTTP body 打开，不能为了等 EOF 阻塞客户端终态。
+			return nil
+		}
 	}
 	return scanner.Err()
 }
@@ -95,9 +100,9 @@ func isOpenAIStreamDoneLine(line string) bool {
 	return strings.HasPrefix(trimmed, "data:") && strings.TrimSpace(trimmed[5:]) == "[DONE]"
 }
 
-// openAIStreamEventProcessor 按 SSE 事件而不是物理行处理 direct stream。
-// 普通内容事件即时写出；一旦看到工具调用，只缓存工具尾部，终态校验通过后再输出，
-// 避免 length/content_filter、错误事件或 EOF 残缺参数先暴露给客户端执行。
+// openAIStreamEventProcessor 是 direct SSE 和 OpenAI/Ollama 转换共享的逻辑事件门禁。
+// 普通内容事件即时写出；工具尾部和成功终态先缓存，只有完整性校验通过才原子提交，
+// 避免 length/content_filter、错误事件或 EOF 残缺参数先暴露给下游执行。
 type openAIStreamEventProcessor struct {
 	w         io.Writer
 	flusher   interface{ Flush() }
@@ -142,13 +147,13 @@ func (p *openAIStreamEventProcessor) consumeLine(line string) error {
 	if isData && len(p.dataLines) > 0 {
 		pending := strings.TrimSpace(strings.Join(p.dataLines, "\n"))
 		if pending == "[DONE]" || json.Valid([]byte(pending)) {
-			if err := p.flushEvent("\n"); err != nil {
+			if err := p.flushEvent("\n\n"); err != nil {
 				return err
 			}
 		}
 	}
 	if strings.HasPrefix(trimmed, "event:") && len(p.eventLines) > 0 {
-		if err := p.flushEvent("\n"); err != nil {
+		if err := p.flushEvent("\n\n"); err != nil {
 			return err
 		}
 	}
@@ -163,7 +168,13 @@ func (p *openAIStreamEventProcessor) consumeLine(line string) error {
 	p.eventBytes += int64(len(line) + 1)
 	switch {
 	case isData:
-		p.dataLines = append(p.dataLines, strings.TrimSpace(trimmed[5:]))
+		payload := strings.TrimSpace(trimmed[5:])
+		p.dataLines = append(p.dataLines, payload)
+		if payload == "[DONE]" {
+			// DONE 本身不需要等额外空行；兼容只发送一条 DONE 行后
+			// 长时间保持连接的上游，同时保留统一校验/提交门禁。
+			return p.flushEvent("\n\n")
+		}
 	case strings.HasPrefix(trimmed, "event:"):
 		p.eventType = strings.TrimSpace(trimmed[6:])
 	}
@@ -171,7 +182,7 @@ func (p *openAIStreamEventProcessor) consumeLine(line string) error {
 }
 
 func (p *openAIStreamEventProcessor) finish() error {
-	if err := p.flushEvent("\n"); err != nil {
+	if err := p.flushEvent("\n\n"); err != nil {
 		return err
 	}
 	if p.sanitizer != nil {
@@ -193,8 +204,14 @@ func (p *openAIStreamEventProcessor) commit() error {
 	return nil
 }
 
+func (p *openAIStreamEventProcessor) receivedDone() bool {
+	// [DONE] 是 SSE 应用层终态；上游可以复用连接或延迟关闭 body，
+	// 因此读取循环必须据此结束，不能继续等待传输层 EOF。
+	return p != nil && p.sanitizer != nil && p.sanitizer.sawDone
+}
+
 func (p *openAIStreamEventProcessor) flushPendingBeforeReadError() error {
-	return p.flushEvent("\n")
+	return p.flushEvent("\n\n")
 }
 
 func (p *openAIStreamEventProcessor) flushEvent(separator string) error {
@@ -266,8 +283,8 @@ func (p *openAIStreamEventProcessor) writeEvent(event string) error {
 }
 
 func isOpenAIStreamDoneEvent(event string) bool {
-	for _, line := range strings.Split(event, "\n") {
-		if isOpenAIStreamDoneLine(line) {
+	for _, payload := range openAIStreamEventPayloads(event) {
+		if strings.TrimSpace(payload) == "[DONE]" {
 			return true
 		}
 	}
@@ -275,18 +292,40 @@ func isOpenAIStreamDoneEvent(event string) bool {
 }
 
 func isOpenAIStreamFinishEvent(event string) bool {
-	for _, line := range strings.Split(event, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(trimmed[5:])
+	for _, payload := range openAIStreamEventPayloads(event) {
 		chunk, err := parseOpenAIStreamPayload(payload)
 		if err == nil && strings.TrimSpace(chunk.FinishReason) != "" {
 			return true
 		}
 	}
 	return false
+}
+
+// openAIStreamEventPayloads 从已经归一化的逻辑事件中提取 data 正文。
+// 多行 data 会在 JSON 内保留换行，因此不能再次按物理行逐行解析。
+func openAIStreamEventPayloads(event string) []string {
+	payloads := []string{}
+	for _, logicalEvent := range strings.Split(event, "\n\n") {
+		var payload strings.Builder
+		foundDataField := false
+		for _, line := range strings.Split(logicalEvent, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !foundDataField {
+				if !strings.HasPrefix(trimmed, "data:") {
+					continue
+				}
+				foundDataField = true
+				payload.WriteString(strings.TrimSpace(trimmed[len("data:"):]))
+				continue
+			}
+			payload.WriteByte('\n')
+			payload.WriteString(line)
+		}
+		if foundDataField && strings.TrimSpace(payload.String()) != "" {
+			payloads = append(payloads, strings.TrimSpace(payload.String()))
+		}
+	}
+	return payloads
 }
 
 func (p *openAIStreamEventProcessor) resetEvent() {

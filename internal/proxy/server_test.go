@@ -946,8 +946,14 @@ func TestStreamOpenAIProbePreservesOrdinarySSE(t *testing.T) {
 	if err := server.streamOpenAI(rec, req, prov, chatReq, rec); err != nil {
 		t.Fatalf("streamOpenAI returned error: %v", err)
 	}
-	if rec.Body.String() != stream {
-		t.Fatalf("ordinary SSE changed during DSML probe:\n got: %q\nwant: %q", rec.Body.String(), stream)
+	want := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}, "\n\n") + "\n\n"
+	if rec.Body.String() != want {
+		t.Fatalf("ordinary SSE was not normalized to complete events during DSML probe:\n got: %q\nwant: %q", rec.Body.String(), want)
 	}
 	if got := rec.Header().Get("X-Proxy-Tool-Call-Normalization"); got != "" {
 		t.Fatalf("ordinary stream should not report DSML normalization: %q", got)
@@ -972,8 +978,13 @@ func TestStreamOpenAILeavesUndeclaredDSMLAsText(t *testing.T) {
 	if err := server.streamOpenAI(rec, req, prov, chatReq, rec); err != nil {
 		t.Fatalf("streamOpenAI returned error: %v", err)
 	}
-	if rec.Body.String() != stream {
-		t.Fatalf("undeclared DSML should remain original text: got %q want %q", rec.Body.String(), stream)
+	want := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"<｜DSML｜tool_calls><｜DSML｜invoke name=\"delete_file\"></｜DSML｜invoke></｜DSML｜tool_calls>"},"finish_reason":null}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+	if rec.Body.String() != want {
+		t.Fatalf("undeclared DSML text changed beyond SSE framing: got %q want %q", rec.Body.String(), want)
 	}
 	if got := rec.Header().Get("X-Proxy-Tool-Call-Normalization"); got != "" {
 		t.Fatalf("rejected DSML must not report normalization: %q", got)

@@ -1296,10 +1296,16 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		if err := eventProcessor.consumeLine(line); err != nil {
 			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 		}
+		if eventProcessor.receivedDone() {
+			break
+		}
 	}
-	for scanner.Scan() {
+	for !eventProcessor.receivedDone() && scanner.Scan() {
 		if err := eventProcessor.consumeLine(scanner.Text()); err != nil {
 			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+		}
+		if eventProcessor.receivedDone() {
+			break
 		}
 		if r.Context().Err() != nil {
 			return r.Context().Err()
@@ -1485,9 +1491,12 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 		acc,
 		streamToolSanitizer,
 	)
-	for scanner.Scan() {
+	for !eventProcessor.receivedDone() && scanner.Scan() {
 		if err := eventProcessor.consumeLine(scanner.Text()); err != nil {
 			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+		}
+		if eventProcessor.receivedDone() {
+			break
 		}
 		if r.Context().Err() != nil {
 			return r.Context().Err()
@@ -1530,6 +1539,8 @@ func consumeConvertedOpenAISSEEvent(processor *openAIStreamEventProcessor, event
 	return processor.consumeLine("")
 }
 
+// openAIToOllamaStreamWriter 只接收 event processor 已校验并按事件提交的 SSE。
+// 它负责把每个逻辑 delta 转成 NDJSON；done=true 仍由调用方在整体校验后统一写出。
 type openAIToOllamaStreamWriter struct {
 	writer       io.Writer
 	model        string
@@ -1587,7 +1598,10 @@ func (w *openAIToOllamaStreamWriter) writePayload(payload string) error {
 		w.finishReason = chunk.FinishReason
 	}
 	if chunk.Content == "" && len(chunk.ToolCalls) == 0 {
-		return nil
+		if chunk.Refusal == "" {
+			return nil
+		}
+		chunk.Content = chunk.Refusal
 	}
 	out, err := buildOllamaStreamChunk(w.model, chunk.Content, chunk.ToolCalls, false, "")
 	if err != nil {
@@ -1608,8 +1622,10 @@ func newStreamScanner(r io.Reader) *bufio.Scanner {
 }
 
 type openAIStreamChunk struct {
-	Content      string
-	Reasoning    string
+	Content   string
+	Reasoning string
+	// Refusal 与 Content 独立；OpenAI 允许只返回拒绝内容而不返回普通文本。
+	Refusal      string
 	ToolCalls    []any
 	FinishReason string
 }
@@ -1653,6 +1669,9 @@ func parseOpenAIStreamPayload(payload string) (openAIStreamChunk, error) {
 	}
 	if reasoning, ok := delta["reasoning_content"].(string); ok {
 		out.Reasoning = reasoning
+	}
+	if refusal, ok := delta["refusal"].(string); ok {
+		out.Refusal = refusal
 	}
 	if toolCalls, ok := delta["tool_calls"].([]any); ok {
 		out.ToolCalls = toolCalls

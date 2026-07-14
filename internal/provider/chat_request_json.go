@@ -28,6 +28,7 @@ var messageKnownFields = map[string]struct{}{
 	"tool_call_id":      {},
 	"function_call":     {},
 	"reasoning_content": {},
+	"refusal":           {},
 }
 
 var toolCallKnownFields = map[string]struct{}{
@@ -171,6 +172,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		ToolCallID   string          `json:"tool_call_id,omitempty"`
 		FunctionCall *FunctionCall   `json:"function_call,omitempty"`
 		Reasoning    string          `json:"reasoning_content,omitempty"`
+		Refusal      string          `json:"refusal,omitempty"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return err
@@ -190,6 +192,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		ToolCallID:   msg.ToolCallID,
 		FunctionCall: msg.FunctionCall,
 		Reasoning:    msg.Reasoning,
+		Refusal:      msg.Refusal,
 	}
 	if len(msg.Content) > 0 {
 		var content string
