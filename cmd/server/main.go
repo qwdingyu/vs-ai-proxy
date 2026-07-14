@@ -771,10 +771,36 @@ func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *p
 		return
 	}
 
-	lastMod, lastHash, err := configFileFingerprint(path)
-	if err != nil {
-		logger.Warn("初始化配置文件监控失败: %v", err)
+	var lastMod time.Time
+	var lastHash string
+	checkAndReload := func() {
+		mod, hash, err := configFileFingerprint(path)
+		if err != nil {
+			logger.Warn("检查配置文件变更失败: %v", err)
+			return
+		}
+		if !mod.After(lastMod) && hash == lastHash {
+			return
+		}
+
+		oldPort := configMgr.Get().Port
+		cfg, err := configMgr.Reload()
+		if err != nil {
+			logger.Warn("热加载配置失败: %v", err)
+			return
+		}
+		lastMod = mod
+		lastHash = hash
+		proxySrv.Reconfigure(cfg)
+		if cfg.Port != oldPort {
+			logger.Warn("配置文件端口已变更为 %d；当前监听端口仍为 %d，端口变更需要重启进程", cfg.Port, oldPort)
+		}
+		logger.Info("已热加载配置文件: %s (providers=%d models=%d)", path, len(cfg.Providers), len(cfg.Models))
 	}
+
+	// 配置可能在主程序创建 Manager/Proxy 后、监控 goroutine 获得调度前发生变化。
+	// 启动时先同步一次，避免把这次变化误当成无需处理的初始基线。
+	checkAndReload()
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -784,28 +810,7 @@ func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *p
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			mod, hash, err := configFileFingerprint(path)
-			if err != nil {
-				logger.Warn("检查配置文件变更失败: %v", err)
-				continue
-			}
-			if !mod.After(lastMod) && hash == lastHash {
-				continue
-			}
-
-			oldPort := configMgr.Get().Port
-			cfg, err := configMgr.Reload()
-			if err != nil {
-				logger.Warn("热加载配置失败: %v", err)
-				continue
-			}
-			lastMod = mod
-			lastHash = hash
-			proxySrv.Reconfigure(cfg)
-			if cfg.Port != oldPort {
-				logger.Warn("配置文件端口已变更为 %d；当前监听端口仍为 %d，端口变更需要重启进程", cfg.Port, oldPort)
-			}
-			logger.Info("已热加载配置文件: %s (providers=%d models=%d)", path, len(cfg.Providers), len(cfg.Models))
+			checkAndReload()
 		}
 	}
 }

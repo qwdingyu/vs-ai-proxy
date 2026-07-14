@@ -418,17 +418,17 @@ func TestWatchConfigLoopReloadsProxyConfigFromDisk(t *testing.T) {
 	}
 	proxySrv := proxy.NewServer(configMgr.Get(), configMgr, store.New(10), log.New(nil, log.LevelError, false))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go watchConfigLoop(ctx, configMgr, proxySrv, log.New(nil, log.LevelError, false))
-
-	// 确保新写入的配置文件 mtime 晚于 watchConfigLoop 启动时记录的 mtime。
-	time.Sleep(25 * time.Millisecond)
+	// 模拟主程序加载配置后、监控 goroutine 真正开始执行前，配置文件已被修改。
+	// 监控器必须在启动时对齐磁盘状态，不能把这次修改误当成初始基线。
 	next := config.DefaultConfig()
 	next.Port = 12345
 	next.DefaultModel = "after-hot-reload"
 	next.Providers = []config.ProviderConfig{config.DefaultUseAIProvider()}
 	writeConfigFile(t, path, next)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchConfigLoop(ctx, configMgr, proxySrv, log.New(nil, log.LevelError, false))
 
 	waitForProxyDefaultModel(t, proxySrv, "after-hot-reload")
 }
