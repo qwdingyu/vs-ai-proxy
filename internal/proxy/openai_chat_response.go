@@ -178,6 +178,9 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 			}
 			continue
 		}
+		if finishReason, _ := choice["finish_reason"].(string); isOpenAITruncationFinishReason(finishReason) {
+			continue
+		}
 		content, _ := message["content"].(string)
 		toolCalls, cleaned := parseDSMLToolCalls(content, allowedTools)
 		if len(toolCalls) == 0 {
@@ -238,6 +241,12 @@ func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, r
 	}
 	if len(choice.Message.ToolCalls) > 0 {
 		delta["tool_calls"] = choice.Message.ToolCalls
+	}
+	// 流式失败后的非流式兜底仍可能得到 legacy function_call。
+	// 只发送 finish_reason=function_call 而省略 delta.function_call 会让
+	// Visual Studio 收到“调用结束”却没有可执行工具参数，表现为工具偶发失效。
+	if choice.Message.FunctionCall != nil {
+		delta["function_call"] = choice.Message.FunctionCall
 	}
 	if len(delta) > 0 {
 		contentChunk, err := json.Marshal(map[string]any{

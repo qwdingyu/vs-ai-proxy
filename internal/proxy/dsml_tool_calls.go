@@ -33,13 +33,19 @@ func normalizeDSMLToolCallsInChatResponse(resp *provider.ChatResponse, allowedTo
 		return
 	}
 	for i := range resp.Choices {
-		msg := &resp.Choices[i].Message
+		choice := &resp.Choices[i]
+		msg := &choice.Message
+		// length/content_filter 表示输出被截断；无论工具来自标准字段还是
+		// DSML 文本，都不能在终态后重新转换成可执行调用。
+		if isOpenAITruncationFinishReason(choice.FinishReason) {
+			continue
+		}
 		if len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
 			if sanitizeExecutableToolCalls(msg, allowedTools) {
 				if messageHasExecutableToolCalls(*msg) {
-					resp.Choices[i].FinishReason = "tool_calls"
+					choice.FinishReason = "tool_calls"
 				} else {
-					resp.Choices[i].FinishReason = "stop"
+					choice.FinishReason = "stop"
 				}
 			}
 			if len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
@@ -52,7 +58,7 @@ func normalizeDSMLToolCallsInChatResponse(resp *provider.ChatResponse, allowedTo
 		}
 		msg.Content = cleaned
 		msg.ToolCalls = calls
-		resp.Choices[i].FinishReason = "tool_calls"
+		choice.FinishReason = "tool_calls"
 	}
 }
 
@@ -219,6 +225,9 @@ func normalizeDSMLToolCallsInOllamaJSON(body []byte, allowedTools map[string]str
 	}
 	message, _ := root["message"].(map[string]any)
 	if message == nil {
+		return body
+	}
+	if doneReason, _ := root["done_reason"].(string); isOpenAITruncationFinishReason(doneReason) {
 		return body
 	}
 	if calls, ok := message["tool_calls"].([]any); ok && len(calls) > 0 {

@@ -88,6 +88,7 @@ STREAMING_OLLAMA_OK
 
 - 运行 provider、converter、proxy 的正式工具协议契约测试。
 - 覆盖 modern/legacy、raw/SSE、BOM、错误帧、截断、object arguments、DSML 和 Ollama。
+- 覆盖 alternate mode 的 legacy `function_call` 保真，以及截断 DSML 不得重新变成可执行工具。
 - 再运行 OpenAI/Ollama 本地流式冒烟。
 
 运行：
@@ -220,7 +221,7 @@ tests/useai_large_request_diagnostic.sh
 - `error_code=client_deadline_reached` 且耗时接近 100 秒：优先排查上游首 token、new-api 渠道排队/重试和客户端等待上限。
 - `error_code=network_error` 且 `network_peer` 是 CDN IP：优先排查客户端到 CDN、CDN 到源站、Cloudflare/WAF 或边缘连接关闭，不要直接当成 new-api 源站 IP。
 - `direct_elapsed_ms` 和 `proxy_elapsed_ms` 都接近 100 秒：优先查上游/客户端等待上限；只有 proxy 明显更慢时才优先怀疑代理。
-- `stream_state=upstream_connecting`：还没建立上游流；优先查连接/DNS/CDN/上游接入。
+- `stream_state=upstream_connecting`：尚未收到上游 HTTP 响应头/可读流；可能包含上传、连接、TLS、CDN/WAF、网关排队和首 token 等待，不能只凭该字段归因 DNS/TCP。
 - `stream_state=upstream_connected`：已连上上游但未向 VS 写出首个 chunk；优先查上游首 token 或 new-api 渠道排队。
 - `stream_state=downstream_started`：已经向 VS 写出过 chunk；后续失败不能安全自动重试。
 

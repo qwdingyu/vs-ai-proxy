@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -268,6 +269,41 @@ func TestToolProtocolContract(t *testing.T) {
 		}
 	})
 
+	t.Run("truncated DSML never becomes executable tool call", func(t *testing.T) {
+		resp := &provider.ChatResponse{Choices: []provider.Choice{{
+			Message:      provider.Message{Content: dsmlAdvisorSample},
+			FinishReason: "length",
+		}}}
+		normalizeProviderSpecificToolCalls(resp, map[string]struct{}{"get_file": {}})
+		choice := resp.Choices[0]
+		if choice.FinishReason != "length" || len(choice.Message.ToolCalls) != 0 {
+			t.Fatalf("truncated DSML choice = %#v, want length without executable tools", choice)
+		}
+
+		raw := []byte(`{"choices":[{"message":{"role":"assistant","content":` + strconv.Quote(dsmlAdvisorSample) + `},"finish_reason":"content_filter"}]}`)
+		raw = normalizeProviderSpecificToolCallsInOpenAIJSON(raw, map[string]struct{}{"get_file": {}})
+		var root map[string]any
+		if err := json.Unmarshal(raw, &root); err != nil {
+			t.Fatalf("decode normalized DSML response: %v", err)
+		}
+		choiceMap := root["choices"].([]any)[0].(map[string]any)
+		messageMap := choiceMap["message"].(map[string]any)
+		if _, exists := messageMap["tool_calls"]; exists || choiceMap["finish_reason"] != "content_filter" {
+			t.Fatalf("raw truncated DSML became executable: %s", raw)
+		}
+
+		ollama := []byte(`{"message":{"role":"assistant","content":` + strconv.Quote(dsmlAdvisorSample) + `},"done_reason":"length"}`)
+		ollama = normalizeDSMLToolCallsInOllamaJSON(ollama, map[string]struct{}{"get_file": {}})
+		var ollamaRoot map[string]any
+		if err := json.Unmarshal(ollama, &ollamaRoot); err != nil {
+			t.Fatalf("decode normalized Ollama DSML response: %v", err)
+		}
+		ollamaMessage := ollamaRoot["message"].(map[string]any)
+		if _, exists := ollamaMessage["tool_calls"]; exists || ollamaRoot["done_reason"] != "length" {
+			t.Fatalf("Ollama truncated DSML became executable: %s", ollama)
+		}
+	})
+
 	t.Run("UTF-8 BOM preserves first tool chunk", func(t *testing.T) {
 		body := append([]byte{0xef, 0xbb, 0xbf}, []byte(strings.Join([]string{
 			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"create_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":null}]}`,
@@ -357,6 +393,30 @@ func TestToolProtocolContract(t *testing.T) {
 		}
 		if strings.Contains(rec.Body.String(), "[DONE]") {
 			t.Fatalf("malformed Ollama stream emitted DONE: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("OpenAI to Ollama rejects SSE error instead of emitting done", func(t *testing.T) {
+		server := &Server{}
+		prov := &fakeStreamProvider{
+			name: "openai",
+			body: `data: {"error":{"message":"tool backend unavailable"}}` + "\n" + `data: [DONE]` + "\n",
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
+		rec := httptest.NewRecorder()
+
+		err := server.streamOpenAIToOllama(
+			rec,
+			req,
+			prov,
+			toolProtocolChatRequest("create_file"),
+			rec,
+		)
+		if err == nil {
+			t.Fatalf("malformed OpenAI stream returned success: %s", rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), `"done":true`) {
+			t.Fatalf("malformed OpenAI stream emitted done: %s", rec.Body.String())
 		}
 	})
 

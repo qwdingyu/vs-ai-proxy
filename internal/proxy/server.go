@@ -1106,7 +1106,9 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				attempts = append(attempts, attempt)
 				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
 				if streamWriter.HasWritten() {
-					registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+					// 已经写出部分 Ollama 响应后发生协议/网络错误，不能切换候选，
+					// 但仍必须记录 provider 失败，避免健康排序把半截响应当成功。
+					registry.RecordCandidateFailure(prov.Name(), err)
 					return
 				}
 				registry.RecordCandidateFailure(prov.Name(), err)
@@ -1439,6 +1441,9 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 	streamToolSanitizer := newOpenAIStreamToolSanitizer(allowedToolNames(req))
 	for scanner.Scan() {
 		line := normalizeOpenAIStreamLineForVisualStudioWithToolState(scanner.Text(), streamToolSanitizer)
+		if streamToolSanitizer.err != nil {
+			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", streamToolSanitizer.err)
+		}
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ":") {
 			continue
@@ -1454,7 +1459,7 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 
 		chunk, err := parseOpenAIStreamPayload(payload)
 		if err != nil {
-			continue
+			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 		}
 		acc.consumeOpenAIChunk(chunk)
 		if chunk.FinishReason != "" {

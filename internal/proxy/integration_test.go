@@ -44,6 +44,7 @@ type fakeProvider struct {
 	rawErr        error
 	rawCalls      int
 	chatCalls     int
+	typedChatResp *provider.ChatResponse
 }
 
 func newFakeProvider(name string, enabled bool, models []string, resp *fakeChatResponse, streamBody string) *fakeProvider {
@@ -70,6 +71,9 @@ func (p *fakeProvider) Chat(ctx context.Context, req *provider.ChatRequest) (*pr
 	_, p.hadDeadline = ctx.Deadline()
 	if p.chatErr != nil {
 		return nil, p.chatErr
+	}
+	if p.typedChatResp != nil {
+		return p.typedChatResp, nil
 	}
 	if p.chatResp == nil {
 		return nil, errors.New("not implemented")
@@ -734,6 +738,49 @@ func TestOpenAIStreamFallbackConvertsDSMLToToolCalls(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `"tool_calls"`) || !strings.Contains(body, `"name":"get_file"`) || !strings.Contains(body, `"finish_reason":"tool_calls"`) {
 		t.Fatalf("expected SSE tool call fallback body, got: %s", body)
+	}
+}
+
+func TestOpenAIStreamFallbackPreservesLegacyFunctionCall(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
+	prov.streamErr = errors.New(`API 错误 503: {"error":{"message":"Service temporarily unavailable"}}`)
+	prov.typedChatResp = &provider.ChatResponse{
+		Model: "gpt-5.5",
+		Choices: []provider.Choice{{
+			Index: 0,
+			Message: provider.Message{
+				Role: "assistant",
+				FunctionCall: &provider.FunctionCall{
+					Name:      "create_file",
+					Arguments: `{"path":"a.txt","content":"ok"}`,
+				},
+			},
+			FinishReason: "function_call",
+		}},
+	}
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"create a file"}],
+		"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}],
+		"stream":true
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"function_call"`) ||
+		!strings.Contains(body, `"name":"create_file"`) ||
+		!strings.Contains(body, `"arguments":"{\"path\":\"a.txt\",\"content\":\"ok\"}"`) ||
+		!strings.Contains(body, `"finish_reason":"function_call"`) {
+		t.Fatalf("legacy function_call was lost by stream fallback: %s", body)
 	}
 }
 
