@@ -118,28 +118,32 @@
     .faq-list p { color: var(--muted); line-height: 1.7; }
     @media (max-width: 900px) { .header { align-items: flex-start; flex-direction: column; } .nav { flex-wrap: wrap; } .stats, .grid-2, .grid-3, .hero-grid, .contact-card, .guide-steps, .community-card { grid-template-columns: 1fr; } .qrcode-frame { justify-self: start; width: 170px; } }
   </style>
+  <script src="/admin/i18n/index.js"></script>
+  <script src="/admin/i18n/zh.js"></script>
+  <script src="/admin/i18n/en.js"></script>
 </head>
 <body>
   <div class="page">
     <div class="toast hidden" id="globalToast" role="status" aria-live="polite"></div>
     <header class="header">
-      <h1><a class="brand" href="#/" aria-label="VS AI Proxy 首页">
-        <svg class="brand-logo" viewBox="0 0 64 64" role="img" aria-label="VS AI Proxy logo">
+      <h1><a class="brand" href="#/" data-i18n-aria-label="app.title" aria-label="VS AI Proxy 首页">
+        <svg class="brand-logo" viewBox="0 0 64 64" role="img" data-i18n-aria-label="app.title" aria-label="VS AI Proxy logo">
           <defs><linearGradient id="logoGradient" x1="10" y1="8" x2="54" y2="56"><stop stop-color="#58a6ff"/><stop offset="1" stop-color="#3fb950"/></linearGradient></defs>
           <rect width="64" height="64" rx="16" fill="#0f1115" stroke="#30363d"/>
-          <path d="M14 19l12 27 6-14 6 14 12-27h-8l-5 13-5-13h-8l-5 13-5-13z" fill="url(#logoGradient)"/>
-          <circle cx="32" cy="32" r="5" fill="#f0f6fc"/>
+          <path d='M14 19l12 27 6-14 6 14 12-27h-8l-5 13-5-13h-8l-5 13-5-13z' fill='url(#logoGradient)'/>
+          <circle cx='32' cy='32' r='5' fill='#f0f6fc'/>
         </svg>
-        <span class="brand-text"><span class="brand-title">VS AI Proxy</span><span class="brand-version" id="appVersion">版本加载中</span></span>
+        <span class='brand-text'><span class='brand-title'>VS AI Proxy</span><span class='brand-version' id='appVersion' data-i18n='brand.version.loading'>版本加载中</span></span>
       </a></h1>
       <nav class="nav">
-        <a class="nav-item" href="#/providers" data-page="providers">提供商</a>
-        <a class="nav-item" href="#/test" data-page="test">测试</a>
-        <a class="nav-item" href="#/logs" data-page="logs">日志</a>
-        <a class="nav-item" href="#/faq" data-page="faq">FAQ</a>
-        <a class="nav-item" href="#/contact" data-page="contact">联系我们</a>
-        <a class="nav-item" href="#/advanced" data-page="advanced">高级</a>
-        <a class="nav-item" href="/admin/logout">退出</a>
+        <a class="nav-item" href="#/providers" data-page="providers" data-i18n="nav.providers">提供商</a>
+        <a class="nav-item" href="#/test" data-page="test" data-i18n="nav.test">测试</a>
+        <a class="nav-item" href="#/logs" data-page="logs" data-i18n="nav.logs">日志</a>
+        <a class="nav-item" href="#/faq" data-page="faq" data-i18n="nav.faq">FAQ</a>
+        <a class="nav-item" href="#/contact" data-page="contact" data-i18n="nav.contact">联系我们</a>
+        <a class="nav-item" href="#/advanced" data-page="advanced" data-i18n="nav.advanced">高级</a>
+        <a class="nav-item" href="/admin/logout" data-i18n="nav.logout">退出</a>
+        <button class="nav-item" id="btnLangToggle" onclick="switchLang(getCurrentLang() === 'zh' ? 'en' : 'zh')" data-i18n="lang.toggle">中/EN</button>
       </nav>
     </header>
 
@@ -147,305 +151,305 @@
       <section id="page-dashboard" class="panel">
         <div class="hero-grid">
           <div class="hero-card">
-            <h2>让 Visual Studio / Copilot 快速接入你的模型</h2>
-            <p class="hint">VS AI Proxy 是一个轻量代理面板，用来统一管理 OpenAI-compatible、DeepSeek、Ollama 等 provider，并兼容 Visual Studio / Copilot 的模型发现和聊天接口。</p>
+            <h2 data-i18n="dashboard.hero.title">让 Visual Studio / Copilot 快速接入你的模型</h2>
+            <p class="hint" data-i18n="dashboard.hero.desc">VS AI Proxy 是一个轻量代理面板，用来统一管理 OpenAI-compatible、DeepSeek、Ollama 等 provider，并兼容 Visual Studio / Copilot 的模型发现和聊天接口。</p>
             <ul class="feature-list">
-              <li>一个端口同时提供代理接口和 Web 管理面板。</li>
-              <li>支持多 provider、多模型、优先级路由和模型列表校验。</li>
-              <li>提供请求统计、日志排障和正式版本自动更新。</li>
+              <li data-i18n="dashboard.hero.feature1">一个端口同时提供代理接口和 Web 管理面板。</li>
+              <li data-i18n="dashboard.hero.feature2">支持多 provider、多模型、优先级路由和模型列表校验。</li>
+              <li data-i18n="dashboard.hero.feature3">提供请求统计、日志排障和正式版本自动更新。</li>
             </ul>
           </div>
           <div class="quick-card community-card">
             <div class="community-copy">
-              <div class="label">官方交流群</div>
+              <div class="label" data-i18n="dashboard.community.label">官方交流群</div>
               <div class="qq-number">390485182</div>
-              <p class="hint">扫码加入 QQ 群，获取 Visual Studio / Copilot BYOM 配置帮助、版本更新提醒和免费大模型活动。</p>
+              <p class="hint" data-i18n="dashboard.community.desc">扫码加入 QQ 群，获取 Visual Studio / Copilot BYOM 配置帮助、版本更新提醒和免费大模型活动。</p>
               <div class="community-actions">
-                <button class="btn primary" id="btnCopyQQHome">复制 QQ 群号</button>
-                <a class="btn" href="#/contact">查看加入说明</a>
+                <button class="btn primary" id="btnCopyQQHome" data-i18n="dashboard.community.copyBtn">复制 QQ 群号</button>
+                <a class="btn" href="#/contact" data-i18n="dashboard.community.viewContact">查看加入说明</a>
               </div>
             </div>
-            <div class="qrcode-frame" aria-label="VS AI Proxy QQ 群二维码">
+            <div class="qrcode-frame" data-i18n-aria-label="dashboard.community.label" aria-label="官方交流群">
               <div>
-                <img class="qq-qrcode" src="/admin/assets/images/qrcode_qq.png" alt="VS AI Proxy QQ 群二维码">
-                <div class="qrcode-caption">手机 QQ 扫码加入</div>
+                <img class="qq-qrcode" src="/admin/assets/images/qrcode_qq.png" data-i18n-alt="dashboard.community.label" alt="官方交流群">
+                <div class="qrcode-caption" data-i18n="contact.qrcode.caption">手机 QQ 扫码加入</div>
               </div>
             </div>
           </div>
         </div>
 
-        <h2>快速状态</h2>
+        <h2 data-i18n="dashboard.stats.title">快速状态</h2>
         <div class="stats">
           <div class="stat">
-            <div class="label">总请求</div>
+            <div class="label" data-i18n="dashboard.stats.total">总请求</div>
             <div class="value" id="totalRequests">-</div>
           </div>
           <div class="stat">
-            <div class="label">成功</div>
+            <div class="label" data-i18n="dashboard.stats.success">成功</div>
             <div class="value" id="successCount">-</div>
           </div>
           <div class="stat">
-            <div class="label">失败</div>
+            <div class="label" data-i18n="dashboard.stats.failure">失败</div>
             <div class="value" id="failureCount">-</div>
           </div>
           <div class="stat">
-            <div class="label">平均耗时</div>
+            <div class="label" data-i18n="dashboard.stats.avgLatency">平均耗时</div>
             <div class="value" id="avgLatency">-</div>
           </div>
         </div>
 
-        <h3>最近日志</h3>
+        <h3 data-i18n="dashboard.recentLogs">最近日志</h3>
         <table class="table logs-table">
           <colgroup>
             <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency"><col class="col-action">
           </colgroup>
           <thead>
             <tr>
-              <th>时间</th>
-              <th>方法</th>
-              <th>路径</th>
-              <th>提供商</th>
-              <th>模型</th>
-              <th>工具/恢复</th>
-              <th>错误</th>
-              <th>状态</th>
-              <th>耗时</th>
-              <th>操作</th>
+              <th data-i18n="table.header.time">时间</th>
+              <th data-i18n="table.header.method">方法</th>
+              <th data-i18n="table.header.path">路径</th>
+              <th data-i18n="table.header.provider">提供商</th>
+              <th data-i18n="table.header.model">模型</th>
+              <th data-i18n="table.header.tools">工具/恢复</th>
+              <th data-i18n="table.header.error">错误</th>
+              <th data-i18n="table.header.status">状态</th>
+              <th data-i18n="table.header.latency">耗时</th>
+              <th data-i18n="table.header.action">操作</th>
             </tr>
           </thead>
           <tbody id="dashboardLogs">
-            <tr><td colspan="10" class="empty">暂无日志</td></tr>
+            <tr><td colspan="10" class="empty" data-i18n="table.empty.logs">暂无日志</td></tr>
           </tbody>
         </table>
       </section>
 
       <section id="page-advanced" class="panel hidden">
-        <h2>高级功能</h2>
-        <p class="hint">新手只需要完成“提供商”和“测试”。以下功能用于高级排障、模型精细配置和运行参数调整。</p>
+        <h2 data-i18n="advanced.title">高级功能</h2>
+        <p class="hint" data-i18n="advanced.desc">新手只需要完成"提供商"和"测试"。以下功能用于高级排障、模型精细配置和运行参数调整。</p>
         <div class="grid-3">
           <a class="stat" href="#/config" data-page="config">
-            <div class="label">系统配置</div>
-            <div class="value">配置</div>
-            <div class="hint">端口、默认模型、上游防御和超时预算。</div>
+            <div class="label" data-i18n="advanced.card.config.label">系统配置</div>
+            <div class="value" data-i18n="advanced.card.config.value">配置</div>
+            <div class="hint" data-i18n="advanced.card.config.hint">端口、默认模型、上游防御和超时预算。</div>
           </a>
           <a class="stat" href="#/models" data-page="models">
-            <div class="label">模型精调</div>
-            <div class="value">模型</div>
-            <div class="hint">手工调整模型绑定、上下文长度和最大输出。</div>
+            <div class="label" data-i18n="advanced.card.models.label">模型精调</div>
+            <div class="value" data-i18n="advanced.card.models.value">模型</div>
+            <div class="hint" data-i18n="advanced.card.models.hint">手工调整模型绑定、上下文长度和最大输出。</div>
           </a>
           <a class="stat" href="#/monitor" data-page="monitor">
-            <div class="label">运行观测</div>
-            <div class="value">监控</div>
-            <div class="hint">查看健康状态、请求统计和 provider 状态。</div>
+            <div class="label" data-i18n="advanced.card.monitor.label">运行观测</div>
+            <div class="value" data-i18n="advanced.card.monitor.value">监控</div>
+            <div class="hint" data-i18n="advanced.card.monitor.hint">查看健康状态、请求统计和 provider 状态。</div>
           </a>
         </div>
       </section>
 
       <section id="page-config" class="panel hidden">
-        <h2>系统配置</h2>
+        <h2 data-i18n="config.title">系统配置</h2>
         <div class="grid-2">
           <div class="stack">
-            <label>代理端口 <input type="number" id="cfgPort" /></label>
-            <label>默认模型 <input id="cfgDefaultModel" /></label>
-            <label class="checkbox"><input type="checkbox" id="cfgDefenseEnabled" /> 启用上游防御模式</label>
-            <label>客户端超时预算（秒） <input type="number" id="cfgClientTimeoutBudget" min="15" max="95" step="1" /></label>
-            <div class="hint">端口变更保存后仍需重启进程生效；其它配置会立即热更新代理路由。</div>
-            <div class="hint">上游防御模式用于 new-api / sub2api 等网关：开启后会启用稳定 User-Agent、5xx/网络瞬断短重试、429 冷却和流式/非流式协议兜底。</div>
-            <div class="hint">客户端超时预算用于 VS/Copilot：代理会把更长的模型 timeout_seconds 裁剪到该值，默认 90 秒，建议保持 15-95 秒。</div>
-            <div class="hint">管理面板与代理共用同一端口；Web 管理路径固定为 `/admin`，端口变更保存后需重启进程生效。</div>
-            <div class="hint">请求日志持久化路径由 `CONFIG_PATH` / `STORE_PATH` 环境变量控制，不在此页保存。</div>
+            <label><span data-i18n="config.form.port">代理端口</span> <input type="number" id="cfgPort" /></label>
+            <label><span data-i18n="config.form.defaultModel">默认模型</span> <input id="cfgDefaultModel" /></label>
+            <label class="checkbox"><input type="checkbox" id="cfgDefenseEnabled" /> <span data-i18n="config.form.defenseEnabled">启用上游防御模式</span></label>
+            <label><span data-i18n="config.form.clientTimeoutBudget">客户端超时预算（秒）</span> <input type="number" id="cfgClientTimeoutBudget" min="15" max="95" step="1" /></label>
+            <div class="hint" data-i18n="config.hint.portRestart">端口变更保存后仍需重启进程生效；其它配置会立即热更新代理路由。</div>
+            <div class="hint" data-i18n="config.hint.defenseMode">上游防御模式用于 new-api / sub2api 等网关：开启后会启用稳定 User-Agent、5xx/网络瞬断短重试、429 冷却和流式/非流式协议兜底。</div>
+            <div class="hint" data-i18n="config.hint.clientTimeoutBudget">客户端超时预算用于 VS/Copilot：代理会把更长的模型 timeout_seconds 裁剪到该值，默认 90 秒，建议保持 15-95 秒。</div>
+            <div class="hint" data-i18n="config.hint.adminPath">管理面板与代理共用同一端口；Web 管理路径固定为 `/admin`，端口变更保存后需重启进程生效。</div>
+            <div class="hint" data-i18n="config.hint.storePath">请求日志持久化路径由 `CONFIG_PATH` / `STORE_PATH` 环境变量控制，不在此页保存。</div>
             <div class="actions">
-              <button class="btn" id="btnReloadConfig">重新加载</button>
-              <button class="btn primary" id="btnSaveConfig">保存配置</button>
+              <button class="btn" id="btnReloadConfig" data-i18n="config.reloadBtn">重新加载</button>
+              <button class="btn primary" id="btnSaveConfig" data-i18n="config.saveBtn">保存配置</button>
             </div>
           </div>
           <div class="stack">
             <div class="panel" style="margin:0;">
-              <div class="label">当前运行状态</div>
+              <div class="label" data-i18n="config.status.label">当前运行状态</div>
               <div class="value" id="cfgHealth">-</div>
               <div class="hint" id="cfgSummary">-</div>
             </div>
             <div class="panel" style="margin:0;">
-              <div class="label">说明</div>
-              <div class="hint">这里主要编辑基础运行参数。provider 和 model 的精细配置分别在“提供商”和“模型”页完成。</div>
+              <div class="label" data-i18n="config.notes.label">说明</div>
+              <div class="hint" data-i18n="config.notes.desc">这里主要编辑基础运行参数。provider 和 model 的精细配置分别在"提供商"和"模型"页完成。</div>
             </div>
           </div>
         </div>
       </section>
 
       <section id="page-providers" class="panel hidden">
-        <h2>提供商</h2>
+        <h2 data-i18n="providers.title">提供商</h2>
         <div class="toolbar">
-          <button class="btn primary" id="btnAddProvider">新增提供商</button>
+          <button class="btn primary" id="btnAddProvider" data-i18n="providers.addBtn">新增提供商</button>
         </div>
         <table class="table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>名称</th>
-              <th>类型</th>
-              <th>Base URL</th>
-              <th>模型</th>
-              <th>优先级</th>
-              <th>启用</th>
-              <th>操作</th>
+              <th data-i18n="providers.form.id">ID</th>
+              <th data-i18n="providers.form.name">名称</th>
+              <th data-i18n="providers.form.type">类型</th>
+              <th data-i18n="providers.form.baseUrl">Base URL</th>
+              <th data-i18n="table.header.model">模型</th>
+              <th data-i18n="providers.form.priority">优先级</th>
+              <th data-i18n="providers.form.enabled">启用</th>
+              <th data-i18n="table.header.action">操作</th>
             </tr>
           </thead>
           <tbody id="providerTable">
-            <tr><td colspan="8" class="empty">加载中...</td></tr>
+            <tr><td colspan="8" class="empty" data-i18n="table.loading">加载中...</td></tr>
           </tbody>
         </table>
         <div id="providerModal" class="modal-backdrop hidden">
           <div class="modal provider-modal">
-            <h3 id="providerModalTitle">新增提供商</h3>
-            <label>ID <input id="pId" placeholder="useai-paid" /></label>
-            <label>名称 <input id="pName" placeholder="UseAI Paid" /></label>
-            <label>显示名称 <input id="pDisplay" placeholder="留空则使用名称" /></label>
-            <label>类型
+            <h3 id="providerModalTitle" data-i18n="providers.modal.addTitle">新增提供商</h3>
+            <label><span data-i18n="providers.form.id">ID</span> <input id="pId" placeholder="useai-paid" /></label>
+            <label><span data-i18n="providers.form.name">名称</span> <input id="pName" placeholder="UseAI Paid" /></label>
+            <label><span data-i18n="providers.form.displayName">显示名称</span> <input id="pDisplay" data-i18n-placeholder="providers.form.displayName.placeholder" placeholder="留空则使用名称" /></label>
+            <label><span data-i18n="providers.form.type">类型</span>
               <select id="pType">
                 <option value="openai">OpenAI</option>
                 <!-- <option value="ollama">Ollama</option> -->
                 <!-- <option value="custom">Custom</option> -->
               </select>
             </label>
-            <label>Base URL <input id="pBase" /></label>
-            <label>API Key
+            <label><span data-i18n="providers.form.baseUrl">Base URL</span> <input id="pBase" /></label>
+            <label><span data-i18n="providers.form.apiKey">API Key</span>
               <div class="secret-row">
                 <input id="pKey" type="password" autocomplete="off" />
-                <button class="btn" type="button" id="btnToggleProviderKey" aria-label="显示 API Key" title="显示 API Key">👁</button>
+                <button class="btn" type="button" id="btnToggleProviderKey" data-i18n-aria-label="providers.form.showKey" data-i18n-title="providers.form.showKey" aria-label="显示 API Key" title="显示 API Key">👁</button>
               </div>
             </label>
-            <label>优先级 <input type="number" id="pPriority" /></label>
-            <label>启用 <input type="checkbox" id="pEnabled" checked /></label>
+            <label><span data-i18n="providers.form.priority">优先级</span> <input type="number" id="pPriority" /></label>
+            <label><span data-i18n="providers.form.enabled">启用</span> <input type="checkbox" id="pEnabled" checked /></label>
             <div class="actions">
-              <button class="btn" id="btnProbeProvider">探测并导入模型</button>
-              <button class="btn" id="btnCancelProvider">取消</button>
-              <button class="btn primary" id="btnSaveProvider">保存</button>
+              <button class="btn" id="btnProbeProvider" data-i18n="providers.probeBtn">探测并导入模型</button>
+              <button class="btn" id="btnCancelProvider" data-i18n="providers.form.cancel">取消</button>
+              <button class="btn primary" id="btnSaveProvider" data-i18n="providers.form.save">保存</button>
             </div>
           </div>
         </div>
       </section>
 
       <section id="page-models" class="panel hidden">
-        <h2>模型</h2>
+        <h2 data-i18n="models.title">模型</h2>
         <div class="toolbar">
-          <button class="btn primary" id="btnAddModel">新增模型</button>
+          <button class="btn primary" id="btnAddModel" data-i18n="models.addBtn">新增模型</button>
         </div>
         <table class="table">
           <thead>
             <tr>
-              <th>名称</th>
-              <th>提供商</th>
-              <th>上下文长度</th>
-              <th>最大输出</th>
-              <th>启用</th>
-              <th>操作</th>
+              <th data-i18n="models.form.name">名称</th>
+              <th data-i18n="table.header.provider">提供商</th>
+              <th data-i18n="models.form.contextLength">上下文长度</th>
+              <th data-i18n="models.form.maxOutput">最大输出</th>
+              <th data-i18n="models.form.enabled">启用</th>
+              <th data-i18n="table.header.action">操作</th>
             </tr>
           </thead>
           <tbody id="modelTable">
-            <tr><td colspan="6" class="empty">加载中...</td></tr>
+            <tr><td colspan="6" class="empty" data-i18n="table.loading">加载中...</td></tr>
           </tbody>
         </table>
         <div id="modelModal" class="modal-backdrop hidden">
           <div class="modal">
-            <h3 id="modelModalTitle">新增模型</h3>
-            <label>搜索内置模型 <input id="mSearch" placeholder="输入模型名称或厂商（如 gpt、claude、deepseek）" /></label>
+            <h3 id="modelModalTitle" data-i18n="models.modal.addTitle">新增模型</h3>
+            <label><span data-i18n="models.search.label">搜索内置模型</span> <input id="mSearch" data-i18n-placeholder="models.search.placeholder" placeholder="输入模型名称或厂商（如 gpt、claude、deepseek）" /></label>
             <div id="modelSearchResults" class="search-results hidden"></div>
-            <label>名称 <input id="mName" /></label>
-            <label>Provider ID <input id="mProvider" placeholder="留空表示按优先级自动选择" /></label>
-            <label>上下文长度 <input type="number" id="mCtx" /></label>
-            <label>最大输出 <input type="number" id="mMax" /></label>
-            <div class="hint" id="mMetaHint">输入模型名后会自动查询内置元数据并补齐默认值。</div>
-            <label>启用 <input type="checkbox" id="mEnabled" checked /></label>
+            <label><span data-i18n="models.form.name">名称</span> <input id="mName" /></label>
+            <label><span data-i18n="models.form.providerId">Provider ID</span> <input id="mProvider" data-i18n-placeholder="models.form.providerId.placeholder" placeholder="留空表示按优先级自动选择" /></label>
+            <label><span data-i18n="models.form.contextLength">上下文长度</span> <input type="number" id="mCtx" /></label>
+            <label><span data-i18n="models.form.maxOutput">最大输出</span> <input type="number" id="mMax" /></label>
+            <div class="hint" id="mMetaHint" data-i18n="models.form.hint">输入模型名后会自动查询内置元数据并补齐默认值。</div>
+            <label><span data-i18n="models.form.enabled">启用</span> <input type="checkbox" id="mEnabled" checked /></label>
             <div class="actions">
-              <button class="btn" id="btnCancelModel">取消</button>
-              <button class="btn primary" id="btnSaveModel">保存</button>
+              <button class="btn" id="btnCancelModel" data-i18n="models.form.cancel">取消</button>
+              <button class="btn primary" id="btnSaveModel" data-i18n="models.form.save">保存</button>
             </div>
           </div>
         </div>
       </section>
 
       <section id="page-test" class="panel hidden">
-        <h2>测试台</h2>
+        <h2 data-i18n="test.title">测试台</h2>
         <div class="grid-2">
           <div class="stack">
-            <label>提供商 <select id="testProvider"></select></label>
-            <label>模型 <select id="testModel"></select></label>
-            <label>测试消息 <textarea id="testMessage" placeholder="输入一段测试对话"></textarea></label>
+            <label><span data-i18n="test.form.provider">提供商</span> <select id="testProvider"></select></label>
+            <label><span data-i18n="test.form.model">模型</span> <select id="testModel"></select></label>
+            <label><span data-i18n="test.form.message">测试消息</span> <textarea id="testMessage" data-i18n-placeholder="test.form.message.placeholder" placeholder="输入一段测试对话"></textarea></label>
             <div class="actions">
-              <button class="btn" id="btnTestConnection">读取模型列表</button>
-              <button class="btn primary" id="btnTestChat">测试对话</button>
+              <button class="btn" id="btnTestConnection" data-i18n="test.connectionBtn">读取模型列表</button>
+              <button class="btn primary" id="btnTestChat" data-i18n="test.chatBtn">测试对话</button>
             </div>
           </div>
           <div class="stack">
             <div class="panel" style="margin:0;">
-              <div class="label">测试结果</div>
-              <div class="status-pill" id="testStatus">等待测试</div>
-              <div class="pre" id="testOutput">这里会显示模型列表校验或 chat 返回内容。</div>
+              <div class="label" data-i18n="test.result.label">测试结果</div>
+              <div class="status-pill" id="testStatus" data-i18n="test.result.waiting">等待测试</div>
+              <div class="pre" id="testOutput" data-i18n="test.result.hint">这里会显示模型列表校验或 chat 返回内容。</div>
             </div>
             <div class="panel" style="margin:0;">
-              <div class="label">提示</div>
-              <div class="hint">模型列表校验走 `/admin/api/test/connection`，用于读取所选 provider 官方 `/models` 返回；聊天测试走 `/admin/api/test/chat`，用于验证指定模型能否完成一次真实对话。</div>
+              <div class="label" data-i18n="test.hint.label">提示</div>
+              <div class="hint" data-i18n="test.hint.desc">模型列表校验走 `/admin/api/test/connection`，用于读取所选 provider 官方 `/models` 返回；聊天测试走 `/admin/api/test/chat`，用于验证指定模型能否完成一次真实对话。</div>
             </div>
           </div>
         </div>
       </section>
 
       <section id="page-monitor" class="panel hidden">
-        <h2>监控</h2>
+        <h2 data-i18n="monitor.title">监控</h2>
         <div class="grid-3">
           <div class="stat">
-            <div class="label">健康状态</div>
+            <div class="label" data-i18n="monitor.health.label">健康状态</div>
             <div class="value" id="healthStatus">-</div>
           </div>
           <div class="stat">
-            <div class="label">provider 数</div>
+            <div class="label" data-i18n="monitor.health.providers">provider 数</div>
             <div class="value" id="healthProviders">-</div>
           </div>
           <div class="stat">
-            <div class="label">可见模型数</div>
+            <div class="label" data-i18n="monitor.health.models">可见模型数</div>
             <div class="value" id="healthModels">-</div>
           </div>
         </div>
         <div class="grid-2" style="margin-top: 12px;">
           <div class="stack">
             <div class="panel" style="margin:0;">
-              <div class="label">Provider 健康与冷却</div>
+              <div class="label" data-i18n="monitor.providerHealth.label">Provider 健康与冷却</div>
               <table class="table">
                 <thead>
                   <tr>
-                    <th>Provider</th>
-                    <th>成功率</th>
-                    <th>耗时</th>
-                    <th>连续失败</th>
-                    <th>冷却</th>
-                    <th>最近错误</th>
+                    <th data-i18n="monitor.health.providers">Provider</th>
+                    <th data-i18n="monitor.table.successRate">成功率</th>
+                    <th data-i18n="monitor.table.latency">耗时</th>
+                    <th data-i18n="monitor.table.consecutiveFailures">连续失败</th>
+                    <th data-i18n="monitor.table.cooldown">冷却</th>
+                    <th data-i18n="monitor.table.lastError">最近错误</th>
                   </tr>
                 </thead>
                 <tbody id="providerHealthTable">
-                  <tr><td colspan="6" class="empty">暂无运行数据</td></tr>
+                  <tr><td colspan="6" class="empty" data-i18n="table.empty.health">暂无运行数据</td></tr>
                 </tbody>
               </table>
             </div>
             <div class="panel" style="margin:0;">
-              <div class="label">Health</div>
+              <div class="label" data-i18n="monitor.healthOutput.label">Health</div>
               <div class="pre" id="healthOutput">-</div>
             </div>
           </div>
           <div class="stack">
             <div class="panel" style="margin:0;">
-              <div class="label">运行与更新状态</div>
+              <div class="label" data-i18n="monitor.runtime.label">运行与更新状态</div>
               <div class="pre" id="runtimeStatusOutput">-</div>
             </div>
             <div class="panel" style="margin:0;">
-              <div class="label">统一诊断摘要</div>
+              <div class="label" data-i18n="monitor.diagnostics.label">统一诊断摘要</div>
               <div class="pre" id="diagnosticsSummaryOutput">-</div>
               <div class="actions" style="justify-content:flex-start; margin-top:8px;">
-                <button class="btn" id="btnCopyDiagnosticsSummary">复制诊断摘要</button>
+                <button class="btn" id="btnCopyDiagnosticsSummary" data-i18n="monitor.copyDiagnosticsBtn">复制诊断摘要</button>
               </div>
             </div>
             <div class="panel" style="margin:0;">
-              <div class="label">Metrics</div>
+              <div class="label" data-i18n="monitor.metrics.label">Metrics</div>
               <div class="pre" id="metricsOutput">-</div>
             </div>
           </div>
@@ -453,44 +457,44 @@
       </section>
 
       <section id="page-logs" class="panel hidden">
-        <h2>日志</h2>
+        <h2 data-i18n="logs.title">日志</h2>
         <div class="toolbar">
-          <button class="btn danger" id="btnClearLogs">清空日志</button>
-          <button class="btn" id="btnRefreshLogs">刷新</button>
-          <button class="btn" id="btnCopyLatestFailure">复制最近失败摘要</button>
+          <button class="btn danger" id="btnClearLogs" data-i18n="logs.clearBtn">清空日志</button>
+          <button class="btn" id="btnRefreshLogs" data-i18n="logs.refreshBtn">刷新</button>
+          <button class="btn" id="btnCopyLatestFailure" data-i18n="logs.copyFailureBtn">复制最近失败摘要</button>
         </div>
         <div class="filter-bar">
-          <input id="logFilterSearch" placeholder="搜索路径 / 模型 / 错误 / 请求ID" />
-          <input id="logFilterProvider" placeholder="provider" />
-          <input id="logFilterModel" placeholder="model" />
-          <input id="logFilterErrorCode" placeholder="error_code" />
-          <input id="logFilterErrorReason" placeholder="error_reason" />
-          <input id="logFilterRequestID" placeholder="request_id" />
-          <input id="logFilterStatusCode" type="number" min="100" max="599" step="1" placeholder="status_code" />
-          <button class="btn" id="btnApplyLogFilters">应用筛选</button>
-          <button class="btn" id="btnClearLogFilters">清除筛选</button>
+          <input id="logFilterSearch" data-i18n-placeholder="logs.filter.search.placeholder" placeholder="搜索路径 / 模型 / 错误 / 请求ID" />
+          <input id="logFilterProvider" data-i18n-placeholder="logs.filter.provider.placeholder" placeholder="provider" />
+          <input id="logFilterModel" data-i18n-placeholder="logs.filter.model.placeholder" placeholder="model" />
+          <input id="logFilterErrorCode" data-i18n-placeholder="logs.filter.errorCode.placeholder" placeholder="error_code" />
+          <input id="logFilterErrorReason" data-i18n-placeholder="logs.filter.errorReason.placeholder" placeholder="error_reason" />
+          <input id="logFilterRequestID" data-i18n-placeholder="logs.filter.requestId.placeholder" placeholder="request_id" />
+          <input id="logFilterStatusCode" type="number" min="100" max="599" step="1" data-i18n-placeholder="logs.filter.statusCode.placeholder" placeholder="status_code" />
+          <button class="btn" id="btnApplyLogFilters" data-i18n="logs.applyFiltersBtn">应用筛选</button>
+          <button class="btn" id="btnClearLogFilters" data-i18n="logs.clearFiltersBtn">清除筛选</button>
         </div>
         <div class="diagnostic-banner hidden" id="latestFailureBanner">
           <div class="diagnostic-card">
-            <div class="label">最近失败</div>
+            <div class="label" data-i18n="logs.failure.label">最近失败</div>
             <div class="value" id="latestFailureReason">-</div>
             <div class="hint" id="latestFailureAction">-</div>
           </div>
           <div class="diagnostic-card">
-            <div class="label">诊断摘要</div>
+            <div class="label" data-i18n="logs.failure.diagnostics">诊断摘要</div>
             <div class="value" id="latestFailureSummary">-</div>
             <div class="hint" id="latestFailureMeta">-</div>
           </div>
           <div class="diagnostic-card">
-            <div class="label">最近样本</div>
+            <div class="label" data-i18n="logs.failure.sample">最近样本</div>
             <div class="value" id="latestFailureSample">-</div>
             <div class="hint" id="latestFailureSampleHint">-</div>
           </div>
         </div>
         <div class="toolbar" style="justify-content:flex-end;align-items:center;">
           <span id="logPageInfo" class="hint"></span>
-          <button class="btn" id="btnLogPrevPage" disabled>上一页</button>
-          <button class="btn" id="btnLogNextPage" disabled>下一页</button>
+          <button class="btn" id="btnLogPrevPage" disabled data-i18n="logs.prevPage">上一页</button>
+          <button class="btn" id="btnLogNextPage" disabled data-i18n="logs.nextPage">下一页</button>
         </div>
         <table class="table logs-table">
           <colgroup>
@@ -498,82 +502,82 @@
           </colgroup>
           <thead>
             <tr>
-              <th>时间</th>
-              <th>方法</th>
-              <th>路径</th>
-              <th>提供商</th>
-              <th>模型</th>
-              <th>工具/恢复</th>
-              <th>错误</th>
-              <th>状态</th>
-              <th>耗时</th>
-              <th>操作</th>
+              <th data-i18n="table.header.time">时间</th>
+              <th data-i18n="table.header.method">方法</th>
+              <th data-i18n="table.header.path">路径</th>
+              <th data-i18n="table.header.provider">提供商</th>
+              <th data-i18n="table.header.model">模型</th>
+              <th data-i18n="table.header.tools">工具/恢复</th>
+              <th data-i18n="table.header.error">错误</th>
+              <th data-i18n="table.header.status">状态</th>
+              <th data-i18n="table.header.latency">耗时</th>
+              <th data-i18n="table.header.action">操作</th>
             </tr>
           </thead>
           <tbody id="logTable">
-            <tr><td colspan="10" class="empty">加载中...</td></tr>
+            <tr><td colspan="10" class="empty" data-i18n="table.loading">加载中...</td></tr>
           </tbody>
         </table>
       </section>
 
       <section id="page-contact" class="panel hidden">
-        <h2>联系我们</h2>
+        <h2 data-i18n="contact.title">联系我们</h2>
         <div class="contact-card">
           <div class="contact-hero">
-            <div class="label">官方交流群</div>
+            <div class="label" data-i18n="dashboard.community.label">官方交流群</div>
             <div class="qq-number">390485182</div>
-            <p>欢迎加入 VS AI Proxy QQ 群，一起交流 Visual Studio / Copilot BYOM、多 provider 路由、模型配置和部署经验。</p>
-            <p class="hint">加入群后可第一时间获取版本更新、踩坑记录和配置建议；群内也会不定期组织免费大模型体验活动。</p>
+            <p data-i18n="contact.desc">欢迎加入 VS AI Proxy QQ 群，一起交流 Visual Studio / Copilot BYOM、多 provider 路由、模型配置和部署经验。</p>
+            <p class="hint" data-i18n="contact.desc2">加入群后可第一时间获取版本更新、踩坑记录和配置建议；群内也会不定期组织免费大模型体验活动。</p>
             <div class="actions" style="justify-content:flex-start;">
-              <button class="btn primary" id="btnCopyQQ">复制 QQ 群号</button>
+              <button class="btn primary" id="btnCopyQQ" data-i18n="contact.copyBtn">复制 QQ 群号</button>
             </div>
           </div>
           <div class="panel" style="margin:0;">
-            <div class="label">适合加入的人</div>
+            <div class="label" data-i18n="contact.suitableFor.label">适合加入的人</div>
             <div class="qrcode-frame" style="justify-self:start;margin-top:12px;">
               <div>
-                <img class="qq-qrcode" src="/admin/assets/images/qrcode_qq.png" alt="VS AI Proxy QQ 群二维码">
-                <div class="qrcode-caption">手机 QQ 扫码加入</div>
+                <img class="qq-qrcode" src="/admin/assets/images/qrcode_qq.png" data-i18n-alt="dashboard.community.label" alt="官方交流群">
+                <div class="qrcode-caption" data-i18n="contact.qrcode.caption">手机 QQ 扫码加入</div>
               </div>
             </div>
             <ul class="contact-list">
-              <li>正在接入 Visual Studio / Copilot BYOM 的开发者</li>
-              <li>需要配置 DeepSeek、Ollama、OpenAI-compatible provider 的用户</li>
-              <li>想交流低成本大模型使用和代理路由实践的团队</li>
+              <li data-i18n="contact.suitableFor.item1">正在接入 Visual Studio / Copilot BYOM 的开发者</li>
+              <li data-i18n="contact.suitableFor.item2">需要配置 DeepSeek、Ollama、OpenAI-compatible provider 的用户</li>
+              <li data-i18n="contact.suitableFor.item3">想交流低成本大模型使用和代理路由实践的团队</li>
             </ul>
           </div>
         </div>
       </section>
 
       <section id="page-faq" class="panel hidden">
-        <h2>FAQ 与操作说明</h2>
+        <h2 data-i18n="faq.title">FAQ 与操作说明</h2>
         <div class="faq-layout">
           <div class="panel" style="margin:0;">
-            <h3>Visual Studio / Copilot 配置步骤</h3>
-            <p class="hint">在 Visual Studio 中把 BYOM / Copilot 相关地址指向 VS AI Proxy；不同 VS 版本入口可能略有差异，以截图中的配置项为准。</p>
+            <h3 data-i18n="faq.vsGuide.title">Visual Studio / Copilot 配置步骤</h3>
+            <p class="hint" data-i18n="faq.vsGuide.desc">在 Visual Studio 中把 BYOM / Copilot 相关地址指向 VS AI Proxy；不同 VS 版本入口可能略有差异，以截图中的配置项为准。</p>
             <div class="guide-steps">
               <div>
-                <img class="guide-img" src="/admin/assets/images/vs-config-1.png" alt="Visual Studio 配置入口截图 1" />
-                <p class="hint">1. 打开 Visual Studio 的 Copilot / BYOM 相关设置。</p>
+                <img class="guide-img" src="/admin/assets/images/vs-config-1.png" data-i18n-alt="faq.vsGuide.screenshot1" alt="Visual Studio 配置入口截图 1" />
+                <p class="hint" data-i18n="faq.vsGuide.step1">1. 打开 Visual Studio 的 Copilot / BYOM 相关设置。</p>
               </div>
               <div>
-                <img class="guide-img" src="/admin/assets/images/vs-config-2.png" alt="Visual Studio 配置入口截图 2" />
-                <p class="hint">2. 填写本机代理地址，例如 `http://127.0.0.1:12345`。</p>
+                <img class="guide-img" src="/admin/assets/images/vs-config-2.png" data-i18n-alt="faq.vsGuide.screenshot2" alt="Visual Studio 配置入口截图 2" />
+                <p class="hint" data-i18n="faq.vsGuide.step2">2. 填写本机代理地址，例如 `http://127.0.0.1:12345`。</p>
               </div>
               <div>
-                <img class="guide-img" src="/admin/assets/images/vs-config-3.png" alt="Visual Studio 配置入口截图 3" />
-                <p class="hint">3. 保存后回到本页面用“测试”页确认 provider 和模型可用。</p>
+                <img class="guide-img" src="/admin/assets/images/vs-config-3.png" data-i18n-alt="faq.vsGuide.screenshot3" alt="Visual Studio 配置入口截图 3" />
+                <p class="hint" data-i18n="faq.vsGuide.step3">3. 保存后回到本页面用"测试"页确认 provider 和模型可用。</p>
               </div>
             </div>
           </div>
 
           <div class="faq-list">
-            <details open><summary>启动后应该打开哪个页面？</summary><p>默认管理面板是 `http://127.0.0.1:12345/admin`。如果修改了端口，请使用配置中的实际端口。</p></details>
-            <details><summary>为什么 Windows 双击看起来没反应？</summary><p>这是控制台程序，不是桌面 GUI。建议从 PowerShell 启动查看日志，或启动后直接打开管理面板地址。</p></details>
-            <details><summary>如何确认当前运行版本？</summary><p>页面左上角会显示当前版本；命令行也可以运行 `vs-ai-proxy --version`。</p></details>
-            <details><summary>配置保存时提示 provider_id 不存在怎么办？</summary><p>模型绑定的 `provider_id` 必须等于某个 `providers[].id`。如果希望自动按优先级路由，可以留空。</p></details>
-            <details><summary>没有配置 GITHUB_TOKEN 会影响使用吗？</summary><p>不会影响代理功能。只有 GitHub 匿名 API 被限流时，版本检查可能提示稍后重试或配置 token。</p></details>
-            <details><summary>如何获得帮助？</summary><p>加入 QQ 群 `390485182`，可交流 Visual Studio / Copilot BYOM、provider 配置、部署和模型路由问题。</p></details>
+            <details open><summary data-i18n="faq.q1">启动后应该打开哪个页面？</summary><p data-i18n="faq.q1.a">默认管理面板是 `http://127.0.0.1:12345/admin`。如果修改了端口，请使用配置中的实际端口。</p></details>
+            <details><summary data-i18n="faq.q2">为什么 Windows 双击看起来没反应？</summary><p data-i18n="faq.q2.a">这是控制台程序，不是桌面 GUI。建议从 PowerShell 启动查看日志，或启动后直接打开管理面板地址。</p></details>
+            <details><summary data-i18n="faq.q3">如何确认当前运行版本？</summary><p data-i18n="faq.q3.a">页面左上角会显示当前版本；命令行也可以运行 `vs-ai-proxy --version`。</p></details>
+            <details><summary data-i18n="faq.q4">配置保存时提示 provider_id 不存在怎么办？</summary><p data-i18n="faq.q4.a">模型绑定的 `provider_id` 必须等于某个 `providers[].id`。如果希望自动按优先级路由，可以留空。</p></details>
+            <details><summary data-i18n="faq.q5">没有配置 GITHUB_TOKEN 会影响使用吗？</summary><p data-i18n="faq.q5.a">不会影响代理功能。只有 GitHub 匿名 API 被限流时，版本检查可能提示稍后重试或配置 token。</p></details>
+            <details><summary data-i18n="faq.q6">如何获得帮助？</summary><p data-i18n="faq.q6.a">加入 QQ 群 `390485182`，可交流 Visual Studio / Copilot BYOM、provider 配置、部署和模型路由问题。</p></details>
           </div>
         </div>
       </section>
@@ -628,9 +632,9 @@
       return `${Math.round(ms / 1000)}s`;
     };
     const formatCooldown = (ms) => {
-      if (!ms || Number(ms) <= 0) return '<span class="badge ok">可用</span>';
+      if (!ms || Number(ms) <= 0) return '<span class="badge ok">' + t('monitor.table.available') + '</span>';
       const seconds = Math.ceil(Number(ms) / 1000);
-      return `<span class="badge warn">冷却 ${seconds}s</span>`;
+      return '<span class="badge warn">' + t('monitor.table.cooldownSeconds', seconds) + '</span>';
     };
     const formatLastError = (message) => {
       if (!message) return '-';
@@ -650,7 +654,7 @@
     const redirectToAdminLogin = () => {
       localStorage.removeItem('vs_ai_proxy_admin_token');
       window.location.assign('/admin');
-      throw new Error('管理登录已失效，请重新登录。');
+      throw new Error(t('error.authExpired'));
     };
 
     // 统一 fetch JSON 请求封装，失败时抛出来统一处理
@@ -659,7 +663,7 @@
       if (res.status === 401) return redirectToAdminLogin();
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const err = new Error(data.error || '请求失败');
+        const err = new Error(data.error || t('error.requestFailed'));
         err.details = data;
         err.validation = data.validation;
         throw err;
@@ -671,7 +675,7 @@
       const res = await fetch(API_BASE + path, withAdminAuth(opts));
       if (res.status === 401) return redirectToAdminLogin();
       const text = await res.text();
-      if (!res.ok) throw new Error(text || '请求失败');
+      if (!res.ok) throw new Error(text || t('error.requestFailed'));
       return text;
     };
 
@@ -707,18 +711,18 @@
     const formatLogError = (log) => {
       if (!log || log.is_success) return '-';
       const code = escapeHTML(log.error_code || 'error');
-      const message = escapeHTML(log.error_message || '请求失败');
-      const reason = log.error_reason ? `&#10;原因: ${escapeHTML(log.error_reason)}` : '';
-      const action = log.error_action ? `&#10;处理: ${escapeHTML(log.error_action)}` : '';
-      const summary = log.diagnostic_summary ? `&#10;摘要: ${escapeHTML(log.diagnostic_summary)}` : '';
-      const attempts = log.attempts_summary ? `&#10;候选: ${escapeHTML(log.attempts_summary)}` : '';
-      const hint = log.error_hint ? `&#10;建议: ${escapeHTML(log.error_hint)}` : '';
-      const requestSize = Number(log.request_bytes || 0) > 0 ? `&#10;请求体: ${formatBytes(log.request_bytes)}` : '';
-      const upstreamSize = Number(log.upstream_bytes || 0) > 0 ? `&#10;上游体: ${formatBytes(log.upstream_bytes)}` : '';
-      const timeoutBudget = Number(log.effective_timeout_seconds || 0) > 0 ? `&#10;有效超时: ${escapeHTML(log.effective_timeout_seconds)}s${Number(log.configured_timeout_seconds || 0) > 0 ? ` / 配置 ${escapeHTML(log.configured_timeout_seconds)}s` : ''}` : '';
-      const cancelReason = log.cancel_reason ? `&#10;取消原因: ${escapeHTML(log.cancel_reason)}` : '';
-      const networkPeer = log.network_peer ? `&#10;远端: ${escapeHTML(log.network_peer)}` : '';
-      const streamState = log.stream_state ? `&#10;流状态: ${escapeHTML(log.stream_state)}` : '';
+      const message = escapeHTML(log.error_message || t('error.requestFailed'));
+      const reason = log.error_reason ? '&#10;' + t('logs.tooltip.reason') + ': ' + escapeHTML(log.error_reason) : '';
+      const action = log.error_action ? '&#10;' + t('logs.tooltip.action') + ': ' + escapeHTML(log.error_action) : '';
+      const summary = log.diagnostic_summary ? '&#10;' + t('logs.tooltip.summary') + ': ' + escapeHTML(log.diagnostic_summary) : '';
+      const attempts = log.attempts_summary ? '&#10;' + t('logs.tooltip.attempts') + ': ' + escapeHTML(log.attempts_summary) : '';
+      const hint = log.error_hint ? '&#10;' + t('logs.tooltip.hint') + ': ' + escapeHTML(log.error_hint) : '';
+      const requestSize = Number(log.request_bytes || 0) > 0 ? '&#10;' + t('logs.tooltip.requestSize') + ': ' + formatBytes(log.request_bytes) : '';
+      const upstreamSize = Number(log.upstream_bytes || 0) > 0 ? '&#10;' + t('logs.tooltip.upstreamSize') + ': ' + formatBytes(log.upstream_bytes) : '';
+      const timeoutBudget = Number(log.effective_timeout_seconds || 0) > 0 ? '&#10;' + t('logs.tooltip.timeoutBudget') + ': ' + escapeHTML(log.effective_timeout_seconds) + 's' + (Number(log.configured_timeout_seconds || 0) > 0 ? ' / ' + t('logs.tooltip.configuredTimeout') + ' ' + escapeHTML(log.configured_timeout_seconds) + 's' : '') : '';
+      const cancelReason = log.cancel_reason ? '&#10;' + t('logs.tooltip.cancelReason') + ': ' + escapeHTML(log.cancel_reason) : '';
+      const networkPeer = log.network_peer ? '&#10;' + t('logs.tooltip.networkPeer') + ': ' + escapeHTML(log.network_peer) : '';
+      const streamState = log.stream_state ? '&#10;' + t('logs.tooltip.streamState') + ': ' + escapeHTML(log.stream_state) : '';
       const label = log.error_reason ? `${code} · ${escapeHTML(log.error_reason)}` : code;
       return `<span class="badge warn" title="${message}${reason}${action}${summary}${attempts}${hint}${requestSize}${upstreamSize}${timeoutBudget}${cancelReason}${networkPeer}${streamState}">${label}</span>`;
     };
@@ -731,14 +735,14 @@
     };
     const formatToolDiagnostics = (log) => {
       const parts = [];
-      if (log.request_id) parts.push(`请求ID ${log.request_id}`);
-      if (log.request_tools) parts.push(`请求 ${log.request_tools}`);
-      if (log.response_tools) parts.push(`响应 ${log.response_tools}`);
-      if (log.request_tools && !log.response_tools && !log.is_success) parts.push('响应 无工具调用');
-      if (log.fallback_mode) parts.push(`恢复 ${log.fallback_mode}`);
-      if (log.normalization) parts.push(`归一化 ${log.normalization}`);
-      if (log.stream_state) parts.push(`流 ${log.stream_state}`);
-      if (log.effective_timeout_seconds) parts.push(`超时 ${log.effective_timeout_seconds}s`);
+      if (log.request_id) parts.push(t('logs.toolDiagnostics.requestId') + ' ' + log.request_id);
+      if (log.request_tools) parts.push(t('logs.toolDiagnostics.request') + ' ' + log.request_tools);
+      if (log.response_tools) parts.push(t('logs.toolDiagnostics.response') + ' ' + log.response_tools);
+      if (log.request_tools && !log.response_tools && !log.is_success) parts.push(t('logs.toolDiagnostics.noResponseTools'));
+      if (log.fallback_mode) parts.push(t('logs.toolDiagnostics.fallback') + ' ' + log.fallback_mode);
+      if (log.normalization) parts.push(t('logs.toolDiagnostics.normalization') + ' ' + log.normalization);
+      if (log.stream_state) parts.push(t('logs.toolDiagnostics.stream') + ' ' + log.stream_state);
+      if (log.effective_timeout_seconds) parts.push(t('logs.toolDiagnostics.timeout') + ' ' + log.effective_timeout_seconds + 's');
       if (!parts.length) return '-';
       const text = parts.join(' | ');
       const escaped = escapeHTML(text);
@@ -748,20 +752,20 @@
     const formatLogDiagnosticCopyText = (log) => {
       if (!log) return '';
       return [
-        `request_id: ${log.request_id || log.id || '-'}`,
-        `time: ${formatTime(log.timestamp)}`,
-        `route: ${log.method || '-'} ${log.path || '-'}`,
-        `provider: ${log.provider || '-'} / ${formatModelRoute(log)}`,
-        `status: ${log.status_code ?? '-'} success=${log.is_success === true}`,
-        `elapsed: ${formatLatency(log.elapsed_ms)}`,
-        `error_code: ${log.error_code || '-'}`,
-        `error_reason: ${log.error_reason || '-'}`,
-        `error_action: ${log.error_action || '-'}`,
-        `diagnostic_summary: ${log.diagnostic_summary || '-'}`,
-        `request_tools: ${log.request_tools || '-'}`,
-        `response_tools: ${log.response_tools || '-'}`,
-        `stream_state: ${log.stream_state || '-'}`,
-        `attempts: ${log.attempts_summary || '-'}`,
+        `${t('logs.diagnostic.requestId')}: ${log.request_id || log.id || '-'}`,
+        `${t('logs.diagnostic.time')}: ${formatTime(log.timestamp)}`,
+        `${t('logs.diagnostic.route')}: ${log.method || '-'} ${log.path || '-'}`,
+        `${t('logs.diagnostic.provider')}: ${log.provider || '-'} / ${formatModelRoute(log)}`,
+        `${t('logs.diagnostic.status')}: ${log.status_code ?? '-'} success=${log.is_success === true}`,
+        `${t('logs.diagnostic.elapsed')}: ${formatLatency(log.elapsed_ms)}`,
+        `${t('logs.diagnostic.errorCode')}: ${log.error_code || '-'}`,
+        `${t('logs.diagnostic.errorReason')}: ${log.error_reason || '-'}`,
+        `${t('logs.diagnostic.errorAction')}: ${log.error_action || '-'}`,
+        `${t('logs.diagnostic.summary')}: ${log.diagnostic_summary || '-'}`,
+        `${t('logs.diagnostic.requestTools')}: ${log.request_tools || '-'}`,
+        `${t('logs.diagnostic.responseTools')}: ${log.response_tools || '-'}`,
+        `${t('logs.diagnostic.streamState')}: ${log.stream_state || '-'}`,
+        `${t('logs.diagnostic.attempts')}: ${log.attempts_summary || '-'}`,
       ].join('\n');
     };
     const renderLogRow = (log) => {
@@ -784,7 +788,7 @@
             <td class="col-error">${formatLogError(log)}</td>
             <td class="col-status"><span class="${statusClass(log.status_code)}">${escapeHTML(log.status_code ?? '-')}</span></td>
             <td class="col-latency" title="${latencyTitle}">${latency}</td>
-            <td class="col-action"><button class="btn" data-action="copy-log-diagnostic" data-id="${escapeAttr(log.id || log.request_id || '')}">复制诊断</button></td>
+            <td class="col-action"><button class="btn" data-action="copy-log-diagnostic" data-id="${escapeAttr(log.id || log.request_id || '')}">${t('action.copyDiagnostic')}</button></td>
           </tr>`;
     };
 
@@ -806,8 +810,8 @@
     const formatValidationIssues = (validation) => {
       if (!validation) return '';
       const lines = [];
-      (validation.errors || []).forEach((item) => lines.push(`错误: [${item.code}] ${item.field} - ${item.message}`));
-      (validation.warnings || []).forEach((item) => lines.push(`警告: [${item.code}] ${item.field} - ${item.message}`));
+      (validation.errors || []).forEach((item) => lines.push(t('error.prefix.error') + ': [' + item.code + '] ' + item.field + ' - ' + item.message));
+      (validation.warnings || []).forEach((item) => lines.push(t('error.prefix.warn') + ': [' + item.code + '] ' + item.field + ' - ' + item.message));
       return lines.join('\n');
     };
 
@@ -830,8 +834,8 @@
       if (boundModels.length) {
         const names = boundModels.map((item) => item.name).filter(Boolean);
         const preview = names.slice(0, 8).join(', ') || '-';
-        const more = names.length > 8 ? ` 等 ${names.length} 个` : '';
-        const message = `该提供商仍有模型绑定，直接删除会造成无效配置。\n\n绑定模型：${preview}${more}\n\n是否同时删除这些模型并删除提供商？`;
+        const more = names.length > 8 ? ' ' + t('dynamic.andMore', names.length) : '';
+        const message = t('providers.delete.boundModels', preview, more);
         if (!window.confirm(message)) return false;
         const nextModels = models.filter((item) => modelProviderKey(item).toLowerCase() !== String(providerId).toLowerCase());
         await fetchJSON('/models', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(nextModels) });
@@ -839,7 +843,7 @@
 
       try {
         await fetchJSON('/providers/' + encodeURIComponent(providerId), { method: 'DELETE' });
-        showToast(boundModels.length ? `已删除提供商 ${providerId}，并移除 ${boundModels.length} 个绑定模型。` : `已删除提供商 ${providerId}`);
+        showToast(boundModels.length ? t('providers.delete.successWithModels', providerId, boundModels.length) : t('providers.delete.success', providerId));
         return true;
       } catch (err) {
         const validation = err.validation || err.details?.validation;
@@ -853,9 +857,9 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (!result.valid) throw Object.assign(new Error('配置校验失败'), { validation: result });
+      if (!result.valid) throw Object.assign(new Error(t('error.validationFailed')), { validation: result });
       if ((result.warnings || []).length) {
-        return window.confirm('配置存在警告，是否继续保存？\n\n' + formatValidationIssues(result));
+        return window.confirm(t('config.save.warning', formatValidationIssues(result)));
       }
       return true;
     };
@@ -876,11 +880,11 @@
       try {
         if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('clipboard unavailable');
         await navigator.clipboard.writeText(value);
-        showToast(`已复制${label}`);
+        showToast(t('toast.copied', label));
         return true;
       } catch (e) {
-        showToast(`无法自动复制${label}，请在弹窗中手动复制。`, 'warn');
-        window.prompt(`复制${label}`, value);
+        showToast(t('toast.copyFailed', label), 'warn');
+        window.prompt(t('prompt.copy', label), value);
         return false;
       }
     };
@@ -906,15 +910,15 @@
     const loadVersion = async () => {
       try {
         const info = await fetchJSON('/version');
-        $('appVersion').textContent = info.version ? `当前版本 ${info.version}` : '当前版本未知';
+        $('appVersion').textContent = info.version ? t('brand.version.current', info.version) : t('brand.version.unknown');
       } catch (e) {
-        $('appVersion').textContent = '版本获取失败';
+        $('appVersion').textContent = t('brand.version.fetchFailed');
       }
     };
 
     const copyQQGroup = async () => {
       const group = '390485182';
-      await copyText(' QQ 群号', group);
+      await copyText(t('action.copyQQGroup'), group);
     };
 
     // 加载仪表盘统计数据与最近日志
@@ -931,7 +935,7 @@
         const tbody = $('dashboardLogs');
         const logs = logsRes.logs || [];
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无日志</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="10" class="empty">' + t('table.empty.logs') + '</td></tr>';
           return;
         }
         tbody.innerHTML = logs.map(renderLogRow).join('');
@@ -948,8 +952,9 @@
         $('cfgDefaultModel').value = cfg.default_model || '';
         $('cfgDefenseEnabled').checked = cfg.defense?.enabled !== false;
         $('cfgClientTimeoutBudget').value = cfg.defense?.client_timeout_budget_seconds || 90;
-        $('cfgHealth').textContent = cfg.port ? '已加载' : '-';
-        $('cfgSummary').textContent = `providers: ${(cfg.providers || []).length}, models: ${(cfg.models || []).length}, defense: ${cfg.defense?.enabled === false ? 'off' : 'on'}, client budget: ${cfg.defense?.client_timeout_budget_seconds || 90}s`;
+        $('cfgHealth').textContent = cfg.port ? t('config.status.loaded') : '-';
+        const defenseStatus = cfg.defense?.enabled === false ? t('config.status.disabled') : t('config.status.enabled');
+        $('cfgSummary').textContent = t('config.status.summary', (cfg.providers || []).length, (cfg.models || []).length, defenseStatus, cfg.defense?.client_timeout_budget_seconds || 90);
       } catch (e) {
         console.error(e);
       }
@@ -965,7 +970,7 @@
         currentProviders = items;
         const tbody = $('providerTable');
         if (!items.length) {
-          tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无提供商</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="8" class="empty">' + t('table.empty.providers') + '</td></tr>';
           return;
         }
         tbody.innerHTML = items.map(item => {
@@ -978,11 +983,11 @@
             <td>${escapeHTML(item.base_url)}</td>
             <td>${escapeHTML(modelCounts.get(key.toLowerCase()) || 0)}</td>
             <td>${escapeHTML(item.priority ?? 0)}</td>
-            <td>${item.enabled ? '是' : '否'}</td>
+            <td>${item.enabled ? t('table.boolean.yes') : t('table.boolean.no')}</td>
             <td>
-              <button class="btn" data-action="edit-provider" data-name="${escapeAttr(key)}">编辑</button>
-              ${isBuiltInUseAI(item) ? '' : `<button class="btn danger" data-action="delete-provider" data-name="${escapeAttr(key)}">删除</button>`}
-              <button class="btn" data-action="test-provider" data-name="${escapeAttr(key)}">校验模型列表</button>
+              <button class="btn" data-action="edit-provider" data-name="${escapeAttr(key)}">${t('providers.table.edit')}</button>
+              ${isBuiltInUseAI(item) ? '' : `<button class="btn danger" data-action="delete-provider" data-name="${escapeAttr(key)}">${t('providers.table.delete')}</button>`}
+              <button class="btn" data-action="test-provider" data-name="${escapeAttr(key)}">${t('providers.table.test')}</button>
             </td>
           </tr>
         `}).join('');
@@ -999,7 +1004,7 @@
         currentModels = items;
         const tbody = $('modelTable');
         if (!items.length) {
-          tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无模型</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="6" class="empty">' + t('table.empty.models') + '</td></tr>';
           return;
         }
         tbody.innerHTML = items.map(item => {
@@ -1010,10 +1015,10 @@
             <td>${escapeHTML(modelProvider || '-')}</td>
             <td>${escapeHTML(item.context_length)}</td>
             <td>${escapeHTML(item.max_output_tokens)}</td>
-            <td>${item.enabled ? '是' : '否'}</td>
+            <td>${item.enabled ? t('table.boolean.yes') : t('table.boolean.no')}</td>
             <td>
-              <button class="btn" data-action="edit-model" data-name="${escapeAttr(item.name)}" data-provider="${escapeAttr(modelProvider)}">编辑</button>
-              <button class="btn danger" data-action="delete-model" data-name="${escapeAttr(item.name)}" data-provider="${escapeAttr(modelProvider)}">删除</button>
+              <button class="btn" data-action="edit-model" data-name="${escapeAttr(item.name)}" data-provider="${escapeAttr(modelProvider)}">${t('models.table.edit')}</button>
+              <button class="btn danger" data-action="delete-model" data-name="${escapeAttr(item.name)}" data-provider="${escapeAttr(modelProvider)}">${t('models.table.delete')}</button>
             </td>
           </tr>
         `}).join('');
@@ -1034,7 +1039,7 @@
 
         const select = $('testProvider');
         if (!currentProviders.length) {
-          select.innerHTML = '<option value="">暂无提供商</option>';
+          select.innerHTML = '<option value="">' + t('table.empty.providers') + '</option>';
         } else {
           select.innerHTML = currentProviders.map((p) => `<option value="${escapeAttr(providerKey(p))}">${escapeHTML(providerLabel(p))} (${escapeHTML(p.type)})</option>`).join('');
         }
@@ -1053,13 +1058,13 @@
       const providerId = $('testProvider').value;
       const provider = currentProviders.find((p) => providerKey(p) === providerId);
       if (!provider) {
-        modelSelect.innerHTML = '<option value="">暂无提供商</option>';
+        modelSelect.innerHTML = '<option value="">' + t('table.empty.providers') + '</option>';
         modelSelect.disabled = true;
         return;
       }
 
       modelSelect.disabled = true;
-      modelSelect.innerHTML = '<option value="">正在读取官方模型列表...</option>';
+      modelSelect.innerHTML = '<option value="">' + t('test.status.readingModels') + '</option>';
 
       let models = [];
       try {
@@ -1070,21 +1075,21 @@
         });
         if (seq !== testModelLoadSeq || $('testProvider').value !== providerId) return;
         if (!res.success) {
-          modelSelect.innerHTML = '<option value="">读取模型失败，请重新读取模型列表</option>';
-          setTestResult('模型列表读取失败', formatTestResult(res));
+          modelSelect.innerHTML = '<option value="">' + t('test.error.readModelsFailed') + '</option>';
+          setTestResult(t('test.result.connectionFailed'), formatTestResult(res));
           return;
         }
         models = (res.models || []).map((name) => String(name || '').trim()).filter(Boolean);
         currentModels = models.map((name) => ({ name, provider_id: providerId, provider: providerId, enabled: true }));
       } catch (e) {
         if (seq !== testModelLoadSeq || $('testProvider').value !== providerId) return;
-        modelSelect.innerHTML = '<option value="">读取模型失败，请重新读取模型列表</option>';
-        setTestResult('模型列表读取失败', String(e.message || e));
+        modelSelect.innerHTML = '<option value="">' + t('test.error.readModelsFailed') + '</option>';
+        setTestResult(t('test.result.connectionFailed'), String(e.message || e));
         return;
       }
 
       if (!models.length) {
-        modelSelect.innerHTML = '<option value="">官方模型列表为空</option>';
+        modelSelect.innerHTML = '<option value="">' + t('test.error.emptyModelList') + '</option>';
         modelSelect.disabled = true;
         return;
       }
@@ -1118,7 +1123,7 @@
       const request = result && result.request ? result.request : null;
       const lines = [];
       if (request) {
-        lines.push('请求上下文:');
+        lines.push(t('logs.toolDiagnostics.request') + ':');
         lines.push(`- Provider: ${request.provider_id || '-'} (${request.provider_type || '-'})`);
         lines.push(`- Base URL: ${request.base_url || '-'}`);
         if (request.model) lines.push(`- Model: ${request.model}`);
@@ -1135,35 +1140,39 @@
       try {
         const meta = await fetchJSON('/models/metadata?name=' + encodeURIComponent(name) + '&provider_id=' + encodeURIComponent(providerId));
         if (!meta.found) {
-          $('mMetaHint').textContent = '未命中内置模型元数据；保存时会使用安全兜底默认值，建议手动确认上下文和最大输出。';
+          $('mMetaHint').textContent = t('models.metadata.missed');
           return;
         }
         const changed = [];
         if ((!$('mCtx').value || Number($('mCtx').value) <= 0) && meta.context_length) {
           $('mCtx').value = meta.context_length;
-          changed.push('上下文长度');
+          changed.push(t('models.metadata.contextLength'));
         }
         if ((!$('mMax').value || Number($('mMax').value) <= 0) && meta.max_output_tokens) {
           $('mMax').value = meta.max_output_tokens;
-          changed.push('最大输出');
+          changed.push(t('models.metadata.maxOutput'));
         }
-        const source = meta.source === 'provider_profile' ? 'provider 专属配置' : '内置模型目录';
+        const source = meta.source === 'provider_profile' ? t('models.metadata.source.profile') : t('models.metadata.source.builtin');
         const capabilities = [
           meta.supports_tools === true ? 'tools' : '',
           meta.supports_vision === true ? 'vision' : '',
           meta.reasoning_effort ? `reasoning=${meta.reasoning_effort}` : ''
         ].filter(Boolean).join(', ');
-        $('mMetaHint').textContent = `已命中${source}: ${meta.model || name}。${changed.length ? '已补齐 ' + changed.join('、') + '。' : '当前数值保持用户填写。'}${capabilities ? ' 能力: ' + capabilities + '。' : ''}`;
+        const filledSummary = changed.length
+          ? t('dynamic.metadataFilled', changed.join(t('dynamic.metadataJoiner')))
+          : t('models.metadata.keepUserValue');
+        const capabilitiesSummary = capabilities ? t('dynamic.metadataCapabilities', capabilities) : '';
+        $('mMetaHint').textContent = t('dynamic.metadataHit', source, meta.model || name, filledSummary, capabilitiesSummary);
       } catch (e) {
-        $('mMetaHint').textContent = '模型元数据查询失败，可继续手动填写；保存时后端仍会做一次默认值补齐。';
-        console.debug('模型元数据查询失败', e);
+        $('mMetaHint').textContent = t('models.metadata.queryFailed');
+        console.debug(t('logs.debug.modelMetadataFailed'), e);
       }
     };
 
     const renderProviderHealth = (items) => {
       const tbody = $('providerHealthTable');
       if (!items || !items.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无 provider 健康数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">' + t('table.empty.providerHealth') + '</td></tr>';
         return;
       }
       tbody.innerHTML = items.map((item) => {
@@ -1171,7 +1180,7 @@
         return `
           <tr>
             <td>${escapeHTML(item.provider)}</td>
-            <td>${hasTraffic ? formatPercent(item.success_rate) : '<span class="badge">暂无请求</span>'}</td>
+            <td>${hasTraffic ? formatPercent(item.success_rate) : '<span class="badge">' + t('monitor.table.noRequests') + '</span>'}</td>
             <td>${formatLatency(item.latency_ms)}</td>
             <td class="${item.consecutive_failures ? 'warn' : 'ok'}">${item.consecutive_failures || 0}</td>
             <td>${formatCooldown(item.cooldown_remaining_ms)}</td>
@@ -1184,24 +1193,24 @@
     const formatRuntimeStatus = (status) => {
       const artifact = status?.update_artifacts || {};
       const lineForFile = (label, item) => {
-        if (!item || !item.path) return `${label}: 未知`;
-        const state = item.exists ? `存在 (${formatBytes(item.size)})` : '不存在';
-        const modified = item.modified ? `, 修改 ${formatTime(item.modified)}` : '';
+        if (!item || !item.path) return `${label}: ${t('monitor.runtime.unknown')}`;
+        const state = item.exists ? `${t('monitor.runtime.exists')} (${formatBytes(item.size)})` : t('monitor.runtime.notExists');
+        const modified = item.modified ? ', ' + t('monitor.runtime.modified') + ' ' + formatTime(item.modified) : '';
         return `${label}: ${state}${modified}\n  ${item.path}`;
       };
       return [
-        `版本: ${status?.version || '-'}`,
-        `进程: PID ${status?.pid || '-'} / ${status?.goos || '-'}-${status?.goarch || '-'}`,
-        `监听: ${status?.listen_host || '-'}:${status?.listen_port || '-'}`,
-        `面板: ${status?.admin_url || '-'}`,
-        `Provider/模型: ${status?.provider_count ?? 0} / ${status?.model_count ?? 0}`,
-        `配置: ${status?.config_path || '-'}`,
-        `程序: ${status?.executable_path || '-'}`,
-        lineForFile('新版 .new', artifact.staged_binary),
-        lineForFile('更新脚本 .ps1', artifact.self_update_script),
-        lineForFile('更新日志 .log', artifact.self_update_log),
-        `备份数量: ${artifact.backup_count ?? 0}`,
-        lineForFile('最近备份 .bak', artifact.latest_backup),
+        `${t('monitor.runtime.version')}: ${status?.version || '-'}`,
+        `${t('monitor.runtime.process')}: PID ${status?.pid || '-'} / ${status?.goos || '-'}-${status?.goarch || '-'}`,
+        `${t('monitor.runtime.listen')}: ${status?.listen_host || '-'}:${status?.listen_port || '-'}`,
+        `${t('monitor.runtime.panel')}: ${status?.admin_url || '-'}`,
+        `${t('monitor.runtime.providersModels')}: ${status?.provider_count ?? 0} / ${status?.model_count ?? 0}`,
+        `${t('monitor.runtime.config')}: ${status?.config_path || '-'}`,
+        `${t('monitor.runtime.executable')}: ${status?.executable_path || '-'}`,
+        lineForFile(t('monitor.runtime.artifact.new'), artifact.staged_binary),
+        lineForFile(t('monitor.runtime.artifact.script'), artifact.self_update_script),
+        lineForFile(t('monitor.runtime.artifact.log'), artifact.self_update_log),
+        `${t('monitor.runtime.backupCount')}: ${artifact.backup_count ?? 0}`,
+        lineForFile(t('monitor.runtime.latestBackup'), artifact.latest_backup),
       ].join('\n');
     };
 
@@ -1212,16 +1221,16 @@
       lines.push(copy);
       if (summary.latest_failure && summary.latest_failure.id) {
         lines.push('');
-        lines.push(`最近失败: ${summary.latest_failure.error_code || '-'} · ${summary.latest_failure.error_reason || summary.latest_failure.error_message || '-'}`);
-        lines.push(`请求ID: ${summary.latest_failure.request_id || '-'}`);
-        lines.push(`Provider: ${summary.latest_failure.provider || '-'} / ${summary.latest_failure.model || '-'} -> ${summary.latest_failure.upstream || '-'}`);
-        lines.push(`状态: ${summary.latest_failure.status_code || '-'}`);
+        lines.push(`${t('monitor.diagnostics.latestFailure')}: ${summary.latest_failure.error_code || '-'} · ${summary.latest_failure.error_reason || summary.latest_failure.error_message || '-'}`);
+        lines.push(`${t('monitor.diagnostics.requestId')}: ${summary.latest_failure.request_id || '-'}`);
+        lines.push(`${t('monitor.diagnostics.provider')}: ${summary.latest_failure.provider || '-'} / ${summary.latest_failure.model || '-'} -> ${summary.latest_failure.upstream || '-'}`);
+        lines.push(`${t('monitor.diagnostics.status')}: ${summary.latest_failure.status_code || '-'}`);
       }
       if (Array.isArray(summary.problem_providers) && summary.problem_providers.length > 0) {
         lines.push('');
-        lines.push('异常 provider:');
+        lines.push(t('monitor.diagnostics.problemProviders'));
         summary.problem_providers.forEach((item) => {
-          lines.push(`- ${item.provider}: 连续失败 ${item.consecutive_failures || 0}，冷却 ${formatCompactLatency(item.cooldown_remaining_ms || 0)}，最近错误 ${item.last_error || '-'}`);
+          lines.push(`- ${item.provider}: ${t('dynamic.providerHealthLine', item.consecutive_failures || 0, formatCompactLatency(item.cooldown_remaining_ms || 0), item.last_error || '-')}`);
         });
       }
       return lines.join('\n');
@@ -1232,12 +1241,12 @@
         const [health, metrics, providerHealth, runtimeStatus, diagnosticsSummary] = await Promise.all([
           fetch('/health').then(async (res) => {
             const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.error || '请求失败');
+            if (!res.ok) throw new Error(data.error || t('error.requestFailed'));
             return data;
           }),
           fetch('/metrics').then(async (res) => {
             const text = await res.text();
-            if (!res.ok) throw new Error(text || '请求失败');
+            if (!res.ok) throw new Error(text || t('error.requestFailed'));
             return text;
           }),
           fetchJSON('/providers/health'),
@@ -1256,7 +1265,7 @@
         $('runtimeStatusOutput').textContent = formatRuntimeStatus(runtimeStatus);
         $('diagnosticsSummaryOutput').textContent = formatDiagnosticsSummary(diagnosticsSummary);
         $('btnCopyDiagnosticsSummary').onclick = async () => {
-          await copyText('诊断摘要', diagnosticsSummary?.copy_summary || '');
+          await copyText(t('action.copyDiagnosticsSummary'), diagnosticsSummary?.copy_summary || '');
         };
       } catch (e) {
         console.error(e);
@@ -1298,11 +1307,12 @@
         return;
       }
       banner.classList.remove('hidden');
-      $('latestFailureReason').textContent = `${latest.error_code || 'error'} · ${latest.error_reason || latest.error_message || '请求失败'}`;
+      $('latestFailureReason').textContent = `${latest.error_code || t('error.prefix.error')} · ${latest.error_reason || latest.error_message || t('error.requestFailed')}`;
+      $('latestFailureReason').setAttribute('data-i18n', 'latest.failure.reason');
       $('latestFailureAction').textContent = latest.error_action || latest.error_hint || '-';
       $('latestFailureSummary').textContent = latest.diagnostic_summary || latest.attempts_summary || '-';
       $('latestFailureMeta').textContent = [
-        latest.request_id ? `请求ID ${latest.request_id}` : null,
+        latest.request_id ? `${t('logs.toolDiagnostics.requestId')} ${latest.request_id}` : null,
         latest.provider || null,
         latest.model || null,
         latest.upstream ? `upstream ${latest.upstream}` : null,
@@ -1310,7 +1320,7 @@
         latest.elapsed_ms ? `${formatCompactLatency(latest.elapsed_ms)}` : null,
       ].filter(Boolean).join(' | ') || '-';
       $('latestFailureSample').textContent = latest.request_tools || latest.response_tools || '-';
-      $('latestFailureSampleHint').textContent = latest.request_tools ? '请求工具声明' : (latest.response_tools ? '响应工具声明' : '-');
+      $('latestFailureSampleHint').textContent = latest.request_tools ? t('logs.failure.requestTools') : (latest.response_tools ? t('logs.failure.responseTools') : '-');
     };
 
     // 加载日志列表（分页模式）
@@ -1334,14 +1344,14 @@
 
         // 更新分页信息
         $('logPageInfo').textContent = total > 0
-          ? `第 ${logCurrentPage}/${totalPages} 页（共 ${total} 条）`
-          : '暂无日志';
+          ? t('logs.pageInfo', logCurrentPage, totalPages, total)
+          : t('table.empty.logs');
         $('btnLogPrevPage').disabled = logCurrentPage <= 1;
         $('btnLogNextPage').disabled = logCurrentPage >= totalPages;
 
         const tbody = $('logTable');
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无日志</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="10" class="empty">' + t('table.empty.logs') + '</td></tr>';
           updateLatestFailureBanner([]);
           return;
         }
@@ -1360,8 +1370,10 @@
       }
     });
     $('btnLogNextPage').addEventListener('click', () => {
-      logCurrentPage++;
-      loadLogs();
+      if (logCurrentPage < totalPages) {
+        logCurrentPage++;
+        loadLogs();
+      }
     });
     $('btnApplyLogFilters').addEventListener('click', () => {
       currentLogFilters = getLogFiltersFromUI();
@@ -1383,7 +1395,7 @@
         $('latestFailureSummary').textContent,
         $('latestFailureMeta').textContent,
       ].filter(Boolean).join('\n');
-      await copyText('最近失败摘要', text);
+      await copyText(t('action.copyLatestFailure'), text);
     });
 
     // 导航点击处理：读取当前元素的 hash 用于前端路由切换
@@ -1426,11 +1438,11 @@
         if (!await validateConfigPayload(payload)) return;
         await fetchJSON('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         currentConfig = payload;
-        setTestResult('配置已保存', '配置已保存并已热更新代理路由。端口变更仍需重启进程。');
+        setTestResult(t('config.save.success'), t('config.save.successDetail'));
         loadConfig();
       } catch (e) {
         const msg = formatValidationIssues(e.validation) || String(e.message || e);
-        setTestResult('配置保存失败', msg);
+        setTestResult(t('config.save.failed'), msg);
         alert(msg);
       }
     });
@@ -1444,7 +1456,7 @@
     // 打开新增提供商弹窗
     $('btnAddProvider').addEventListener('click', () => {
       editingProviderName = null;
-      $('providerModalTitle').textContent = '新增提供商';
+      $('providerModalTitle').textContent = t('providers.modal.addTitle');
       $('pId').value = '';
       $('pId').disabled = false;
       $('pName').value = '';
@@ -1454,8 +1466,8 @@
       $('pKey').value = '';
       $('pKey').type = 'password';
       $('btnToggleProviderKey').textContent = '👁';
-      $('btnToggleProviderKey').setAttribute('aria-label', '显示 API Key');
-      $('btnToggleProviderKey').setAttribute('title', '显示 API Key');
+      $('btnToggleProviderKey').setAttribute('aria-label', t('providers.form.showKey'));
+      $('btnToggleProviderKey').setAttribute('title', t('providers.form.showKey'));
       $('pPriority').value = 10;
       $('pEnabled').checked = true;
       lastProviderProbe = null;
@@ -1470,8 +1482,10 @@
       const show = $('pKey').type === 'password';
       $('pKey').type = show ? 'text' : 'password';
       $('btnToggleProviderKey').textContent = show ? '🙈' : '👁';
-      $('btnToggleProviderKey').setAttribute('aria-label', show ? '隐藏 API Key' : '显示 API Key');
-      $('btnToggleProviderKey').setAttribute('title', show ? '隐藏 API Key' : '显示 API Key');
+      $('btnToggleProviderKey').setAttribute('aria-label', show ? t('providers.form.hideKey') : t('providers.form.showKey'));
+      $('btnToggleProviderKey').setAttribute('title', show ? t('providers.form.hideKey') : t('providers.form.showKey'));
+      const toggleLabel = show ? t('providers.form.hideKey') : t('providers.form.showKey');
+      $('btnToggleProviderKey').setAttribute('aria-label', toggleLabel);
     });
 
     const readProviderForm = () => {
@@ -1491,7 +1505,7 @@
 
     $('btnProbeProvider').addEventListener('click', async () => {
       const provider = readProviderForm();
-      if (!provider.base_url) return alert('Base URL 不能为空。');
+      if (!provider.base_url) return alert(t('error.baseUrlRequired'));
       try {
         const result = await fetchJSON('/providers/probe', {
           method: 'POST',
@@ -1499,7 +1513,7 @@
           body: JSON.stringify({ provider })
         });
         if (!result.reachable) {
-          return alert('模型接口探测失败：无法从该 provider 的官方模型列表接口读取可用模型。\n\n' + result.message + '\n\n' + JSON.stringify(result.attempts || [], null, 2));
+          return alert(t('providers.probe.failed', result.message, JSON.stringify(result.attempts || [], null, 2)));
         }
         lastProviderProbe = {
           provider_id: provider.id,
@@ -1508,9 +1522,9 @@
           detected_type: result.detected_type,
           corrected_base_url: result.corrected_base_url
         };
-        const summary = `模型接口探测成功\n含义：已验证 Base URL/API Key 可读取官方模型列表；这不等同于每个模型都能完成对话。\n类型：${result.detected_type}\n建议 Base URL：${result.corrected_base_url}\n模型数：${result.models_count}\n示例：${(result.models_preview || []).join(', ')}`;
+        const summary = t('dynamic.probeSuccess', result.detected_type, result.corrected_base_url, result.models_count, (result.models_preview || []).join(', '));
         if (result.corrected_base_url && result.corrected_base_url !== provider.base_url) {
-          if (window.confirm(summary + '\n\n是否将建议 Base URL 填入表单？')) {
+          if (window.confirm(t('providers.probe.suggestBaseUrl'))) {
             $('pBase').value = result.corrected_base_url;
             if (result.detected_type === 'openai') $('pType').value = result.detected_type;
           }
@@ -1518,7 +1532,7 @@
         }
         alert(summary);
       } catch (e) {
-        alert('模型接口探测失败：' + String(e.message || e));
+        alert(t('providers.probe.error', String(e.message || e)));
       }
     });
 
@@ -1546,7 +1560,7 @@
         }));
       const existedCount = probedModels.length - additions.length;
       if (!additions.length) {
-        setTestResult('模型已存在', `已探测到 ${probedModels.length} 个模型，均已存在于 ${providerId} 的模型配置中。`);
+        setTestResult(t('test.result.modelsExist'), t('models.import.alreadyExist', probedModels.length, providerId));
         return;
       }
 
@@ -1555,7 +1569,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify([...existing, ...additions])
       });
-      setTestResult('模型已导入', `已为 ${providerId} 自动导入 ${additions.length} 个新模型，已存在 ${existedCount} 个；后端已热更新代理路由。`);
+      setTestResult(t('models.import.success', providerId, additions.length, existedCount), t('models.import.success', providerId, additions.length, existedCount));
       loadModels();
       if ($('testProvider').value === providerId) await refreshTestModelOptions($('testModel').value.trim());
     };
@@ -1564,12 +1578,12 @@
     $('btnSaveProvider').addEventListener('click', async () => {
       const payload = readProviderForm();
       try {
-        if (!payload.id) return alert('ID 不能为空');
-        if (!payload.name) return alert('名称不能为空');
-        if (payload.type !== 'openai') return alert('类型必须是 openai。');
-        if (!payload.base_url) return alert('Base URL 不能为空。');
+        if (!payload.id) return alert(t('error.idRequired'));
+        if (!payload.name) return alert(t('error.nameRequired'));
+        if (payload.type !== 'openai') return alert(t('error.typeMustBeOpenAI'));
+        if (!payload.base_url) return alert(t('error.baseUrlRequired'));
         if (currentProviders.some((p) => providerKey(p).toLowerCase() === payload.id.toLowerCase() && providerKey(p) !== editingProviderName)) {
-          return alert('Provider ID 已存在，请换一个 ID。');
+          return alert(t('error.providerIdExists'));
         }
         if (editingProviderName) {
           await fetchJSON('/providers/' + encodeURIComponent(editingProviderName), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -1588,19 +1602,19 @@
     });
 
     $('btnTestConnection').addEventListener('click', async () => {
-      await withButtonLoading('btnTestConnection', '测试中...', async () => {
+      await withButtonLoading('btnTestConnection', t('dynamic.testing'), async () => {
         const provider = currentProviders.find((p) => providerKey(p) === $('testProvider').value);
         if (!provider) {
-          setTestResult('无可用提供商', '请先在提供商页新增并启用至少一个 provider。');
+          setTestResult(t('test.error.noProvider'), t('test.error.addProviderFirst'));
           return;
         }
-        setTestResult('模型列表读取中...', '正在读取当前提供商官方 /models 返回，请稍候。');
+        setTestResult(t('test.status.readingModels'), t('test.status.readingModelsHint'));
         try {
           const res = await fetchJSON('/test/connection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider }) });
-          setTestResult(res.success ? '模型列表读取成功' : '模型列表读取失败', formatTestResult(res));
+          setTestResult(res.success ? t('test.result.connectionSuccess') : t('test.result.connectionFailed'), formatTestResult(res));
           if (res.success) await refreshTestModelOptions($('testModel').value.trim());
         } catch (e) {
-          setTestResult('模型列表读取失败', String(e.message || e));
+          setTestResult(t('test.result.connectionFailed'), String(e.message || e));
         }
       });
     });
@@ -1610,23 +1624,23 @@
     });
 
     $('btnTestChat').addEventListener('click', async () => {
-      await withButtonLoading('btnTestChat', '对话中...', async () => {
+      await withButtonLoading('btnTestChat', t('dynamic.chatting'), async () => {
         const provider = currentProviders.find((p) => providerKey(p) === $('testProvider').value);
         if (!provider) {
-          setTestResult('无可用提供商', '请先在提供商页新增并启用至少一个 provider。');
+          setTestResult(t('test.error.noProvider'), t('test.error.addProviderFirst'));
           return;
         }
         const message = $('testMessage').value.trim();
         if (!message) {
-          setTestResult('消息为空', '请输入测试消息。');
+          setTestResult(t('test.error.emptyMessage'), t('test.error.inputMessage'));
           return;
         }
         const model = $('testModel').value.trim();
         if (!model || $('testModel').disabled) {
-          setTestResult('模型未选择', '请先等待当前提供商的官方模型列表加载完成，并选择一个模型。');
+          setTestResult(t('test.error.modelNotSelected'), t('test.error.waitForModels'));
           return;
         }
-        setTestResult('对话测试中...', `正在使用 ${providerKey(provider)} / ${model} 测试；请勿重复点击。`);
+        setTestResult(t('test.status.chatting'), t('test.status.chattingHint', providerKey(provider), model));
         try {
           const res = await fetchJSON('/test/chat', {
             method: 'POST',
@@ -1637,9 +1651,9 @@
               model
             })
           });
-          setTestResult(res.success ? '对话成功' : '对话失败', formatTestResult(res));
+          setTestResult(res.success ? t('test.result.chatSuccess') : t('test.result.chatFailed'), formatTestResult(res));
         } catch (e) {
-          setTestResult('对话测试失败', String(e.message || e));
+          setTestResult(t('test.result.chatError'), String(e.message || e));
         }
       });
     });
@@ -1648,12 +1662,12 @@
     $('btnAddModel').addEventListener('click', () => {
       editingModelName = null;
       editingModelProvider = '';
-      $('modelModalTitle').textContent = '新增模型';
+      $('modelModalTitle').textContent = t('models.modal.addTitle');
       $('mName').value = '';
       $('mProvider').value = '';
       $('mCtx').value = '';
       $('mMax').value = '';
-      $('mMetaHint').textContent = '输入模型名后会自动查询内置元数据并补齐默认值；留空保存时后端也会做安全兜底。';
+      $('mMetaHint').textContent = t('models.form.hint');
       $('mEnabled').checked = true;
       $('modelModal').classList.remove('hidden');
     });
@@ -1673,18 +1687,18 @@
         const data = await fetchJSON('/models/search?q=' + encodeURIComponent(query));
         const models = data.models || [];
         if (!models.length) {
-          resultsEl.innerHTML = '<div class="search-item">未找到匹配模型</div>';
+          resultsEl.innerHTML = '<div class="search-item">' + t('models.search.empty') + '</div>';
         } else {
           resultsEl.innerHTML = models.map((item) => `
             <div class="search-item" data-model="${escapeHTML(item.model)}" data-provider="${escapeHTML(item.provider)}" data-context="${item.context_length || ''}" data-max="${item.max_output_tokens || ''}">
               <div class="search-item-name">${escapeHTML(item.model)}</div>
-              <div class="search-item-meta">${escapeHTML(item.family || '')} | 上下文: ${item.context_length || '-'} | 输出: ${item.max_output_tokens || '-'} | 工具: ${item.supports_tools ? '是' : '否'} | 视觉: ${item.supports_vision ? '是' : '否'}</div>
+              <div class="search-item-meta">${escapeHTML(item.family || '')} | ${t('models.metadata.contextLength')}: ${item.context_length || '-'} | ${t('models.metadata.maxOutput')}: ${item.max_output_tokens || '-'} | ${t('models.metadata.capabilities')}: ${item.supports_tools ? t('table.boolean.yes') : t('table.boolean.no')} | ${t('models.metadata.visual')}: ${item.supports_vision ? t('table.boolean.yes') : t('table.boolean.no')}</div>
             </div>
           `).join('');
         }
         resultsEl.classList.remove('hidden');
       } catch (e) {
-        console.debug('模型搜索失败', e);
+        console.debug(t('logs.debug.modelSearchFailed'), e);
       }
     }, 250));
     $('modelSearchResults').addEventListener('click', (e) => {
@@ -1709,12 +1723,12 @@
         max_output_tokens: Number($('mMax').value || 0),
         enabled: $('mEnabled').checked
       };
-      if (!payload.name) return alert('名称不能为空');
+      if (!payload.name) return alert(t('error.nameRequired'));
       if (payload.provider_id) {
         const cfg = currentConfig || await fetchJSON('/config');
         const validProviderIDs = new Set((cfg.providers || []).map((p) => (p.id || p.name || '').toLowerCase()).filter(Boolean));
         if (!validProviderIDs.has(payload.provider_id.toLowerCase())) {
-          if (!window.confirm(`Provider ID "${payload.provider_id}" 不存在，是否清空后按优先级自动路由？`)) {
+          if (!window.confirm(t('models.save.providerNotFound', payload.provider_id))) {
             return;
           }
           $('mProvider').value = '';
@@ -1751,11 +1765,11 @@
       if (action === 'copy-log-diagnostic') {
         const id = btn.getAttribute('data-id') || '';
         const log = currentLogRows.find((item) => String(item.id || item.request_id || '') === id);
-        await copyText('请求诊断', formatLogDiagnosticCopyText(log));
+        await copyText(t('action.copyDiagnostic'), formatLogDiagnosticCopyText(log));
         return;
       }
       if (action === 'delete-provider') {
-        if (!window.confirm(`确定删除提供商 ${name} 吗？`)) return;
+        if (!window.confirm(t('providers.delete.confirm', name))) return;
         if (await deleteProviderWithBoundModelPrompt(name)) {
           await loadProviders();
           await loadModels();
@@ -1764,7 +1778,7 @@
       }
       if (action === 'edit-provider') {
         editingProviderName = name;
-        $('providerModalTitle').textContent = '编辑提供商';
+        $('providerModalTitle').textContent = t('providers.modal.editTitle');
         $('pId').disabled = true;
         const res = await fetchJSON('/providers');
         const item = (res.providers || []).find((x) => providerKey(x) === name || x.name === name);
@@ -1777,8 +1791,8 @@
         $('pKey').value = item.api_key || '';
         $('pKey').type = 'password';
         $('btnToggleProviderKey').textContent = '👁';
-        $('btnToggleProviderKey').setAttribute('aria-label', '显示 API Key');
-        $('btnToggleProviderKey').setAttribute('title', '显示 API Key');
+        $('btnToggleProviderKey').setAttribute('aria-label', t('providers.form.showKey'));
+        $('btnToggleProviderKey').setAttribute('title', t('providers.form.showKey'));
         $('pPriority').value = item.priority ?? 0;
         $('pEnabled').checked = item.enabled;
         lastProviderProbe = null;
@@ -1791,8 +1805,8 @@
         const test = await fetchJSON('/test/connection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: item }) });
         const models = (test.models || []).slice(0, 10).join(', ');
         alert(test.success
-          ? `模型列表校验成功：已从该 provider 官方 /models 接口读取到 ${test.models_count || (test.models || []).length || 0} 个模型。\n\n示例：${models || '-'}`
-          : `模型列表校验失败：无法从该 provider 官方 /models 接口读取可用模型。\n\n${test.message || test.error || '未知错误'}`);
+          ? t('providers.test.success', test.models_count || (test.models || []).length || 0, models || '-')
+          : t('providers.test.failed', test.message || test.error || t('error.unknown')));
       }
       if (action === 'delete-model') {
         const res = await fetchJSON('/models');
@@ -1803,7 +1817,7 @@
       if (action === 'edit-model') {
         editingModelName = name;
         editingModelProvider = modelProvider;
-        $('modelModalTitle').textContent = '编辑模型';
+        $('modelModalTitle').textContent = t('models.modal.editTitle');
         const res = await fetchJSON('/models');
         const item = (res.models || []).find((x) => x.name === name && String(x.provider_id || x.provider || '') === modelProvider);
         if (!item) return;
@@ -1811,7 +1825,7 @@
         $('mProvider').value = item.provider_id || item.provider || '';
         $('mCtx').value = item.context_length || 0;
         $('mMax').value = item.max_output_tokens || 0;
-        $('mMetaHint').textContent = '当前显示的是已保存配置；清空上下文或最大输出后，失焦模型名可重新按元数据补齐。';
+        $('mMetaHint').textContent = t('models.form.editHint');
         $('mEnabled').checked = item.enabled;
         $('modelModal').classList.remove('hidden');
       }

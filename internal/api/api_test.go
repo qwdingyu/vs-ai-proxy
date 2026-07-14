@@ -737,6 +737,41 @@ func TestAdminStaticFAQImagesAreServed(t *testing.T) {
 	}
 }
 
+func TestAdminI18nAssetsAreServed(t *testing.T) {
+	apiSrv, _ := newAPITestHarnessWithStaticFS(t, fstest.MapFS{
+		"index.html":    {Data: []byte("admin-app")},
+		"i18n/index.js": {Data: []byte("window.i18nRuntime = true;")},
+		"i18n/zh.js":    {Data: []byte("window.zhCatalog = true;")},
+		"i18n/en.js":    {Data: []byte("window.enCatalog = true;")},
+	})
+
+	tests := []struct {
+		path string
+		body string
+	}{
+		{path: "/admin/i18n/index.js", body: "window.i18nRuntime = true;"},
+		{path: "/admin/i18n/zh.js", body: "window.zhCatalog = true;"},
+		{path: "/admin/i18n/en.js", body: "window.enCatalog = true;"},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, test.path, nil)
+			apiSrv.engine.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s status = %d, want %d; body=%s", test.path, rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "javascript") {
+				t.Fatalf("GET %s Content-Type = %q, want JavaScript", test.path, contentType)
+			}
+			if rec.Body.String() != test.body {
+				t.Fatalf("GET %s body = %q, want %q", test.path, rec.Body.String(), test.body)
+			}
+		})
+	}
+}
+
 func TestAdminManagementAPIFallsBackToProxyAPIKey(t *testing.T) {
 	t.Setenv("ADMIN_API_KEY", "")
 	t.Setenv("PROXY_API_KEY", "proxy-secret")

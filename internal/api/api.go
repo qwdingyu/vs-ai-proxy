@@ -268,7 +268,9 @@ func (s *Server) registerRoutes() {
 				c.FileFromFS(strings.TrimPrefix(path, "/"), http.FS(s.staticFS))
 				return
 			}
-			if strings.HasPrefix(path, "/admin/assets/") {
+			isAdminStaticAsset := strings.HasPrefix(path, "/admin/assets/") ||
+				strings.HasPrefix(path, "/admin/i18n/")
+			if isAdminStaticAsset {
 				c.FileFromFS(strings.TrimPrefix(path, "/admin/"), http.FS(s.staticFS))
 				return
 			}

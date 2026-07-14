@@ -6,6 +6,7 @@
 #   make release       构建并打包所有平台（压缩包）
 #   make release-notes 生成当前 tag 的 GitHub Release 正文
 #   make tool-check    工具调用专项核查
+#   make i18n-check    Web 国际化专项核查
 #   make release-check 发布前完整核查
 #   make clean         清理构建产物
 
@@ -37,7 +38,7 @@ PLATFORM_ALIAS := \
 	windows/amd64:windows-x64
 
 # ─── 默认目标 ──────────────────────────────────────────
-.PHONY: all build build-all install release release-notes tool-check vuln-check release-check windows-res ensure-windows-res clean
+.PHONY: all build build-all install release release-notes tool-check i18n-check vuln-check release-check windows-res ensure-windows-res clean
 
 all: build
 
@@ -105,12 +106,19 @@ release-notes:
 tool-check:
 	@bash tests/tool_call_release_check.sh
 
+# ─── Web 国际化专项核查 ────────────────────────────────
+i18n-check:
+	node --check web/dist/i18n/index.js
+	node --check web/dist/i18n/zh.js
+	node --check web/dist/i18n/en.js
+	node tests/i18n_runtime_test.js
+
 # ─── 安全门禁 ───────────────────────────────────────────
 vuln-check:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
 # ─── 发布前完整核查 ────────────────────────────────────
-release-check: tool-check vuln-check
+release-check: tool-check vuln-check i18n-check
 	go test ./... -count=1
 	go test -race ./... -count=1
 	go vet ./...

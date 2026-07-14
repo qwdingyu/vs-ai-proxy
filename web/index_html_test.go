@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -14,10 +15,14 @@ func TestIndexHTMLHasNoDuplicateIDsAndScriptReferencesExist(t *testing.T) {
 		t.Fatalf("read dist/index.html: %v", err)
 	}
 	html := string(data)
-	idRe := regexp.MustCompile(`\bid="([^"]+)"`)
+	idRe := regexp.MustCompile(`\bid=("[^"]+"|'[^']+')`)
 	ids := map[string]int{}
 	for _, match := range idRe.FindAllStringSubmatch(html, -1) {
-		ids[match[1]]++
+		id := match[1]
+		if len(id) >= 2 && ((id[0] == '"' && id[len(id)-1] == '"') || (id[0] == '\'' && id[len(id)-1] == '\'')) {
+			id = id[1 : len(id)-1]
+		}
+		ids[id]++
 	}
 	for id, count := range ids {
 		if count > 1 {
@@ -70,12 +75,12 @@ func TestNavigationKeepsBeginnerFlowFirst(t *testing.T) {
 	}
 	html := string(data)
 	wantOrder := []string{
-		`data-page="providers">提供商`,
-		`data-page="test">测试`,
-		`data-page="logs">日志`,
-		`data-page="faq">FAQ`,
-		`data-page="contact">联系我们`,
-		`data-page="advanced">高级`,
+		`data-page="providers" data-i18n="nav.providers">提供商`,
+		`data-page="test" data-i18n="nav.test">测试`,
+		`data-page="logs" data-i18n="nav.logs">日志`,
+		`data-page="faq" data-i18n="nav.faq">FAQ`,
+		`data-page="contact" data-i18n="nav.contact">联系我们`,
+		`data-page="advanced" data-i18n="nav.advanced">高级`,
 	}
 	last := -1
 	for _, marker := range wantOrder {
@@ -105,7 +110,7 @@ func TestProviderProbeImportsModelsWithoutBeginnerConfirmation(t *testing.T) {
 	if strings.Contains(html, "是否自动加入模型配置") {
 		t.Fatalf("provider probe import should not ask beginners to understand model import confirmation")
 	}
-	if !strings.Contains(html, "已为 ${providerId} 自动导入") {
+	if !strings.Contains(html, `data-i18n="models.import.success"`) && !strings.Contains(html, `t('models.import.success'`) {
 		t.Fatalf("missing automatic import success message")
 	}
 	if !strings.Contains(html, "item.name === editingModelName && String(item.provider_id || item.provider || '') === editingModelProvider") {
@@ -138,8 +143,7 @@ func TestDeleteProviderExplainsBoundModelsAndRefreshesDependentPages(t *testing.
 	html := string(data)
 	checks := []string{
 		"deleteProviderWithBoundModelPrompt",
-		"该提供商仍有模型绑定，直接删除会造成无效配置",
-		"是否同时删除这些模型并删除提供商",
+		`t('providers.delete.confirm'`,
 		"const modelRes = await fetchJSON('/models');",
 		"if (boundModels.length)",
 		"await loadProviders();",
@@ -168,8 +172,8 @@ func TestProviderAPIKeyIsPasswordWithVisibilityToggle(t *testing.T) {
 		"$('btnToggleProviderKey').addEventListener('click'",
 		"$('pKey').type = show ? 'text' : 'password'",
 		"$('pKey').type = 'password';",
-		"显示 API Key",
-		"隐藏 API Key",
+		`t('providers.form.showKey')`,
+		`t('providers.form.hideKey')`,
 	}
 	for _, check := range checks {
 		if !strings.Contains(html, check) {
@@ -185,11 +189,11 @@ func TestProviderListShowsBoundModelCount(t *testing.T) {
 	}
 	html := string(data)
 	checks := []string{
-		"<th>模型</th>",
+		`data-i18n="table.header.model"`,
 		"const countModelsByProvider = (models) =>",
 		"const modelCounts = countModelsByProvider(modelRes.models || [])",
 		"<td>${escapeHTML(modelCounts.get(key.toLowerCase()) || 0)}</td>",
-		`<tr><td colspan="8" class="empty">加载中...</td></tr>`,
+		`<tr><td colspan="8" class="empty" data-i18n="table.loading">加载中...</td></tr>`,
 		`colspan="8"`,
 	}
 	for _, check := range checks {
@@ -205,7 +209,7 @@ func TestLogToolDiagnosticsExplainsMissingResponseTools(t *testing.T) {
 		t.Fatalf("read dist/index.html: %v", err)
 	}
 	html := string(data)
-	if !strings.Contains(html, "响应 无工具调用") {
+	if !strings.Contains(html, `data-i18n="logs.toolDiagnostics.noResponseTools"`) && !strings.Contains(html, `t('logs.toolDiagnostics.noResponseTools'`) {
 		t.Fatalf("tool diagnostics should explicitly show when request declared tools but response did not include tool calls")
 	}
 }
@@ -217,15 +221,15 @@ func TestLogRowsCanCopyDiagnosticSummary(t *testing.T) {
 	}
 	html := string(data)
 	checks := []string{
-		`<th>操作</th>`,
-		`<tr><td colspan="10" class="empty">加载中...</td></tr>`,
-		`<tr><td colspan="10" class="empty">暂无日志</td></tr>`,
+		`data-i18n="table.header.action"`,
+		`<tr><td colspan="10" class="empty" data-i18n="table.loading">加载中...</td></tr>`,
+		`<tr><td colspan="10" class="empty" data-i18n="table.empty.logs">暂无日志</td></tr>`,
 		`.logs-table .col-action { width: 86px; }`,
-		`tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无日志</td></tr>';`,
+		`tbody.innerHTML = '<tr><td colspan="10" class="empty">' + t('table.empty.logs') + '</td></tr>';`,
 		`data-action="copy-log-diagnostic"`,
 		"formatLogDiagnosticCopyText",
 		"currentLogRows = logs",
-		"await copyText('请求诊断'",
+		`t('action.copyDiagnostic')`,
 	}
 	for _, check := range checks {
 		if !strings.Contains(html, check) {
@@ -290,12 +294,13 @@ func TestMakefileReleaseCheckIncludesCoreGates(t *testing.T) {
 	}
 	makefile := string(data)
 	checks := []string{
-		"release-check: tool-check vuln-check",
+		"release-check: tool-check vuln-check i18n-check",
 		"govulncheck@v1.6.0",
 		"go test ./... -count=1",
 		"go test -race ./... -count=1",
 		"go vet ./...",
 		"node --check",
+		"node tests/i18n_runtime_test.js",
 		"git diff --check",
 		"GOOS=windows GOARCH=amd64 go build",
 		"RELEASE_CHECK_OK",
@@ -305,4 +310,157 @@ func TestMakefileReleaseCheckIncludesCoreGates(t *testing.T) {
 			t.Fatalf("release-check missing %q", check)
 		}
 	}
+}
+
+func TestI18nScriptsUseAdminStaticAssetPaths(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	for _, path := range []string{
+		"/admin/i18n/index.js",
+		"/admin/i18n/zh.js",
+		"/admin/i18n/en.js",
+	} {
+		if !strings.Contains(html, `src="`+path+`"`) {
+			t.Errorf("index.html should load i18n asset from %q", path)
+		}
+	}
+}
+
+func TestI18nMarkersDoNotOwnInteractiveChildren(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	unsafeLabel := regexp.MustCompile(`(?i)<label[^>]*\bdata-i18n\s*=`)
+	if match := unsafeLabel.FindString(html); match != "" {
+		t.Fatalf("data-i18n must be placed on a leaf text node, found unsafe label %q", match)
+	}
+
+	runtime, err := fs.ReadFile(MustSubFS(), "i18n/index.js")
+	if err != nil {
+		t.Fatalf("read dist/i18n/index.js: %v", err)
+	}
+	checks := []string{
+		"if (el.childElementCount > 0)",
+		"document.documentElement.lang =",
+	}
+	for _, check := range checks {
+		if !strings.Contains(string(runtime), check) {
+			t.Errorf("i18n runtime missing safety contract %q", check)
+		}
+	}
+}
+
+func TestI18nCatalogsCoverReferencesWithoutDuplicateKeys(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	references := collectI18nReferences(html)
+
+	zh := readI18nCatalog(t, "i18n/zh.js")
+	en := readI18nCatalog(t, "i18n/en.js")
+	for key := range references {
+		if _, ok := zh[key]; !ok {
+			t.Errorf("zh catalog missing referenced key %q", key)
+		}
+		if _, ok := en[key]; !ok {
+			t.Errorf("en catalog missing referenced key %q", key)
+		}
+	}
+	for key, zhValue := range zh {
+		enValue, ok := en[key]
+		if !ok {
+			t.Errorf("en catalog missing zh key %q", key)
+			continue
+		}
+		if got, want := placeholders(enValue), placeholders(zhValue); got != want {
+			t.Errorf("placeholder mismatch for %q: en=%q zh=%q", key, got, want)
+		}
+	}
+	for key := range en {
+		if _, ok := zh[key]; !ok {
+			t.Errorf("zh catalog missing en key %q", key)
+		}
+	}
+}
+
+func TestEnglishI18nCatalogContainsNoChineseCopy(t *testing.T) {
+	en := readI18nCatalog(t, "i18n/en.js")
+	han := regexp.MustCompile(`\p{Han}`)
+	for key, value := range en {
+		if key == "lang.toggle" {
+			continue
+		}
+		if han.MatchString(value) {
+			t.Errorf("English catalog key %q contains Chinese text %q", key, value)
+		}
+	}
+}
+
+func TestDynamicUserFacingTextUsesI18n(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	checks := []string{
+		`${t('action.copyDiagnostic')}</button>`,
+		`withButtonLoading('btnTestConnection', t('dynamic.testing')`,
+		`withButtonLoading('btnTestChat', t('dynamic.chatting')`,
+		`test.message || test.error || t('error.unknown')`,
+		`t('dynamic.metadataCapabilities', capabilities)`,
+	}
+	for _, check := range checks {
+		if !strings.Contains(html, check) {
+			t.Errorf("dynamic i18n flow missing %q", check)
+		}
+	}
+}
+
+func collectI18nReferences(html string) map[string]struct{} {
+	references := map[string]struct{}{}
+	attributePattern := regexp.MustCompile(`data-i18n(?:-[a-z-]+)?=["']([^"']+)["']`)
+	for _, match := range attributePattern.FindAllStringSubmatch(html, -1) {
+		references[match[1]] = struct{}{}
+	}
+	callPattern := regexp.MustCompile(`\bt\(\s*["']([^"']+)["']`)
+	for _, match := range callPattern.FindAllStringSubmatch(html, -1) {
+		references[match[1]] = struct{}{}
+	}
+	return references
+}
+
+func readI18nCatalog(t *testing.T, path string) map[string]string {
+	t.Helper()
+	data, err := fs.ReadFile(MustSubFS(), path)
+	if err != nil {
+		t.Fatalf("read dist/%s: %v", path, err)
+	}
+	entryPattern := regexp.MustCompile(`(?m)^\s*'([^']+)'\s*:\s*'((?:\\.|[^'])*)',?\s*$`)
+	catalog := map[string]string{}
+	for _, match := range entryPattern.FindAllStringSubmatch(string(data), -1) {
+		key := match[1]
+		if _, exists := catalog[key]; exists {
+			t.Errorf("%s contains duplicate key %q", path, key)
+			continue
+		}
+		catalog[key] = match[2]
+	}
+	if len(catalog) == 0 {
+		t.Fatalf("dist/%s contains no i18n entries", path)
+	}
+	return catalog
+}
+
+func placeholders(value string) string {
+	pattern := regexp.MustCompile(`\{[0-9]+\}`)
+	matches := pattern.FindAllString(value, -1)
+	sort.Strings(matches)
+	return strings.Join(matches, ",")
 }

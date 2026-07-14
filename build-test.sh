@@ -137,6 +137,7 @@ smoke_test() {
         assert_status "401" "admin html without login" "${BASE_URL}/admin"
         assert_status "303" "admin login" -c "${cookie_jar}" --data-urlencode "token=${token}" "${BASE_URL}/admin/login"
         assert_status "200" "admin html with login cookie" -b "${cookie_jar}" "${BASE_URL}/admin"
+        assert_status "200" "admin i18n runtime with login cookie" -b "${cookie_jar}" "${BASE_URL}/admin/i18n/index.js"
         assert_status "401" "admin api without token" "${BASE_URL}/admin/api/config"
         assert_status "200" "admin api with token" -H "Authorization: Bearer ${token}" "${BASE_URL}/admin/api/config"
         assert_status "200" "admin api with login cookie" -b "${cookie_jar}" "${BASE_URL}/admin/api/config"
@@ -145,6 +146,7 @@ smoke_test() {
         rm -f "${cookie_jar}"
     else
         assert_status "200" "admin html" "${BASE_URL}/admin"
+        assert_status "200" "admin i18n runtime" "${BASE_URL}/admin/i18n/index.js"
         assert_status "200" "admin api without token" "${BASE_URL}/admin/api/config"
     fi
 

@@ -9,6 +9,7 @@
 | 层级 | 入口 | 目的 | 是否访问真实上游 |
 | --- | --- | --- | --- |
 | 单元/集成测试 | `go test ./...` | 验证路由、转换、错误分类、API 行为 | 否 |
+| Web 国际化运行时测试 | `make i18n-check` | 验证词典加载、插值、DOM 安全和语言属性 | 否 |
 | Race 核心测试 | `go test -race ./cmd/server ./internal/proxy ./internal/provider ./internal/config` | 验证核心包并发安全 | 否 |
 | 本地流式冒烟 | `tests/streaming_test.sh`、`tests/streaming_ollama_test.sh` | 验证本地代理流式协议、工具分片、Ollama 兼容流 | 否，脚本启动本地 mock 上游 |
 | 真实上游大请求诊断 | `tests/useai_large_request_diagnostic.sh`、`tests/large_request_matrix_diagnostic.sh` | 验证真实 provider 在 VS/Copilot 风格大上下文工具请求下的行为 | 是 |
@@ -103,7 +104,31 @@ TOOL_CALL_RELEASE_CHECK_OK
 
 维护规则：能稳定复现工具调用核心缺陷的测试必须保存在仓库，并以 `TestToolProtocolContract` 或对应低层正式测试进入本脚本；禁止只写 `/tmp` 测试或 overlay，验证后再删除。
 
-### 2.4 `useai_large_request_diagnostic.sh`
+### 2.4 `i18n_runtime_test.js`
+
+用途：
+
+- 直接执行正式 `web/dist/i18n/*.js`，不复制运行时实现。
+- 验证中文、英文查找和占位符插值。
+- 验证 `placeholder`、`aria-label`、`alt`、`title` 属性翻译。
+- 验证带子元素的节点不会被 `textContent` 清空。
+- 验证 `html lang` 与当前语言一致。
+
+运行：
+
+```bash
+make i18n-check
+```
+
+成功标志：
+
+```text
+I18N_RUNTIME_TEST_OK
+```
+
+该测试不访问网络，也不引入前端测试框架；修改 i18n 运行时、词典或页面翻译标记后必须执行。
+
+### 2.5 `useai_large_request_diagnostic.sh`
 
 用途：
 
@@ -199,7 +224,7 @@ tests/useai_large_request_diagnostic.sh
 - `stream_state=upstream_connected`：已连上上游但未向 VS 写出首个 chunk；优先查上游首 token 或 new-api 渠道排队。
 - `stream_state=downstream_started`：已经向 VS 写出过 chunk；后续失败不能安全自动重试。
 
-### 2.5 `large_request_matrix_diagnostic.sh`
+### 2.6 `large_request_matrix_diagnostic.sh`
 
 用途：
 
