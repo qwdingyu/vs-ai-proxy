@@ -17,13 +17,15 @@ PLATFORMS=(
   "windows/amd64"
 )
 
-declare -A ALIASES=(
-  ["darwin/amd64"]="macos-x64"
-  ["darwin/arm64"]="macos-arm64"
-  ["linux/amd64"]="linux-x64"
-  ["linux/arm64"]="linux-arm64"
-  ["windows/amd64"]="windows-x64"
-)
+platform_alias() {
+  case "$1" in
+    darwin/amd64) printf '%s' "macos-x64" ;;
+    darwin/arm64) printf '%s' "macos-arm64" ;;
+    linux/amd64) printf '%s' "linux-x64" ;;
+    linux/arm64) printf '%s' "linux-arm64" ;;
+    windows/amd64) printf '%s' "windows-x64" ;;
+  esac
+}
 
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
@@ -36,7 +38,7 @@ for plat in "${PLATFORMS[@]}"; do
   if [ "$GOOS" = "windows" ]; then
     EXT=".exe"
   fi
-  ALIAS="${ALIASES[$plat]}"
+  ALIAS="$(platform_alias "$plat")"
   NAME="${APP_NAME}-v${VERSION_TAG}-${ALIAS}${EXT}"
   echo "  → $GOOS/$GOARCH ..."
   GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags="$LDFLAGS" -o "$OUTPUT_DIR/$NAME" "$MAIN_PATH"
@@ -47,7 +49,7 @@ ls -lh "$OUTPUT_DIR"
 echo "🔎 校验构建版本..."
 HOST_GOOS="$(go env GOOS)"
 HOST_GOARCH="$(go env GOARCH)"
-HOST_ALIAS="${ALIASES["$HOST_GOOS/$HOST_GOARCH"]:-}"
+HOST_ALIAS="$(platform_alias "$HOST_GOOS/$HOST_GOARCH")"
 if [ -n "$HOST_ALIAS" ]; then
   HOST_EXT=""
   if [ "$HOST_GOOS" = "windows" ]; then
@@ -77,7 +79,7 @@ for plat in "${PLATFORMS[@]}"; do
   if [ "$GOOS" = "windows" ]; then
     EXT=".exe"
   fi
-  ALIAS="${ALIASES[$plat]}"
+  ALIAS="$(platform_alias "$plat")"
   BIN="${APP_NAME}-v${VERSION_TAG}-${ALIAS}${EXT}"
   STAGE="$TMPDIR/$ALIAS"
   mkdir -p "$STAGE"
@@ -95,5 +97,16 @@ for plat in "${PLATFORMS[@]}"; do
   rm -f "$OUTPUT_DIR/$BIN"
 done
 rm -rf "$TMPDIR"
+
+echo "🔐 生成 SHA256 校验清单..."
+(
+  cd "$OUTPUT_DIR"
+  archives=( *.tar.gz *.zip )
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${archives[@]}" > checksums.txt
+  else
+    shasum -a 256 "${archives[@]}" > checksums.txt
+  fi
+)
 echo "✅ 发布包已生成: $OUTPUT_DIR/"
 ls -lh "$OUTPUT_DIR"

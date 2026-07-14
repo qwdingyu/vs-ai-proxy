@@ -159,6 +159,13 @@ type providerHTTPError struct {
 	Message    string
 }
 
+const (
+	maxProviderResponseBodyBytes      int64 = 64 << 20
+	maxProviderErrorResponseBodyBytes int64 = 1 << 20
+)
+
+var errProviderResponseBodyTooLarge = errors.New("上游响应体超过大小限制")
+
 func (e *providerHTTPError) Error() string {
 	if e == nil {
 		return ""
@@ -335,9 +342,9 @@ func (p *OpenAIProvider) doChatRaw(ctx context.Context, body []byte) ([]byte, er
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readProviderResponseBody(resp)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+		return nil, fmt.Errorf("读取响应失败（HTTP %d）: %w", resp.StatusCode, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -534,7 +541,7 @@ func (p *OpenAIProvider) doChatStream(ctx context.Context, body []byte) (io.Read
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(resp.Body)
+		respBody, readErr := readProviderResponseBody(resp)
 		resp.Body.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("API 错误 %d，且读取错误响应失败: %w", resp.StatusCode, readErr)
@@ -573,9 +580,9 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readProviderResponseBody(resp)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取模型列表响应失败（HTTP %d）: %w", resp.StatusCode, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -880,9 +887,9 @@ func (p *OllamaProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readProviderResponseBody(resp)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+		return nil, fmt.Errorf("读取响应失败（HTTP %d）: %w", resp.StatusCode, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -1028,9 +1035,9 @@ func (p *OllamaProvider) ListModels(ctx context.Context) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readProviderResponseBody(resp)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取模型列表响应失败（HTTP %d）: %w", resp.StatusCode, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -1053,6 +1060,24 @@ func (p *OllamaProvider) ListModels(ctx context.Context) ([]string, error) {
 		}
 	}
 	return models, nil
+}
+
+func readProviderResponseBody(resp *http.Response) ([]byte, error) {
+	if resp.StatusCode != http.StatusOK {
+		return io.ReadAll(io.LimitReader(resp.Body, maxProviderErrorResponseBodyBytes))
+	}
+	return readBoundedBody(resp.Body, maxProviderResponseBodyBytes)
+}
+
+func readBoundedBody(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("%w: 最大允许 %d 字节", errProviderResponseBodyTooLarge, limit)
+	}
+	return body, nil
 }
 
 // SSEEvent SSE 事件

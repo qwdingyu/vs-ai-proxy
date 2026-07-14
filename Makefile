@@ -37,7 +37,7 @@ PLATFORM_ALIAS := \
 	windows/amd64:windows-x64
 
 # ─── 默认目标 ──────────────────────────────────────────
-.PHONY: all build build-all install release release-notes tool-check release-check windows-res ensure-windows-res clean
+.PHONY: all build build-all install release release-notes tool-check vuln-check release-check windows-res ensure-windows-res clean
 
 all: build
 
@@ -105,10 +105,14 @@ release-notes:
 tool-check:
 	@bash tests/tool_call_release_check.sh
 
+# ─── 安全门禁 ───────────────────────────────────────────
+vuln-check:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
 # ─── 发布前完整核查 ────────────────────────────────────
-release-check: tool-check
+release-check: tool-check vuln-check
 	go test ./... -count=1
-	go test -race ./cmd/server ./internal/proxy ./internal/provider ./internal/config ./internal/update ./internal/store ./internal/api ./internal/requestmeta ./web -count=1
+	go test -race ./... -count=1
 	go vet ./...
 	@tmp_js=$$(mktemp /tmp/vs-ai-proxy-script.XXXXXX.js); \
 		sed -n '/<script>/,/<\/script>/p' web/dist/index.html | sed '1d;$$d' > "$$tmp_js"; \

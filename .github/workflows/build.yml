@@ -26,7 +26,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: 发布前完整核查
+      - name: 发布前完整核查（漏洞、全包 race）
         run: make release-check
 
       - name: 编译（当前平台）
@@ -85,6 +85,9 @@ jobs:
 
       - name: 跨平台编译 + 打包
         run: make release
+
+      - name: 校验 Release SHA256 清单
+        run: cd dist && sha256sum --check checksums.txt
 
       - name: 生成 Release 说明
         run: .bin/release-notes.sh "${GITHUB_REF_NAME}" > release-notes.md

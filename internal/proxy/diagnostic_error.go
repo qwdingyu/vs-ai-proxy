@@ -372,7 +372,7 @@ type logDiagnosticSummary struct {
 	Summary string
 }
 
-func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requestBytes int64, upstreamBytes int64, networkPeer string, streamState string) logDiagnosticSummary {
+func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requestBytes int64, upstreamBytes int64, networkPeer string, streamState string, requestTools string, responseTools string) logDiagnosticSummary {
 	code = strings.TrimSpace(code)
 	if code == "" && statusCode < http.StatusBadRequest {
 		return logDiagnosticSummary{}
@@ -391,28 +391,53 @@ func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requ
 		}
 		return logDiagnosticSummary{Action: action, Summary: summary}
 	}
+	withToolInterruption := func(diag logDiagnosticSummary) logDiagnosticSummary {
+		// 这里补充的是排障解释，不改变客户端断开或超时的原始错误分类。
+		if !toolInterruptionLikely(code, requestTools, responseTools) {
+			return diag
+		}
+		interruptionState := "499/context canceled"
+		if code == "timeout" {
+			interruptionState = "代理/上游超时预算"
+		}
+		note := fmt.Sprintf(
+			"本次请求声明了工具但响应未完整返回工具调用；结合 %s，优先判断为模型/渠道响应过慢或客户端提前断开，而不是工具未注册。",
+			interruptionState,
+		)
+		if diag.Action != "" {
+			diag.Action += " " + note
+		} else {
+			diag.Action = note
+		}
+		if diag.Summary != "" {
+			diag.Summary += "；" + note
+		} else {
+			diag.Summary = note
+		}
+		return diag
+	}
 	switch code {
 	case "client_deadline_reached":
 		diag := withPressure("查上游首 token、new-api/sub2api 单渠道超时和轮换；必要时减少上下文。", compactDiagnosticSummary("VS/Copilot 接近等待上限后取消", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
-		return logDiagnosticSummary{
+		return withToolInterruption(logDiagnosticSummary{
 			Reason:  "客户端等待上限",
 			Action:  diag.Action,
 			Summary: diag.Summary,
-		}
+		})
 	case "client_gone":
 		diag := withPressure("若耗时很短，多为用户取消/窗口关闭；若接近 100 秒，按客户端等待上限排查。", compactDiagnosticSummary("客户端在响应完成前断开", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
-		return logDiagnosticSummary{
+		return withToolInterruption(logDiagnosticSummary{
 			Reason:  "客户端主动断开",
 			Action:  diag.Action,
 			Summary: diag.Summary,
-		}
+		})
 	case "timeout":
 		diag := withPressure("检查模型 timeout_seconds、上游首 token 延迟和网关单渠道超时。", compactDiagnosticSummary("请求超过有效超时预算", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
-		return logDiagnosticSummary{
+		return withToolInterruption(logDiagnosticSummary{
 			Reason:  "代理/上游超时",
 			Action:  diag.Action,
 			Summary: diag.Summary,
-		}
+		})
 	case "upstream_payload_too_large":
 		diag := withPressure("减少历史上下文/文件内容，或切到支持更大上下文和工具声明的 provider/channel。", compactDiagnosticSummary("上游返回 413 或等价大请求错误", elapsedMs, requestSize, upstreamSize, networkPeer, streamState))
 		return logDiagnosticSummary{
@@ -490,6 +515,26 @@ func sessionPressureDiagnosticNote(requestBytes, upstreamBytes int64) string {
 		return fmt.Sprintf("本次请求体/上游体约 %s，属于超大上下文；如果新建 session 后恢复，优先怀疑旧 session 历史膨胀、文件堆积或状态污染。", humanBytes(pressureBytes))
 	}
 	return fmt.Sprintf("本次请求体/上游体约 %s，属于大上下文；如果新建 session 后恢复，优先怀疑旧 session 历史膨胀、文件堆积或状态污染。", humanBytes(pressureBytes))
+}
+
+func toolInterruptionLikely(code string, requestTools string, responseTools string) bool {
+	// 只在“客户端断开/等待上限/超时 + 请求声明了工具 + 响应没有工具”时提示工具调用中断。
+	// 这避免把普通上游 4xx/5xx 误判成 create_file 未注册，也避免在已经返回 response_tools
+	// 的成功工具调用上重复追加干扰性说明。
+	code = strings.TrimSpace(code)
+	if code != "client_gone" && code != "client_deadline_reached" && code != "timeout" {
+		return false
+	}
+	if strings.TrimSpace(responseTools) != "" {
+		return false
+	}
+	lower := strings.ToLower(requestTools)
+	for _, name := range []string{"create_file", "apply_patch", "edit_file", "get_file", "grep_search", "code_search", "run_command_in_terminal", "powershell", "git"} {
+		if strings.Contains(lower, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func compactDiagnosticSummary(prefix string, elapsedMs float64, requestSize string, upstreamSize string, networkPeer string, streamState string) string {

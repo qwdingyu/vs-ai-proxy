@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -35,7 +36,7 @@ func TestOpenAIStreamBodyToChatResponseAggregatesSSE(t *testing.T) {
 		``,
 	}, "\n"))
 
-	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5")
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
 	if err != nil {
 		t.Fatalf("openAIStreamBodyToChatResponse returned error: %v", err)
 	}
@@ -57,6 +58,78 @@ func TestOpenAIStreamBodyToChatResponseAggregatesSSE(t *testing.T) {
 	}
 }
 
+func TestOpenAIStreamBodyToChatResponseDoesNotTreatJSONContentAsSSE(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"literal data: text"},"finish_reason":"stop"}]}`)
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
+	if err == nil || converted != nil {
+		t.Fatalf("plain JSON containing data: must not be converted: converted=%s err=%v", string(converted), err)
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseAcceptsLeadingWhitespaceSSE(t *testing.T) {
+	body := []byte("\n\t data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n")
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
+	if err != nil {
+		t.Fatalf("openAIStreamBodyToChatResponse returned error: %v", err)
+	}
+	if !strings.Contains(string(converted), `"content":"ok"`) {
+		t.Fatalf("converted response = %s, want content ok", string(converted))
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseAcceptsStandardSSEMetadataPreamble(t *testing.T) {
+	body := []byte(strings.Join([]string{
+		``,
+		`: upstream keepalive`,
+		`event: completion.chunk`,
+		`id: chunk-1`,
+		`retry: 1000`,
+		`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
+	if err != nil {
+		t.Fatalf("openAIStreamBodyToChatResponse returned error: %v", err)
+	}
+	if !strings.Contains(string(converted), `"content":"ok"`) {
+		t.Fatalf("converted response = %s, want content ok", string(converted))
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseAcceptsDataLineLargerThanDetectorBuffer(t *testing.T) {
+	content := strings.Repeat("x", 70*1024)
+	body := []byte(`data: {"choices":[{"delta":{"content":"` + content + `"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n")
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
+	if err != nil {
+		t.Fatalf("large SSE data line must be detected and aggregated: %v", err)
+	}
+	var parsed provider.ChatResponse
+	if err := json.Unmarshal(converted, &parsed); err != nil {
+		t.Fatalf("unmarshal converted response: %v", err)
+	}
+	if got := parsed.Choices[0].Message.Content; got != content {
+		t.Fatalf("content length = %d, want %d", len(got), len(content))
+	}
+}
+
+func TestLooksLikeSSEBodyRejectsOrdinaryBodiesWithSSELikeText(t *testing.T) {
+	for _, body := range []string{
+		`{"message":"data: embedded text"}`,
+		"plain text\ndata: embedded later",
+		"id: this is ordinary metadata",
+		"event: audit\nordinary text",
+	} {
+		if looksLikeSSEBody([]byte(body)) {
+			t.Fatalf("looksLikeSSEBody(%q) = true, want false", body)
+		}
+	}
+}
+
 func TestOpenAIStreamBodyToChatResponseConvertsEmptyChoiceSSE(t *testing.T) {
 	body := []byte(strings.Join([]string{
 		`data: {"id":"","object":"chat.completion.chunk","model":"gpt-5.5","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":0,"total_tokens":12}}`,
@@ -64,7 +137,7 @@ func TestOpenAIStreamBodyToChatResponseConvertsEmptyChoiceSSE(t *testing.T) {
 		``,
 	}, "\n"))
 
-	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5")
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
 	if err != nil {
 		t.Fatalf("openAIStreamBodyToChatResponse returned error: %v", err)
 	}
@@ -85,6 +158,164 @@ func TestOpenAIStreamBodyToChatResponseConvertsEmptyChoiceSSE(t *testing.T) {
 	}
 	if len(parsed.Choices) != 1 || parsed.Choices[0].Message.Role != "assistant" || parsed.Choices[0].FinishReason != "stop" {
 		t.Fatalf("converted response = %s", string(converted))
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponsePreservesToolCalls(t *testing.T) {
+	body := []byte(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"docs/a.md\",\"content\":\"ok\"}"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", map[string]struct{}{"create_file": {}})
+	if err != nil {
+		t.Fatalf("openAIStreamBodyToChatResponse returned error: %v", err)
+	}
+	var parsed provider.ChatResponse
+	if err := json.Unmarshal(converted, &parsed); err != nil {
+		t.Fatalf("unmarshal converted response: %v; body=%s", err, string(converted))
+	}
+	if len(parsed.Choices) != 1 || parsed.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("converted response missing tool_calls finish: %s", string(converted))
+	}
+	calls := parsed.Choices[0].Message.ToolCalls
+	if len(calls) != 1 {
+		t.Fatalf("tool_calls len = %d, want 1; body=%s", len(calls), string(converted))
+	}
+	call := calls[0]
+	if call.ID != "call_create" || call.Function.Name != "create_file" || call.Function.Arguments != `{"path":"docs/a.md","content":"ok"}` {
+		t.Fatalf("tool call = %#v, converted=%s", call, string(converted))
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponsePreservesExplicitNonToolFinishReason(t *testing.T) {
+	for _, finishReason := range []string{"length", "content_filter", "stop"} {
+		t.Run(finishReason, func(t *testing.T) {
+			body := []byte(strings.Join([]string{
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+				`data: {"choices":[{"delta":{},"finish_reason":"` + finishReason + `"}]}`,
+				`data: [DONE]`,
+				``,
+			}, "\n"))
+
+			converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", map[string]struct{}{"create_file": {}})
+			if err != nil {
+				t.Fatalf("openAIStreamBodyToChatResponse returned error: %v", err)
+			}
+			var parsed provider.ChatResponse
+			if err := json.Unmarshal(converted, &parsed); err != nil {
+				t.Fatalf("unmarshal converted response: %v; body=%s", err, string(converted))
+			}
+			if got := parsed.Choices[0].FinishReason; got != finishReason {
+				t.Fatalf("finish_reason = %q, want %q; body=%s", got, finishReason, string(converted))
+			}
+		})
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseRejectsMalformedSSEPayload(t *testing.T) {
+	body := []byte("event: completion.chunk\nid: broken\ndata: {not-json}\n\ndata: [DONE]\n")
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
+	if err == nil || converted != nil {
+		t.Fatalf("malformed SSE must fail aggregation: converted=%s err=%v", string(converted), err)
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseRejectsSSEErrorEvent(t *testing.T) {
+	body := []byte("data: {\"error\":{\"message\":\"upstream unavailable\",\"type\":\"server_error\"}}\n\ndata: [DONE]\n")
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
+	if err == nil || converted != nil {
+		t.Fatalf("SSE error event must fail aggregation: converted=%s err=%v", string(converted), err)
+	}
+	if !strings.Contains(err.Error(), "upstream unavailable") {
+		t.Fatalf("error = %v, want upstream message", err)
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseAcceptsEmptyDataHeartbeat(t *testing.T) {
+	body := []byte(strings.Join([]string{
+		`data:`,
+		``,
+		`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", nil)
+	if err != nil {
+		t.Fatalf("empty data heartbeat must be ignored: %v", err)
+	}
+	if !strings.Contains(string(converted), `"content":"ok"`) {
+		t.Fatalf("converted response = %s, want content ok", string(converted))
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseRejectsUnterminatedToolCall(t *testing.T) {
+	body := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`)
+
+	converted, err := openAIStreamBodyToChatResponse(
+		body,
+		"gpt-5.5",
+		map[string]struct{}{"create_file": {}},
+	)
+	if err == nil || converted != nil {
+		t.Fatalf("unterminated tool stream must fail: converted=%s err=%v", string(converted), err)
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseRejectsIncompleteExplicitToolCall(t *testing.T) {
+	body := []byte(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+
+	converted, err := openAIStreamBodyToChatResponse(body, "gpt-5.5", map[string]struct{}{"create_file": {}})
+	if err == nil || converted != nil {
+		t.Fatalf("explicitly finished incomplete tool call must fail: converted=%s err=%v", string(converted), err)
+	}
+}
+
+func TestAggregateOpenAIStreamReaderRejectsOversizedStream(t *testing.T) {
+	stream := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"first"},"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}, "\n"))
+
+	_, err := aggregateOpenAIStreamReaderWithLimit(stream, "gpt-5.5", nil, 64)
+	if !errors.Is(err, errOpenAIStreamTooLarge) {
+		t.Fatalf("aggregate error = %v, want stream-too-large", err)
+	}
+}
+
+func TestOpenAIStreamBodyToChatResponseInfersCompleteToolCallAtDone(t *testing.T) {
+	body := []byte(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":null}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+
+	converted, err := openAIStreamBodyToChatResponse(
+		body,
+		"gpt-5.5",
+		map[string]struct{}{"create_file": {}},
+	)
+	if err != nil {
+		t.Fatalf("complete tool call followed by DONE must be inferred: %v", err)
+	}
+	var parsed provider.ChatResponse
+	if err := json.Unmarshal(converted, &parsed); err != nil {
+		t.Fatalf("unmarshal converted response: %v", err)
+	}
+	if got := parsed.Choices[0].FinishReason; got != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls", got)
 	}
 }
 

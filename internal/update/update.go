@@ -106,7 +106,7 @@ func Check(ctx context.Context, opts Options) (CheckResult, error) {
 
 	latest := normalizeVersion(release.TagName)
 	asset, checksum := selectAssets(release.Assets, opts.GOOS, opts.GOARCH, latest)
-	if compareVersions(latest, current) > 0 && asset.Name == "" {
+	if compareVersions(latest, current) > 0 && (asset.Name == "" || checksum.Name == "") {
 		for attempt := 0; attempt < releaseAssetRetries; attempt++ {
 			if err := sleepContext(ctx, releaseAssetWait); err != nil {
 				break
@@ -117,7 +117,7 @@ func Check(ctx context.Context, opts Options) (CheckResult, error) {
 			}
 			release = retryRelease
 			asset, checksum = selectAssets(release.Assets, opts.GOOS, opts.GOARCH, latest)
-			if asset.Name != "" {
+			if asset.Name != "" && checksum.Name != "" {
 				break
 			}
 		}
@@ -196,6 +196,9 @@ func Download(ctx context.Context, opts Options) (DownloadResult, error) {
 	if !check.UpdateAvailable {
 		return DownloadResult{CheckResult: check}, nil
 	}
+	if check.ChecksumURL == "" {
+		return DownloadResult{}, errors.New("发布缺少 checksums.txt，拒绝下载未校验的更新包")
+	}
 
 	if err := os.MkdirAll(opts.TargetDir, 0o755); err != nil {
 		return DownloadResult{}, fmt.Errorf("创建更新目录失败: %w", err)
@@ -205,10 +208,8 @@ func Download(ctx context.Context, opts Options) (DownloadResult, error) {
 	if err != nil {
 		return DownloadResult{}, err
 	}
-	if check.ChecksumURL != "" {
-		if err := verifyChecksum(ctx, opts.HTTPClient, check.ChecksumURL, check.AssetName, sha); err != nil {
-			return DownloadResult{}, err
-		}
+	if err := verifyChecksum(ctx, opts.HTTPClient, check.ChecksumURL, check.AssetName, sha); err != nil {
+		return DownloadResult{}, err
 	}
 
 	binaryPath := filepath.Join(opts.TargetDir, binaryName(opts.GOOS))

@@ -478,6 +478,9 @@ func loadEnvFile(path string) error {
 		value := strings.TrimSpace(line[eq+1:])
 		value = strings.Trim(value, `"'`)
 		if key != "" {
+			if _, exists := os.LookupEnv(key); exists {
+				continue
+			}
 			if err := os.Setenv(key, value); err != nil {
 				return fmt.Errorf("设置环境变量 %s 失败: %w", key, err)
 			}
@@ -543,7 +546,7 @@ func listenWithStartupPortRecovery(addr string, logger *log.Logger) (net.Listene
 		return nil, err
 	}
 	if len(pids) == 0 {
-		logger.Warn("端口 %d 监听失败，但未发现可清理的监听进程；可能是 Windows 端口保留/权限策略: %v", port, err)
+		logger.Warn("端口 %d 监听失败，但未发现可清理的监听进程；可能是系统端口保留/权限策略: %v", port, err)
 		return nil, err
 	}
 
@@ -555,7 +558,7 @@ func listenWithStartupPortRecovery(addr string, logger *log.Logger) (net.Listene
 			continue
 		}
 		if !isSafeProxyProcessName(name) {
-			logger.Warn("端口 %d 被 PID %d (%s) 占用，但不是 vs-ai-proxy/server，跳过清理以避免误杀；请手动确认占用进程", port, pid, displayProcessName(name))
+			logger.Warn("端口 %d 被 PID %d (%s) 占用，但不是 vs-ai-proxy，跳过清理以避免误杀；请手动确认占用进程", port, pid, displayProcessName(name))
 			continue
 		}
 		if killErr := killProcess(pid); killErr != nil {
@@ -658,7 +661,7 @@ func isSafeProxyProcessName(name string) bool {
 		return false
 	}
 	name = strings.TrimSuffix(name, ".exe")
-	return name == "vs-ai-proxy" || name == "server"
+	return name == "vs-ai-proxy"
 }
 
 func displayProcessName(name string) string {

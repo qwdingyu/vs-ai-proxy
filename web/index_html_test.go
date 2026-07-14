@@ -290,9 +290,10 @@ func TestMakefileReleaseCheckIncludesCoreGates(t *testing.T) {
 	}
 	makefile := string(data)
 	checks := []string{
-		"release-check: tool-check",
+		"release-check: tool-check vuln-check",
+		"govulncheck@v1.6.0",
 		"go test ./... -count=1",
-		"go test -race ./cmd/server ./internal/proxy ./internal/provider",
+		"go test -race ./... -count=1",
 		"go vet ./...",
 		"node --check",
 		"git diff --check",

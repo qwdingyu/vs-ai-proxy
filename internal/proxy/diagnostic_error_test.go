@@ -332,7 +332,7 @@ func TestSummarizeLogDiagnosticGivesOperatorReadyReasonAndAction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
-			diag := summarizeLogDiagnostic(tt.code, tt.statusCode, tt.elapsedMs, tt.bytes, tt.upstream, tt.peer, tt.stream)
+			diag := summarizeLogDiagnostic(tt.code, tt.statusCode, tt.elapsedMs, tt.bytes, tt.upstream, tt.peer, tt.stream, "", "")
 			if diag.Reason != tt.wantReason {
 				t.Fatalf("reason = %q, want %q", diag.Reason, tt.wantReason)
 			}
@@ -347,7 +347,7 @@ func TestSummarizeLogDiagnosticGivesOperatorReadyReasonAndAction(t *testing.T) {
 }
 
 func TestSummarizeLogDiagnosticLeavesSuccessfulRequestsEmpty(t *testing.T) {
-	diag := summarizeLogDiagnostic("", 200, 12, 512, 128, "", "")
+	diag := summarizeLogDiagnostic("", 200, 12, 512, 128, "", "", "", "")
 	if diag.Reason != "" || diag.Action != "" || diag.Summary != "" {
 		t.Fatalf("success diagnostic = %#v, want empty", diag)
 	}
@@ -368,10 +368,56 @@ func TestSessionPressureDiagnosticNoteClassifiesLargeContexts(t *testing.T) {
 func TestSummarizeLogDiagnosticDoesNotAttachContextPressureToUnrelatedErrors(t *testing.T) {
 	for _, code := range []string{"upstream_auth_error", "upstream_request_error", "upstream_rate_limit"} {
 		t.Run(code, func(t *testing.T) {
-			diag := summarizeLogDiagnostic(code, 502, 1200, 2*1024*1024, 2*1024*1024, "", "")
+			diag := summarizeLogDiagnostic(code, 502, 1200, 2*1024*1024, 2*1024*1024, "", "", "", "")
 			if strings.Contains(diag.Action, "旧 session") || strings.Contains(diag.Summary, "大上下文") {
 				t.Fatalf("%s should not include context pressure hint: %#v", code, diag)
 			}
 		})
+	}
+}
+
+func TestSummarizeLogDiagnosticExplainsInterruptedToolCalls(t *testing.T) {
+	diag := summarizeLogDiagnostic(
+		"client_gone",
+		499,
+		52_649,
+		790*1024,
+		824*1024,
+		"",
+		"downstream_started",
+		"declared: adapt_plan,create_file,get_file",
+		"",
+	)
+
+	for _, want := range []string{"声明了工具", "响应未完整返回工具调用", "不是工具未注册"} {
+		if !strings.Contains(diag.Action, want) || !strings.Contains(diag.Summary, want) {
+			t.Fatalf("diagnostic = %#v, want contains %q", diag, want)
+		}
+	}
+}
+
+func TestSummarizeLogDiagnosticExplainsInterruptedToolCallsOnTimeout(t *testing.T) {
+	diag := summarizeLogDiagnostic(
+		"timeout",
+		http.StatusBadGateway,
+		89_000,
+		790*1024,
+		824*1024,
+		"",
+		"upstream_connected",
+		"declared: create_file,get_file",
+		"",
+	)
+
+	for _, want := range []string{"声明了工具", "响应未完整返回工具调用", "不是工具未注册"} {
+		if !strings.Contains(diag.Action, want) || !strings.Contains(diag.Summary, want) {
+			t.Fatalf("timeout diagnostic = %#v, want contains %q", diag, want)
+		}
+	}
+	if strings.Contains(diag.Action, "499/context canceled") || strings.Contains(diag.Summary, "499/context canceled") {
+		t.Fatalf("timeout diagnostic must not claim a 499 cancellation: %#v", diag)
+	}
+	if !strings.Contains(diag.Action, "超时预算") || !strings.Contains(diag.Summary, "超时预算") {
+		t.Fatalf("timeout diagnostic must describe the timeout state: %#v", diag)
 	}
 }

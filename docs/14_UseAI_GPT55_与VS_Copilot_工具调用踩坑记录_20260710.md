@@ -654,7 +654,7 @@ git diff --check
 
 ### 当前推荐版本
 
-Windows + Visual Studio Copilot 用户当前建议升级到 `v0.2.28` 或更新版本。
+Windows + Visual Studio Copilot 用户当前建议升级到 GitHub Releases 中的最新版本；不要继续停留在早期工具调用兼容修复版本。
 
 不要再推荐 `v0.2.24` / `v0.2.25` 作为最终修复版本；这些版本是修复链路中的阶段性版本，不包含后续“多 choice 状态隔离”和“请求无声明工具时阻断所有工具调用”的最终边界收紧。
 

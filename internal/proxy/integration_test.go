@@ -494,6 +494,60 @@ func TestOpenAIChatConvertsNonStreamSSEBodyToJSON(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatRejectsRecognizedSSEWhenAggregationFails(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
+	prov.rawBody = []byte("event: completion.chunk\nid: broken\ndata: {not-json}\n\ndata: [DONE]\n")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("content type = %q, want application/json", got)
+	}
+	if got := rec.Header().Get("X-Proxy-Error-Code"); got != "proxy_parse_error" {
+		t.Fatalf("error code = %q, want proxy_parse_error; body=%s", got, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "data:") {
+		t.Fatalf("handler leaked raw SSE as JSON success: %s", rec.Body.String())
+	}
+}
+
+func TestOpenAIChatRejectsSSEErrorEvent(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
+	prov.rawBody = []byte("data: {\"error\":{\"message\":\"upstream unavailable\"}}\n\ndata: [DONE]\n")
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Error-Code"); got != "proxy_parse_error" {
+		t.Fatalf("error code = %q, want proxy_parse_error; body=%s", got, rec.Body.String())
+	}
+}
+
 func TestOpenAIChatRawPassesThroughUndeclaredToolCallsInStableMode(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
 	prov.rawBody = []byte(`{

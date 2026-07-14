@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -360,6 +362,43 @@ func TestOpenAIProviderChatReportsNonJSONBodyPreview(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "body_preview") || !strings.Contains(err.Error(), "downstream temporarily unavailable") {
 		t.Fatalf("error should include response preview, got: %v", err)
+	}
+}
+
+func TestReadBoundedBodyRejectsOversizedResponse(t *testing.T) {
+	body, err := readBoundedBody(strings.NewReader("12345"), 4)
+	if !errors.Is(err, errProviderResponseBodyTooLarge) {
+		t.Fatalf("readBoundedBody() error = %v, want response-too-large error", err)
+	}
+	if body != nil {
+		t.Fatalf("readBoundedBody() body = %q, want nil on overflow", body)
+	}
+}
+
+func TestReadBoundedBodyAllowsExactLimit(t *testing.T) {
+	body, err := readBoundedBody(strings.NewReader("1234"), 4)
+	if err != nil {
+		t.Fatalf("readBoundedBody() error = %v", err)
+	}
+	if got, want := string(body), "1234"; got != want {
+		t.Fatalf("readBoundedBody() = %q, want %q", got, want)
+	}
+}
+
+func TestReadProviderResponseBodyTruncatesOversizedHTTPErrorWithoutLosingStatus(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Body: io.NopCloser(strings.NewReader(
+			strings.Repeat("x", int(maxProviderErrorResponseBodyBytes)+1),
+		)),
+	}
+
+	body, err := readProviderResponseBody(resp)
+	if err != nil {
+		t.Fatalf("readProviderResponseBody() error = %v", err)
+	}
+	if got := int64(len(body)); got != maxProviderErrorResponseBodyBytes {
+		t.Fatalf("body length = %d, want truncated %d", got, maxProviderErrorResponseBodyBytes)
 	}
 }
 

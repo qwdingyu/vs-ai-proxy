@@ -52,6 +52,46 @@ func TestAuthMiddlewareRequiresBearerToken(t *testing.T) {
 	}
 }
 
+func TestChatHandlersRejectRequestBodiesOverSharedLimit(t *testing.T) {
+	server := &Server{}
+	tests := []struct {
+		name    string
+		path    string
+		handler http.HandlerFunc
+	}{
+		{name: "openai", path: "/v1/chat/completions", handler: server.handleChatCompletions},
+		{name: "ollama", path: "/api/chat", handler: server.handleOllamaChat},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader("{}"))
+			req.ContentLength = maxChatRequestBodyBytes + 1
+			rec := httptest.NewRecorder()
+
+			tt.handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want 413; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestReadRequestBodyRejectsUnknownLengthOverflow(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("12345"))
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+
+	body, ok := readRequestBody(rec, req, 4)
+	if ok || body != nil {
+		t.Fatalf("readRequestBody() = %q, %v; want rejected", body, ok)
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAuthMiddlewareAllowsOpenProxyWithoutKey(t *testing.T) {
 	server := &Server{}
 	handler := server.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +179,7 @@ func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
 }
 
 func TestConsoleDiagnosticSuffixIncludesContextPressure(t *testing.T) {
-	diag := summarizeLogDiagnostic("network_error", http.StatusBadGateway, 22_510, 634_054, 642_181, "104.21.57.81:443", "upstream_connecting")
+	diag := summarizeLogDiagnostic("network_error", http.StatusBadGateway, 22_510, 634_054, 642_181, "104.21.57.81:443", "upstream_connecting", "", "")
 	suffix := consoleDiagnosticSuffix(diag, "useai/step-router-v1 23s network_error", 634_054, 642_181)
 
 	for _, want := range []string{

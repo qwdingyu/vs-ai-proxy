@@ -27,6 +27,7 @@ import (
 const (
 	defaultModelTimeoutSeconds        = 180
 	clientDeadlineDiagnosticThreshold = 90_000
+	maxChatRequestBodyBytes           = 32 << 20
 )
 
 // Server 代理服务器
@@ -398,7 +399,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if logErrorCode == "" && ww.statusCode >= http.StatusBadRequest {
 			logErrorCode = fallbackLogErrorCode(ww.statusCode)
 		}
-		diagSummary := summarizeLogDiagnostic(logErrorCode, ww.statusCode, elapsed, r.ContentLength, ww.upstreamBytes, networkPeer, streamState)
+		diagSummary := summarizeLogDiagnostic(logErrorCode, ww.statusCode, elapsed, r.ContentLength, ww.upstreamBytes, networkPeer, streamState, requestTools, responseTools)
 
 		s.store.AddLog(store.RequestLog{
 			RequestID:                requestID,
@@ -729,12 +730,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "读取请求体失败", http.StatusBadRequest)
+	defer r.Body.Close()
+	body, ok := readChatRequestBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	var req provider.ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -868,8 +868,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				cancel()
 				// Visual Studio Copilot 适配：
 				// 部分 OpenAI-compatible 上游即使 stream=false 也会返回 SSE data: chunk。
-				// 非流式下游期望 JSON，直接透传会导致解析失败，因此先尽力聚合为标准 chat.completion。
-				if converted, convErr := openAIStreamBodyToChatResponse(body, req.Model); convErr == nil {
+				// 非流式下游期望 JSON；一旦确认是 SSE，聚合失败必须作为候选失败处理，
+				// 不能再把 SSE 正文伪装成 application/json 200 返回。
+				if looksLikeSSEBody(body) {
+					converted, convErr := openAIStreamBodyToChatResponse(body, req.Model, allowedToolNames(req))
+					if convErr != nil {
+						lastErr = fmt.Errorf("解析响应失败: 非流式 SSE 聚合失败: %w", convErr)
+						attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
+						attempts = append(attempts, attempt)
+						s.logger.Warn("模型 %s 在提供商 %s 返回无法聚合的 SSE: %v", modelID, prov.Name(), convErr)
+						registry.RecordCandidateFailure(prov.Name(), lastErr)
+						if shouldStopCandidateFallback(attempt.Category) {
+							break
+						}
+						continue
+					}
 					body = converted
 				}
 				// Visual Studio Copilot 适配：
@@ -942,12 +955,11 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "读取请求体失败", http.StatusBadRequest)
+	defer r.Body.Close()
+	body, ok := readChatRequestBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	var ollamaReq map[string]any
 	if err := json.Unmarshal(body, &ollamaReq); err != nil {
@@ -1152,6 +1164,32 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 	} else {
 		writeProxyDiagnosticError(w, http.StatusServiceUnavailable, allCandidatesFailedDiagnostic(modelName, resolvedModel, len(candidates), attempts))
 	}
+}
+
+func readChatRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	return readRequestBody(w, r, maxChatRequestBodyBytes)
+}
+
+func readRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
+	limitText := fmt.Sprintf("%d 字节", maxBytes)
+	if maxBytes > 0 && maxBytes%(1<<20) == 0 {
+		limitText = fmt.Sprintf("%d MiB", maxBytes>>20)
+	}
+	if r.ContentLength > maxBytes {
+		http.Error(w, "请求体超过 "+limitText+" 限制", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
+	if err == nil {
+		return body, true
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		http.Error(w, "请求体超过 "+limitText+" 限制", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	http.Error(w, "读取请求体失败", http.StatusBadRequest)
+	return nil, false
 }
 
 // handleStream 处理流式响应
@@ -1451,6 +1489,13 @@ func parseOpenAIStreamPayload(payload string) (openAIStreamChunk, error) {
 	var root map[string]any
 	if err := json.Unmarshal([]byte(payload), &root); err != nil {
 		return openAIStreamChunk{}, err
+	}
+	if streamErr, ok := root["error"]; ok && streamErr != nil {
+		encoded, err := json.Marshal(streamErr)
+		if err != nil {
+			return openAIStreamChunk{}, errors.New("upstream SSE error")
+		}
+		return openAIStreamChunk{}, fmt.Errorf("upstream SSE error: %s", sanitizeDiagnosticMessage(string(encoded)))
 	}
 
 	choices, _ := root["choices"].([]any)

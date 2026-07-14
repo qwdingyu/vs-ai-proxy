@@ -86,7 +86,7 @@ http://127.0.0.1:12345/v1
 .\vs-ai-proxy.exe --version
 ```
 
-确认版本为 `v0.2.28` 或更新版本后，再重新启动 Visual Studio。
+确认版本为 GitHub Releases 中的最新版本后，再重新启动 Visual Studio。
 
 如需临时指定端口：
 
@@ -159,4 +159,4 @@ make build
 
 ## 更多文档
 
-详细设计、排障和版本记录见 `docs/` 目录。
+详细设计、排障和版本记录见 `docs/` 目录；建议先阅读 `docs/00_文档索引与系统架构总览_20260714.md`。

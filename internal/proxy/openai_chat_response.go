@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
+
+const maxAggregatedOpenAIStreamBytes int64 = 64 << 20
+
+var errOpenAIStreamTooLarge = errors.New("SSE response exceeds aggregation limit")
 
 type rawOpenAIChatProvider interface {
 	ChatRaw(ctx context.Context, req *provider.ChatRequest) ([]byte, error)
@@ -27,54 +32,57 @@ func (s *Server) cacheRawOpenAIChatResponse(body []byte) {
 	s.cacheChatResponse(&resp)
 }
 
-func openAIStreamBodyToChatResponse(body []byte, model string) ([]byte, error) {
-	if !bytes.Contains(body, []byte("data:")) {
+func openAIStreamBodyToChatResponse(body []byte, model string, allowedTools map[string]struct{}) ([]byte, error) {
+	if !looksLikeSSEBody(body) {
 		return nil, fmt.Errorf("response is not an SSE body")
 	}
 	// 真实代理非流式路径会优先 raw 透传 OpenAI 响应，以保留 provider 扩展字段。
 	// 但 useai/gpt-5.5 这类上游可能在 stream=false 时返回 SSE；VS/普通 OpenAI 客户端
 	// 此时期待 JSON 而不是 data: 行，所以必须在写给下游前聚合成标准 chat.completion。
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var content strings.Builder
-	finishReason := "stop"
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(line[5:])
-		if payload == "[DONE]" {
-			break
-		}
-		chunk, err := parseOpenAIStreamPayload(payload)
-		if err != nil {
-			continue
-		}
-		content.WriteString(chunk.Content)
-		if chunk.FinishReason != "" {
-			finishReason = chunk.FinishReason
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	// 注意：这是“非流式请求收到 SSE”的兼容兜底，不是标准流式透传路径。
+	// 因此这里需要复用正式流式的工具分片合并逻辑，避免上游实际返回了 create_file
+	// 但代理在 SSE->JSON 转换时丢失 tool_calls，造成 VS 端误报“无法运行工具”。
+	resp, err := aggregateOpenAIStreamReader(bytes.NewReader(body), model, allowedTools)
+	if err != nil {
 		return nil, err
 	}
-	contentText := content.String()
-	if strings.TrimSpace(contentText) == "" {
-		contentText = ""
-	}
-	resp := provider.ChatResponse{
-		ID:      fmt.Sprintf("chatcmpl-sse-%d", time.Now().Unix()),
-		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []provider.Choice{{
-			Index:        0,
-			Message:      provider.Message{Role: "assistant", Content: contentText},
-			FinishReason: visualStudioFinishReason(finishReason),
-		}},
-	}
 	return json.Marshal(resp)
+}
+
+// looksLikeSSEBody 只识别从正文开头开始的标准 SSE 字段序列，并要求最终出现
+// data 字段。这样既兼容 event/id/retry/注释前导，也不会因普通正文稍后出现
+// "data:" 文本而误判。
+func looksLikeSSEBody(body []byte) bool {
+	body = bytes.TrimPrefix(body, []byte("\xef\xbb\xbf"))
+	if len(bytes.TrimSpace(body)) == 0 {
+		return false
+	}
+	for len(body) > 0 {
+		line := body
+		if newline := bytes.IndexByte(body, '\n'); newline >= 0 {
+			line = body[:newline]
+			body = body[newline+1:]
+		} else {
+			body = nil
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] == ':' {
+			continue
+		}
+		field, _, ok := bytes.Cut(line, []byte(":"))
+		if !ok {
+			return false
+		}
+		switch string(field) {
+		case "data":
+			return true
+		case "event", "id", "retry":
+			continue
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func collectOpenAIStreamChatResponse(ctx context.Context, prov provider.Provider, req *provider.ChatRequest) (*provider.ChatResponse, error) {
@@ -89,51 +97,92 @@ func collectOpenAIStreamChatResponse(ctx context.Context, prov provider.Provider
 }
 
 func collectOpenAIStreamReader(stream io.Reader, model string, allowedTools map[string]struct{}) (*provider.ChatResponse, error) {
+	resp, err := aggregateOpenAIStreamReader(stream, model, allowedTools)
+	if err != nil {
+		return nil, err
+	}
+	message := resp.Choices[0].Message
+	if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.Reasoning) == "" && len(message.ToolCalls) == 0 {
+		return nil, fmt.Errorf("SSE response has no content or tool calls")
+	}
+	return resp, nil
+}
+
+func aggregateOpenAIStreamReader(stream io.Reader, model string, allowedTools map[string]struct{}) (*provider.ChatResponse, error) {
+	return aggregateOpenAIStreamReaderWithLimit(stream, model, allowedTools, maxAggregatedOpenAIStreamBytes)
+}
+
+func aggregateOpenAIStreamReaderWithLimit(stream io.Reader, model string, allowedTools map[string]struct{}, maxBytes int64) (*provider.ChatResponse, error) {
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var content strings.Builder
 	var reasoning strings.Builder
 	toolChunks := map[int]map[string]any{}
 	finishReason := "stop"
+	explicitFinishReason := false
+	parsedPayload := false
+	sawDone := false
+	var scannedBytes int64
 
 	for scanner.Scan() {
+		scannedBytes += int64(len(scanner.Bytes())) + 1
+		if scannedBytes > maxBytes {
+			return nil, fmt.Errorf("%w: maximum %d bytes", errOpenAIStreamTooLarge, maxBytes)
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
 			continue
 		}
 		payload := strings.TrimSpace(line[5:])
+		if payload == "" {
+			continue
+		}
 		if payload == "[DONE]" {
+			sawDone = true
 			break
 		}
 		chunk, err := parseOpenAIStreamPayload(payload)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("invalid SSE data payload: %w", err)
 		}
+		parsedPayload = true
 		content.WriteString(chunk.Content)
 		reasoning.WriteString(chunk.Reasoning)
 		mergeOpenAIStreamToolCalls(toolChunks, chunk.ToolCalls)
 		if chunk.FinishReason != "" {
 			finishReason = chunk.FinishReason
+			explicitFinishReason = true
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
+	if !parsedPayload {
+		return nil, fmt.Errorf("SSE response has no JSON data payload")
+	}
+	if !explicitFinishReason && !sawDone {
+		return nil, fmt.Errorf("SSE response ended without finish_reason or [DONE]")
+	}
 
 	message := provider.Message{Role: "assistant", Content: content.String(), Reasoning: reasoning.String()}
 	if calls := buildProviderToolCalls(toolChunks); len(calls) > 0 {
 		message.ToolCalls = calls
+		if !explicitFinishReason || isOpenAIToolFinishReason(finishReason) {
+			if err := validateInferredToolCalls(calls); err != nil {
+				return nil, err
+			}
+			finishReason = "tool_calls"
+		}
 	}
 	if len(message.ToolCalls) == 0 {
 		calls, cleaned := parseDSMLToolCalls(message.Content, allowedTools)
 		if len(calls) > 0 {
 			message.Content = cleaned
 			message.ToolCalls = calls
-			finishReason = "tool_calls"
+			if !explicitFinishReason || isOpenAIToolFinishReason(finishReason) {
+				finishReason = "tool_calls"
+			}
 		}
-	}
-	if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.Reasoning) == "" && len(message.ToolCalls) == 0 {
-		return nil, fmt.Errorf("SSE response has no content or tool calls")
 	}
 
 	resp := &provider.ChatResponse{
@@ -149,6 +198,28 @@ func collectOpenAIStreamReader(stream io.Reader, model string, allowedTools map[
 	}
 	normalizeProviderSpecificToolCalls(resp, allowedTools)
 	return resp, nil
+}
+
+func isOpenAIToolFinishReason(finishReason string) bool {
+	switch strings.ToLower(strings.TrimSpace(finishReason)) {
+	case "tool_calls", "function_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateInferredToolCalls(calls []provider.ToolCall) error {
+	for index, call := range calls {
+		if strings.TrimSpace(call.Function.Name) == "" {
+			return fmt.Errorf("incomplete tool call at index %d: missing function name", index)
+		}
+		arguments := strings.TrimSpace(call.Function.Arguments)
+		if arguments == "" || !json.Valid([]byte(arguments)) {
+			return fmt.Errorf("incomplete tool call at index %d: invalid function arguments", index)
+		}
+	}
+	return nil
 }
 
 func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse, allowedTools map[string]struct{}) {

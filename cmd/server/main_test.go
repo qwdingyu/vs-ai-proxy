@@ -254,26 +254,55 @@ func TestDescribeStartupUpdateErrorExplainsDeadline(t *testing.T) {
 func TestLoadEnvFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")
-	content := "# comment\nPORT=12345\nSTORE_PATH=\"/tmp/vs-ai-proxy/logs.json\"\nEMPTY=\n"
+	content := "# comment\nPORT=12345\nSTORE_PATH=\"/tmp/vs-ai-proxy/logs.json\"\nPROXY_API_KEY=file-proxy-key\nADMIN_API_KEY=file-admin-key\nVS_AI_PROXY_TEST_FILE_ONLY_EMPTY=\n"
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	t.Setenv("PORT", "")
-	t.Setenv("STORE_PATH", "")
+	t.Setenv("PORT", "18080")
+	t.Setenv("PROXY_API_KEY", "process-proxy-key")
+	t.Setenv("ADMIN_API_KEY", "process-admin-key")
+	oldStorePath, hadStorePath := os.LookupEnv("STORE_PATH")
+	if err := os.Unsetenv("STORE_PATH"); err != nil {
+		t.Fatalf("Unsetenv(STORE_PATH) error = %v", err)
+	}
+	t.Cleanup(func() {
+		if hadStorePath {
+			_ = os.Setenv("STORE_PATH", oldStorePath)
+			return
+		}
+		_ = os.Unsetenv("STORE_PATH")
+	})
+	oldEmpty, hadEmpty := os.LookupEnv("VS_AI_PROXY_TEST_FILE_ONLY_EMPTY")
+	if err := os.Unsetenv("VS_AI_PROXY_TEST_FILE_ONLY_EMPTY"); err != nil {
+		t.Fatalf("Unsetenv(VS_AI_PROXY_TEST_FILE_ONLY_EMPTY) error = %v", err)
+	}
+	t.Cleanup(func() {
+		if hadEmpty {
+			_ = os.Setenv("VS_AI_PROXY_TEST_FILE_ONLY_EMPTY", oldEmpty)
+			return
+		}
+		_ = os.Unsetenv("VS_AI_PROXY_TEST_FILE_ONLY_EMPTY")
+	})
 
 	if err := loadEnvFile(path); err != nil {
 		t.Fatalf("loadEnvFile() error = %v", err)
 	}
 
-	if got, want := os.Getenv("PORT"), "12345"; got != want {
+	if got, want := os.Getenv("PORT"), "18080"; got != want {
 		t.Fatalf("PORT = %q, want %q", got, want)
 	}
 	if got, want := os.Getenv("STORE_PATH"), "/tmp/vs-ai-proxy/logs.json"; got != want {
 		t.Fatalf("STORE_PATH = %q, want %q", got, want)
 	}
-	if got := os.Getenv("EMPTY"); got != "" {
-		t.Fatalf("EMPTY = %q, want empty string", got)
+	if got, want := os.Getenv("PROXY_API_KEY"), "process-proxy-key"; got != want {
+		t.Fatalf("PROXY_API_KEY = %q, want %q", got, want)
+	}
+	if got, want := os.Getenv("ADMIN_API_KEY"), "process-admin-key"; got != want {
+		t.Fatalf("ADMIN_API_KEY = %q, want %q", got, want)
+	}
+	if got, exists := os.LookupEnv("VS_AI_PROXY_TEST_FILE_ONLY_EMPTY"); !exists || got != "" {
+		t.Fatalf("VS_AI_PROXY_TEST_FILE_ONLY_EMPTY = %q, exists=%v, want set empty string", got, exists)
 	}
 }
 
@@ -350,12 +379,12 @@ func TestParsePIDLinesDeduplicatesPIDs(t *testing.T) {
 }
 
 func TestSafeProxyProcessNameAndDisplayName(t *testing.T) {
-	for _, name := range []string{"vs-ai-proxy", "vs-ai-proxy.exe", "server", "server.exe"} {
+	for _, name := range []string{"vs-ai-proxy", "vs-ai-proxy.exe"} {
 		if !isSafeProxyProcessName(name) {
 			t.Fatalf("%q should be safe proxy process", name)
 		}
 	}
-	for _, name := range []string{"powershell", "Code", "nginx", ""} {
+	for _, name := range []string{"server", "server.exe", "powershell", "Code", "nginx", ""} {
 		if isSafeProxyProcessName(name) {
 			t.Fatalf("%q should not be safe proxy process", name)
 		}
