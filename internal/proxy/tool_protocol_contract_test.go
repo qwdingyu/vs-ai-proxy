@@ -183,6 +183,201 @@ func TestToolProtocolContract(t *testing.T) {
 		}
 	})
 
+	t.Run("direct stream repairs same-event duplicate of a prior owner", func(t *testing.T) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_shared","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[` +
+				`{"index":0,"id":"call_shared","function":{"arguments":"\"create.txt\"}"}},` +
+				`{"index":1,"id":"call_shared","type":"function","function":{"name":"get_file","arguments":"{}"}}` +
+				`]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		server := &Server{}
+		prov := &fakeStreamProvider{name: "openai", body: stream}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		if err := server.streamOpenAI(rec, req, prov, toolProtocolChatRequest("create_file", "get_file"), rec); err != nil {
+			t.Fatalf("stream OpenAI response: %v; body=%s", err, rec.Body.String())
+		}
+		calls, _ := parseOpenAIStreamToolCalls(t, rec.Body.String())
+		if len(calls) != 2 || calls[0].ID == calls[1].ID {
+			t.Fatalf("same-event duplicate prior owner was not repaired: %#v; body=%s", calls, rec.Body.String())
+		}
+	})
+
+	t.Run("direct stream separates parallel tools without indexes", func(t *testing.T) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[` +
+				`{"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{}"}},` +
+				`{"id":"call_read","type":"function","function":{"name":"get_file","arguments":"{}"}}` +
+				`]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		server := &Server{}
+		prov := &fakeStreamProvider{name: "openai", body: stream}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		if err := server.streamOpenAI(rec, req, prov, toolProtocolChatRequest("create_file", "get_file"), rec); err != nil {
+			t.Fatalf("stream OpenAI response: %v; body=%s", err, rec.Body.String())
+		}
+		calls, finishReason := parseOpenAIStreamToolCalls(t, rec.Body.String())
+		if len(calls) != 2 || calls[0].ID != "call_create" || calls[1].ID != "call_read" {
+			t.Fatalf("parallel tools without indexes were merged: %#v; body=%s", calls, rec.Body.String())
+		}
+		if finishReason != "tool_calls" {
+			t.Fatalf("finish_reason = %q, want tool_calls", finishReason)
+		}
+	})
+
+	t.Run("direct stream avoids missing-index collision with explicit index", func(t *testing.T) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[` +
+				`{"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{}"}},` +
+				`{"index":0,"id":"call_read","type":"function","function":{"name":"get_file","arguments":"{}"}}` +
+				`]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		server := &Server{}
+		prov := &fakeStreamProvider{name: "openai", body: stream}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		if err := server.streamOpenAI(rec, req, prov, toolProtocolChatRequest("create_file", "get_file"), rec); err != nil {
+			t.Fatalf("stream OpenAI response: %v; body=%s", err, rec.Body.String())
+		}
+		calls, _ := parseOpenAIStreamToolCalls(t, rec.Body.String())
+		if len(calls) != 2 || calls[0].ID == calls[1].ID {
+			t.Fatalf("missing index collided with explicit index: %#v; body=%s", calls, rec.Body.String())
+		}
+	})
+
+	t.Run("direct stream keeps an indexless continuation with its known ID owner", func(t *testing.T) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[` +
+				`{"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":\"create.txt\"}"}},` +
+				`{"id":"call_read","type":"function","function":{"name":"get_file","arguments":"{\"path\":"}}` +
+				`]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"id":"call_read","function":{"arguments":"\"read.txt\"}"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		server := &Server{}
+		prov := &fakeStreamProvider{name: "openai", body: stream}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		if err := server.streamOpenAI(rec, req, prov, toolProtocolChatRequest("create_file", "get_file"), rec); err != nil {
+			t.Fatalf("stream OpenAI response: %v; body=%s", err, rec.Body.String())
+		}
+		calls, _ := parseOpenAIStreamToolCalls(t, rec.Body.String())
+		if len(calls) != 2 {
+			t.Fatalf("indexless continuation changed tool count: %#v; body=%s", calls, rec.Body.String())
+		}
+		argumentsByID := map[string]string{}
+		for _, call := range calls {
+			argumentsByID[call.ID] = call.Function.Arguments
+		}
+		if argumentsByID["call_create"] != `{"path":"create.txt"}` ||
+			argumentsByID["call_read"] != `{"path":"read.txt"}` {
+			t.Fatalf("indexless continuation merged into the wrong tool: %#v; body=%s", argumentsByID, rec.Body.String())
+		}
+	})
+
+	t.Run("direct stream restores the sole owner for an ID-less continuation", func(t *testing.T) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":5,"id":"call_read","type":"function","function":{"name":"get_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"read.txt\"}"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		server := &Server{}
+		prov := &fakeStreamProvider{name: "openai", body: stream}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		if err := server.streamOpenAI(rec, req, prov, toolProtocolChatRequest("get_file"), rec); err != nil {
+			t.Fatalf("stream OpenAI response: %v; body=%s", err, rec.Body.String())
+		}
+		calls, _ := parseOpenAIStreamToolCalls(t, rec.Body.String())
+		if len(calls) != 1 || calls[0].ID != "call_read" || calls[0].Function.Arguments != `{"path":"read.txt"}` {
+			t.Fatalf("sole indexless continuation lost its owner: %#v; body=%s", calls, rec.Body.String())
+		}
+	})
+
+	t.Run("direct stream rejects a new unknown ID after existing tool state", func(t *testing.T) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[{"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{}"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"id":"call_read","type":"function","function":{"name":"get_file","arguments":"{}"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		server := &Server{}
+		prov := &fakeStreamProvider{name: "openai", body: stream}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		err := server.streamOpenAI(rec, req, prov, toolProtocolChatRequest("create_file", "get_file"), rec)
+		if err == nil || !strings.Contains(err.Error(), "无法通过 id 唯一关联") {
+			t.Fatalf("unknown cross-event tool ID error = %v; body=%s", err, rec.Body.String())
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatalf("unknown cross-event tool leaked partial response: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("direct stream rejects conflicting explicit index and known ID owner", func(t *testing.T) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[` +
+				`{"index":0,"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{}"}},` +
+				`{"index":1,"id":"call_read","type":"function","function":{"name":"get_file","arguments":"{\"path\":"}}` +
+				`]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_read","function":{"arguments":"\"read.txt\"}"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		server := &Server{}
+		prov := &fakeStreamProvider{name: "openai", body: stream}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		err := server.streamOpenAI(rec, req, prov, toolProtocolChatRequest("create_file", "get_file"), rec)
+		if err == nil || !strings.Contains(err.Error(), "但续片声明 index") {
+			t.Fatalf("conflicting tool owner/index error = %v; body=%s", err, rec.Body.String())
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatalf("conflicting owner/index stream leaked partial response: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("direct stream rejects an ambiguous indexless continuation", func(t *testing.T) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[` +
+				`{"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{}"}},` +
+				`{"id":"call_read","type":"function","function":{"name":"get_file","arguments":"{\"path\":"}}` +
+				`]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"read.txt\"}"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		server := &Server{}
+		prov := &fakeStreamProvider{name: "openai", body: stream}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		err := server.streamOpenAI(rec, req, prov, toolProtocolChatRequest("create_file", "get_file"), rec)
+		if err == nil || !strings.Contains(err.Error(), "无法通过 id 唯一关联") {
+			t.Fatalf("ambiguous indexless continuation error = %v; body=%s", err, rec.Body.String())
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatalf("ambiguous tool stream leaked partial response: %s", rec.Body.String())
+		}
+	})
+
 	t.Run("direct stream repairs a collision after fragmented tool IDs", func(t *testing.T) {
 		stream := strings.Join([]string{
 			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_first","type":"function","function":{"name":"create_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
@@ -593,14 +788,13 @@ func TestToolProtocolContract(t *testing.T) {
 	})
 }
 
-func toolProtocolChatRequest(toolName string) *provider.ChatRequest {
-	return &provider.ChatRequest{
-		Model: "gpt-test",
-		Tools: []provider.Tool{{
-			Type: "function",
-			Function: provider.ToolFunc{
-				Name: toolName,
-			},
-		}},
+func toolProtocolChatRequest(toolNames ...string) *provider.ChatRequest {
+	request := &provider.ChatRequest{Model: "gpt-test"}
+	for _, toolName := range toolNames {
+		request.Tools = append(request.Tools, provider.Tool{
+			Type:     "function",
+			Function: provider.ToolFunc{Name: toolName},
+		})
 	}
+	return request
 }

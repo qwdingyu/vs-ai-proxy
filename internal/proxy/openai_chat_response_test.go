@@ -667,6 +667,36 @@ func TestNormalizeOpenAIStreamLineAllowsArgumentOnlyToolCallChunks(t *testing.T)
 	}
 }
 
+func TestOpenAIStreamSanitizerUsesKnownIDOwnerForIndexlessContinuation(t *testing.T) {
+	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"create_file": {}, "get_file": {}})
+	first := `data: {"choices":[{"delta":{"tool_calls":[` +
+		`{"id":"call_create","type":"function","function":{"name":"create_file","arguments":"{\"path\":\"create.txt\"}"}},` +
+		`{"id":"call_read","type":"function","function":{"name":"get_file","arguments":"{\"path\":"}}` +
+		`]},"finish_reason":null}]}`
+	second := `data: {"choices":[{"delta":{"tool_calls":[{"id":"call_read","function":{"arguments":"\"read.txt\"}"}}]},"finish_reason":null}]}`
+
+	sanitizer.normalizeLine(first)
+	if index, ok := sanitizer.knownToolCallIndex(0, "call_read"); !ok || index != 1 {
+		t.Fatalf("known tool ID owner = %d/%v; seen=%#v", index, ok, sanitizer.seenToolIDs)
+	}
+	normalizedSecond := sanitizer.normalizeLine(second)
+	if sanitizer.err != nil {
+		t.Fatalf("indexless continuation was rejected: %v", sanitizer.err)
+	}
+	calls := buildProviderToolCalls(sanitizer.toolChunks[0])
+	if len(calls) != 2 {
+		t.Fatalf("tool count = %d, want 2; chunks=%#v", len(calls), sanitizer.toolChunks)
+	}
+	argumentsByID := map[string]string{}
+	for _, call := range calls {
+		argumentsByID[call.ID] = call.Function.Arguments
+	}
+	if argumentsByID["call_create"] != `{"path":"create.txt"}` ||
+		argumentsByID["call_read"] != `{"path":"read.txt"}` {
+		t.Fatalf("indexless continuation merged into the wrong owner: %#v; second=%s; chunks=%#v; seen=%#v", argumentsByID, normalizedSecond, sanitizer.toolChunks, sanitizer.seenToolIDs)
+	}
+}
+
 func TestNormalizeOpenAIStreamLineDowngradesToolFinishWithoutObservedPayload(t *testing.T) {
 	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"create_file": {}})
 	line := `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`

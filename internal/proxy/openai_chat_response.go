@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
@@ -359,15 +360,12 @@ func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, r
 }
 
 func mergeOpenAIStreamToolCalls(acc map[int]map[string]any, chunks []any) {
-	for _, raw := range chunks {
+	for position, raw := range chunks {
 		chunk, ok := raw.(map[string]any)
 		if !ok || chunk == nil {
 			continue
 		}
-		index := 0
-		if rawIndex, ok := chunk["index"].(float64); ok {
-			index = int(rawIndex)
-		}
+		index, _ := openAIStreamToolCallIndex(chunk, position)
 		current := acc[index]
 		if current == nil {
 			current = map[string]any{"index": float64(index)}
@@ -725,20 +723,96 @@ func (s *openAIStreamToolSanitizer) normalizeStreamToolCallEnvelopes(
 	if s.seenToolIDs == nil {
 		s.seenToolIDs = map[string]string{}
 	}
+	// owner 快照只代表事件开始前已经建立的跨事件关联。同一事件内重复 ID
+	// 仍应由后续 duplicate 修复逻辑生成 synthetic ID，不能误判成跨事件冲突。
+	priorToolIDOwners := make(map[string]string, len(s.seenToolIDs))
+	for id, owner := range s.seenToolIDs {
+		priorToolIDOwners[id] = owner
+	}
 	generated := s.syntheticIDs[choiceIndex]
 	if generated == nil {
 		generated = map[int]string{}
 		s.syntheticIDs[choiceIndex] = generated
 	}
+	// 先预留本事件中所有合法显式 index。缺失 index 的工具如果直接使用
+	// 数组位置，可能与稍后出现的显式 index 冲突并再次被合并。
+	reservedIndexes := make(map[int]struct{}, len(calls))
+	eventToolIDOwners := make(map[string]string, len(calls))
+	for position, raw := range calls {
+		call, _ := raw.(map[string]any)
+		if index, valid := openAIStreamToolCallIndex(call, position); valid {
+			reservedIndexes[index] = struct{}{}
+		}
+	}
 	changed := false
-	for _, raw := range calls {
+	for position, raw := range calls {
 		call, _ := raw.(map[string]any)
 		if call == nil {
 			continue
 		}
-		callIndex := openAIStreamToolCallIndex(call)
+		callIndex, validIndex := openAIStreamToolCallIndex(call, position)
+		incomingID, _ := call["id"].(string)
+		if validIndex && strings.TrimSpace(incomingID) != "" {
+			_, seenInEvent := eventToolIDOwners[incomingID]
+			if !seenInEvent {
+				if knownIndex, known := toolCallIndexFromOwners(priorToolIDOwners, choiceIndex, incomingID); known && knownIndex != callIndex {
+					// 同一个已知 ID 不能在后续分片切换到另一个显式 index；
+					// 这会把两个工具的参数和名称错误拼接，必须拒绝矛盾上游。
+					s.err = fmt.Errorf(
+						"SSE choice %d 的工具 id %q 属于 index %d，但续片声明 index %d",
+						choiceIndex,
+						incomingID,
+						knownIndex,
+						callIndex,
+					)
+					return changed
+				}
+			}
+		}
+		if !validIndex {
+			if knownIndex, known := toolCallIndexFromOwners(priorToolIDOwners, choiceIndex, incomingID); known {
+				// 后续分片可能只重复 id 而省略 index；优先使用首个
+				// 分片登记的 owner，不能按本事件位置猜测归属。
+				callIndex = knownIndex
+				validIndex = true
+				call["index"] = float64(callIndex)
+				changed = true
+			}
+		}
+		if !validIndex && strings.TrimSpace(incomingID) == "" && len(currentCalls) == 1 {
+			// 续片没有 id，但当前 choice 只有一个已知工具时归属唯一。
+			// 必须恢复实际 index，不能假设唯一工具一定使用 index 0。
+			for existingIndex := range currentCalls {
+				callIndex = existingIndex
+			}
+			validIndex = true
+			call["index"] = float64(callIndex)
+			changed = true
+		}
+		if !validIndex {
+			if len(currentCalls) > 0 {
+				// 已有工具状态时，未知 id 既可能是新工具，也可能是 identity
+				// 片段。宁可拒绝残缺流，也不能猜测后静默合并到错误工具。
+				s.err = fmt.Errorf("SSE choice %d 的工具续片缺少有效 index，且无法通过 id 唯一关联", choiceIndex)
+				return changed
+			}
+			// 少数兼容上游省略 index 或发送了错误类型；同一 SSE 事件内
+			// 从数组位置开始选择未被显式 index 占用的值，避免并行工具合并。
+			for {
+				if _, occupied := reservedIndexes[callIndex]; !occupied {
+					break
+				}
+				callIndex++
+			}
+			call["index"] = float64(callIndex)
+			changed = true
+		}
+		reservedIndexes[callIndex] = struct{}{}
 		current := currentCalls[callIndex]
 		callKey := fmt.Sprintf("%d:%d", choiceIndex, callIndex)
+		if strings.TrimSpace(incomingID) != "" {
+			eventToolIDOwners[incomingID] = callKey
+		}
 		if generated[callIndex] != "" {
 			if current != nil {
 				if _, exists := call["id"]; exists {
@@ -788,6 +862,32 @@ func (s *openAIStreamToolSanitizer) normalizeStreamToolCallEnvelopes(
 		}
 	}
 	return changed
+}
+
+func (s *openAIStreamToolSanitizer) knownToolCallIndex(choiceIndex int, id string) (int, bool) {
+	if s == nil {
+		return 0, false
+	}
+	return toolCallIndexFromOwners(s.seenToolIDs, choiceIndex, id)
+}
+
+func toolCallIndexFromOwners(owners map[string]string, choiceIndex int, id string) (int, bool) {
+	if strings.TrimSpace(id) == "" {
+		return 0, false
+	}
+	owner, exists := owners[id]
+	if !exists {
+		return 0, false
+	}
+	prefix := strconv.Itoa(choiceIndex) + ":"
+	if !strings.HasPrefix(owner, prefix) {
+		return 0, false
+	}
+	index, err := strconv.Atoi(strings.TrimPrefix(owner, prefix))
+	if err != nil || index < 0 {
+		return 0, false
+	}
+	return index, true
 }
 
 func (s *openAIStreamToolSanitizer) toolCallIDInUse(choiceIndex, callIndex int, id, currentKey string) bool {
@@ -888,17 +988,33 @@ func openAIStreamChoiceIndex(choice map[string]any) int {
 	return 0
 }
 
-func openAIStreamToolCallIndex(call map[string]any) int {
+func openAIStreamToolCallIndex(call map[string]any, fallback int) (int, bool) {
 	if call == nil {
-		return 0
+		return fallback, false
 	}
 	switch raw := call["index"].(type) {
 	case float64:
-		return int(raw)
+		index := int(raw)
+		if raw >= 0 && float64(index) == raw {
+			return index, true
+		}
 	case int:
-		return raw
+		if raw >= 0 {
+			return raw, true
+		}
+	case int64:
+		index := int(raw)
+		if raw >= 0 && int64(index) == raw {
+			return index, true
+		}
+	case json.Number:
+		value, err := raw.Int64()
+		index := int(value)
+		if err == nil && value >= 0 && int64(index) == value {
+			return index, true
+		}
 	}
-	return 0
+	return fallback, false
 }
 
 func normalizeOpenAIFinishReason(choice map[string]any) bool {
