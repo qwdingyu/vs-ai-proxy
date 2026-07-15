@@ -144,11 +144,23 @@ func validateProviderResponseToolContract(resp *provider.ChatResponse) error {
 			if err := validateProviderToolCalls(message.ToolCalls); err != nil {
 				return fmt.Errorf("choice %d: %w", choiceIndex, err)
 			}
+			if finishReason != "tool_calls" {
+				return fmt.Errorf("choice %d tool_calls 的 finish_reason 必须为 tool_calls，实际为 %q", choiceIndex, finishReason)
+			}
 		}
 		if hasLegacyCall {
 			if err := validateProviderFunctionCall(*message.FunctionCall, 0); err != nil {
 				return fmt.Errorf("choice %d: %w", choiceIndex, err)
 			}
+			if finishReason != "function_call" {
+				return fmt.Errorf("choice %d function_call 的 finish_reason 必须为 function_call，实际为 %q", choiceIndex, finishReason)
+			}
+		}
+		if finishReason == "tool_calls" && !hasModernCalls {
+			return fmt.Errorf("choice %d 的 finish_reason=tool_calls 但没有 tool_calls", choiceIndex)
+		}
+		if finishReason == "function_call" && !hasLegacyCall {
+			return fmt.Errorf("choice %d 的 finish_reason=function_call 但没有 function_call", choiceIndex)
 		}
 		hasText := strings.TrimSpace(message.Content) != "" ||
 			strings.TrimSpace(message.Reasoning) != "" ||
@@ -183,6 +195,11 @@ func normalizeProviderSpecificToolCalls(resp *provider.ChatResponse, allowedTool
 			}
 			if len(msg.ToolCalls) == 0 && msg.FunctionCall == nil {
 				choice.FinishReason = visualStudioFinishReason(choice.FinishReason)
+				if isToolCallFinishReason(choice.FinishReason) {
+					// 工具终态却没有对应 payload 会让 VS 进入无法执行的工具分支。
+					// 已有普通文本时按普通完成处理；空响应仍由最终契约校验拒绝。
+					choice.FinishReason = "stop"
+				}
 			}
 		}
 	}
@@ -227,6 +244,10 @@ func normalizeProviderSpecificToolCallsInOpenAIJSON(body []byte, allowedTools ma
 				changed = true
 			}
 			continue
+		}
+		if finishReason, _ := choice["finish_reason"].(string); isToolCallFinishReason(finishReason) {
+			choice["finish_reason"] = "stop"
+			changed = true
 		}
 		if finishReason, _ := choice["finish_reason"].(string); isOpenAITruncationFinishReason(finishReason) {
 			continue
@@ -404,16 +425,23 @@ func mergeOpenAIIdentityFragment(target map[string]any, key string, value any) {
 		return
 	}
 	existing, _ := target[key].(string)
+	merged := mergedOpenAIIdentity(existing, fragment)
+	if merged != existing {
+		target[key] = merged
+	}
+}
+
+func mergedOpenAIIdentity(existing, fragment string) string {
 	switch {
 	case existing == "":
-		target[key] = fragment
+		return fragment
 	case existing == fragment:
-		return
+		return existing
 	case strings.HasPrefix(fragment, existing):
 		// 少数兼容上游发送累计值而不是纯 delta。
-		target[key] = fragment
+		return fragment
 	default:
-		target[key] = existing + fragment
+		return existing + fragment
 	}
 }
 
@@ -530,6 +558,7 @@ type openAIStreamToolSanitizer struct {
 	toolKinds     map[int]string
 	finishReasons map[int]string
 	syntheticIDs  map[int]map[int]string
+	seenToolIDs   map[string]string
 	sawDone       bool
 	started       bool
 	err           error
@@ -542,6 +571,7 @@ func newOpenAIStreamToolSanitizer(allowedTools map[string]struct{}) *openAIStrea
 		toolKinds:     map[int]string{},
 		finishReasons: map[int]string{},
 		syntheticIDs:  map[int]map[int]string{},
+		seenToolIDs:   map[string]string{},
 	}
 }
 
@@ -660,6 +690,13 @@ func (s *openAIStreamToolSanitizer) normalizeLine(line string) string {
 		}
 		if finishReason, ok := choice["finish_reason"].(string); ok && strings.TrimSpace(finishReason) != "" {
 			s.finishReasons[choiceIndex] = visualStudioFinishReason(finishReason)
+			if len(choiceToolChunks) == 0 && isToolCallFinishReason(s.finishReasons[choiceIndex]) {
+				// 没有任何工具分片时，工具 finish 只能视为上游结束原因误标。
+				// 已跟踪但不完整的工具不能走这里，仍会在 validateFinal 中失败。
+				choice["finish_reason"] = "stop"
+				s.finishReasons[choiceIndex] = "stop"
+				changed = true
+			}
 			if s.hasCompleteToolCalls(choiceIndex) && !isOpenAITruncationFinishReason(finishReason) {
 				expectedFinish := s.toolFinishReason(choiceIndex)
 				if s.finishReasons[choiceIndex] != expectedFinish {
@@ -685,6 +722,9 @@ func (s *openAIStreamToolSanitizer) normalizeStreamToolCallEnvelopes(
 	calls []any,
 	currentCalls map[int]map[string]any,
 ) bool {
+	if s.seenToolIDs == nil {
+		s.seenToolIDs = map[string]string{}
+	}
 	generated := s.syntheticIDs[choiceIndex]
 	if generated == nil {
 		generated = map[int]string{}
@@ -698,6 +738,17 @@ func (s *openAIStreamToolSanitizer) normalizeStreamToolCallEnvelopes(
 		}
 		callIndex := openAIStreamToolCallIndex(call)
 		current := currentCalls[callIndex]
+		callKey := fmt.Sprintf("%d:%d", choiceIndex, callIndex)
+		if generated[callIndex] != "" {
+			if current != nil {
+				if _, exists := call["id"]; exists {
+					// 已向下游发送 synthetic id 后不能再混入迟到的上游 id。
+					delete(call, "id")
+					changed = true
+				}
+			}
+			continue
+		}
 		if current == nil {
 			id, _ := call["id"].(string)
 			if strings.TrimSpace(id) == "" {
@@ -705,7 +756,13 @@ func (s *openAIStreamToolSanitizer) normalizeStreamToolCallEnvelopes(
 				call["id"] = id
 				generated[callIndex] = id
 				changed = true
+			} else if s.toolCallIDInUse(choiceIndex, callIndex, id, callKey) {
+				id = newSyntheticToolCallID()
+				call["id"] = id
+				generated[callIndex] = id
+				changed = true
 			}
+			s.reserveToolCallID(id, callKey)
 			typeName, _ := call["type"].(string)
 			trimmedType := strings.TrimSpace(typeName)
 			missingType := trimmedType == ""
@@ -716,15 +773,53 @@ func (s *openAIStreamToolSanitizer) normalizeStreamToolCallEnvelopes(
 			}
 			continue
 		}
-		if generated[callIndex] != "" {
-			if _, exists := call["id"]; exists {
-				// 已向下游发送 synthetic id 后不能再混入迟到的上游 id。
+		// 少数兼容上游会把 id 拆成累计分片。保留不会造成冲突的分片；
+		// 如果合并后的候选 ID 已被同 choice 的其他工具占用，则丢弃迟到片段，
+		// 保留当前已发送的关联 ID，避免整条工具流在终态校验时失败。
+		if incomingID, ok := call["id"].(string); ok && strings.TrimSpace(incomingID) != "" {
+			currentID, _ := current["id"].(string)
+			candidateID := mergedOpenAIIdentity(currentID, incomingID)
+			if candidateID != currentID && s.toolCallIDInUse(choiceIndex, callIndex, candidateID, callKey) {
 				delete(call, "id")
 				changed = true
+			} else {
+				s.reserveToolCallID(candidateID, callKey)
 			}
 		}
 	}
 	return changed
+}
+
+func (s *openAIStreamToolSanitizer) toolCallIDInUse(choiceIndex, callIndex int, id, currentKey string) bool {
+	if strings.TrimSpace(id) == "" {
+		return false
+	}
+	if owner, exists := s.seenToolIDs[id]; exists && owner != currentKey {
+		return true
+	}
+	for otherChoice, calls := range s.toolChunks {
+		for otherIndex, call := range calls {
+			if otherChoice == choiceIndex && otherIndex == callIndex {
+				continue
+			}
+			if existing, _ := call["id"].(string); existing == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *openAIStreamToolSanitizer) reserveToolCallID(id, owner string) {
+	if s == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	for existing, existingOwner := range s.seenToolIDs {
+		if existingOwner == owner && existing != id {
+			delete(s.seenToolIDs, existing)
+		}
+	}
+	s.seenToolIDs[id] = owner
 }
 
 func (s *openAIStreamToolSanitizer) hasCompleteToolCalls(choiceIndex int) bool {

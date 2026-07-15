@@ -843,18 +843,30 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					// upstream_server_error，但同一 provider 的流式链路可用。
 					// 在还没写响应给下游时，尝试用流式聚合成非流式 JSON，避免 VS 端失败。
 					if canAttemptAlternateChatMode(cfg, ctx, err) {
-						if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
-							cancel()
-							setProxyFallbackMode(w, "nonstream-to-stream")
+						fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req)
+						if fallbackErr == nil {
 							normalizeProviderSpecificToolCalls(fallbackResp, allowedToolNames(req))
-							setResponseToolDiagnosticHeader(w, fallbackResp)
-							s.cacheChatResponse(fallbackResp)
-							w.Header().Set("Content-Type", "application/json")
-							w.WriteHeader(http.StatusOK)
-							_ = json.NewEncoder(w).Encode(fallbackResp)
-							registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
-							return
+							fallbackBody, marshalErr := json.Marshal(fallbackResp)
+							if marshalErr != nil {
+								fallbackErr = fmt.Errorf("编码备用非流式响应失败: %w", marshalErr)
+							} else {
+								cancel()
+								setProxyFallbackMode(w, "nonstream-to-stream")
+								setResponseToolDiagnosticHeader(w, fallbackResp)
+								w.Header().Set("Content-Type", "application/json")
+								w.WriteHeader(http.StatusOK)
+								if _, writeErr := w.Write(append(fallbackBody, '\n')); writeErr != nil {
+									// 已经提交 HTTP 头后无法切换候选；记录失败但绝不把
+									// 未送达的响应写入 reasoning cache。
+									registry.RecordCandidateFailure(prov.Name(), writeErr)
+									return
+								}
+								s.cacheChatResponse(fallbackResp)
+								registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+								return
+							}
 						}
+						err = alternateChatModeFailure(err, fallbackErr)
 					}
 					cancel()
 					lastErr = err
@@ -921,18 +933,30 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		resp, err := prov.Chat(ctx, req)
 		if err != nil {
 			if canAttemptAlternateChatMode(cfg, ctx, err) {
-				if fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req); fallbackErr == nil {
-					cancel()
-					setProxyFallbackMode(w, "nonstream-to-stream")
+				fallbackResp, fallbackErr := collectOpenAIStreamChatResponse(ctx, prov, req)
+				if fallbackErr == nil {
 					normalizeProviderSpecificToolCalls(fallbackResp, allowedToolNames(req))
-					setResponseToolDiagnosticHeader(w, fallbackResp)
-					s.cacheChatResponse(fallbackResp)
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusOK)
-					json.NewEncoder(w).Encode(fallbackResp)
-					registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
-					return
+					fallbackBody, marshalErr := json.Marshal(fallbackResp)
+					if marshalErr != nil {
+						fallbackErr = fmt.Errorf("编码备用非流式响应失败: %w", marshalErr)
+					} else {
+						cancel()
+						setProxyFallbackMode(w, "nonstream-to-stream")
+						setResponseToolDiagnosticHeader(w, fallbackResp)
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusOK)
+						if _, writeErr := w.Write(append(fallbackBody, '\n')); writeErr != nil {
+							// 已经提交 HTTP 头后无法切换候选；记录失败但绝不把
+							// 未送达的响应写入 reasoning cache。
+							registry.RecordCandidateFailure(prov.Name(), writeErr)
+							return
+						}
+						s.cacheChatResponse(fallbackResp)
+						registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+						return
+					}
 				}
+				err = alternateChatModeFailure(err, fallbackErr)
 			}
 			cancel()
 			lastErr = err
@@ -947,6 +971,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		cancel()
 		normalizeProviderSpecificToolCalls(resp, allowedToolNames(req))
+		if validationErr := validateProviderResponseToolContract(resp); validationErr != nil {
+			lastErr = fmt.Errorf("解析响应失败: typed provider 响应契约无效: %w", validationErr)
+			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
+			attempts = append(attempts, attempt)
+			s.logger.Warn("模型 %s 在提供商 %s 返回无效 typed 响应: %v", modelID, prov.Name(), lastErr)
+			registry.RecordCandidateFailure(prov.Name(), lastErr)
+			if shouldStopCandidateFallback(attempt.Category) {
+				break
+			}
+			continue
+		}
 		setResponseToolDiagnosticHeader(w, resp)
 		s.cacheChatResponse(resp)
 
@@ -1137,16 +1172,46 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 					}
 					continue
 				}
-				if converted, convErr := converter.OllamaChatResponse2OpenAI(body, req.Model); convErr == nil {
-					var typed provider.ChatResponse
-					if json.Unmarshal(converted, &typed) == nil {
-						normalizeProviderSpecificToolCalls(&typed, allowedToolNames(req))
-						setResponseToolDiagnosticHeader(w, &typed)
-						s.cacheChatResponse(&typed)
+				body = normalizeDSMLToolCallsInOllamaJSON(body, allowedToolNames(req))
+				body, protocolErr := normalizeOllamaNativeChatResponse(body)
+				if protocolErr != nil {
+					protocolErr = fmt.Errorf("解析 Ollama 响应失败: %w", protocolErr)
+				}
+				// typed 结构只用于验证 OpenAI 语义是否完整；成功后仍返回原生
+				// Ollama body，保留 thinking、耗时字段和 object arguments 等扩展。
+				if protocolErr == nil {
+					converted, convErr := converter.OllamaChatResponse2OpenAI(body, req.Model)
+					if convErr != nil {
+						protocolErr = fmt.Errorf("解析 Ollama 响应失败: %w", convErr)
+					} else {
+						var typed provider.ChatResponse
+						if unmarshalErr := json.Unmarshal(converted, &typed); unmarshalErr != nil {
+							protocolErr = fmt.Errorf("解析 Ollama 响应失败: %w", unmarshalErr)
+						} else {
+							normalizeProviderSpecificToolCalls(&typed, allowedToolNames(req))
+							if validationErr := validateProviderResponseToolContract(&typed); validationErr != nil {
+								// 这是代理对上游 Ollama 正文的契约解析失败，不是
+								// provider 网络/HTTP 失败；保持诊断分类可操作。
+								protocolErr = fmt.Errorf("解析 Ollama 响应失败: %w", validationErr)
+							}
+							if protocolErr == nil {
+								setResponseToolDiagnosticHeader(w, &typed)
+								s.cacheChatResponse(&typed)
+							}
+						}
 					}
 				}
-
-				body = normalizeDSMLToolCallsInOllamaJSON(body, allowedToolNames(req))
+				if protocolErr != nil {
+					lastErr = protocolErr
+					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, protocolErr)
+					attempts = append(attempts, attempt)
+					s.logger.Warn("模型 %s 在提供商 %s 返回无效 Ollama 响应: %v", modelID, prov.Name(), protocolErr)
+					registry.RecordCandidateFailure(prov.Name(), protocolErr)
+					if shouldStopCandidateFallback(attempt.Category) {
+						break
+					}
+					continue
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				w.Write(ensureOllamaContentFromThinking(body))
@@ -1169,6 +1234,17 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		normalizeProviderSpecificToolCalls(resp, allowedToolNames(req))
+		if validationErr := validateProviderResponseToolContract(resp); validationErr != nil {
+			lastErr = fmt.Errorf("解析响应失败: typed provider 响应契约无效: %w", validationErr)
+			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
+			attempts = append(attempts, attempt)
+			s.logger.Warn("模型 %s 在提供商 %s 返回无效 typed 响应: %v", modelID, prov.Name(), lastErr)
+			registry.RecordCandidateFailure(prov.Name(), lastErr)
+			if shouldStopCandidateFallback(attempt.Category) {
+				break
+			}
+			continue
+		}
 		setResponseToolDiagnosticHeader(w, resp)
 		s.cacheChatResponse(resp)
 
@@ -1253,14 +1329,26 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		if canAttemptAlternateChatMode(cfg, r.Context(), err) {
 			fallbackReq := cloneChatRequest(req)
 			fallbackReq.Stream = false
-			if resp, fallbackErr := prov.Chat(r.Context(), fallbackReq); fallbackErr == nil {
-				setProxyFallbackMode(w, "stream-to-nonstream")
+			resp, fallbackErr := prov.Chat(r.Context(), fallbackReq)
+			if fallbackErr == nil {
 				normalizeProviderSpecificToolCalls(resp, allowedToolNames(req))
-				setResponseToolDiagnosticHeader(w, resp)
-				s.cacheChatResponse(resp)
-				if writeErr := writeOpenAIChatResponseAsSSE(w, flusher, resp); writeErr == nil {
-					return nil
+				// fallback provider 可能直接返回 typed 响应；先完成和主路径
+				// 相同的工具契约校验，避免无效调用污染缓存或成功诊断头。
+				if validationErr := validateProviderResponseToolContract(resp); validationErr == nil {
+					setProxyFallbackMode(w, "stream-to-nonstream")
+					setResponseToolDiagnosticHeader(w, resp)
+					if writeErr := writeOpenAIChatResponseAsSSE(w, flusher, resp); writeErr == nil {
+						s.cacheChatResponse(resp)
+						return nil
+					} else {
+						fallbackErr = fmt.Errorf("写入备用非流式响应失败: %w", writeErr)
+					}
+				} else {
+					fallbackErr = fmt.Errorf("备用非流式响应契约无效: %w", validationErr)
 				}
+			}
+			if fallbackErr != nil {
+				return alternateChatModeFailure(err, fallbackErr)
 			}
 		}
 		return fmt.Errorf("openai stream error: %w", err)
@@ -1320,6 +1408,17 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 	}
 	if err := eventProcessor.finish(); err != nil {
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+	}
+	if !eventProcessor.receivedDone() && acc.finished {
+		// 上游已给出完整 finish_reason 但省略 [DONE] 时，补齐标准下游终态。
+		// 没有 finish_reason 的 EOF 仍由后续 validateOpenAIStreamCompletion 拒绝，
+		// 因此不会把真正截断的流伪装成成功。
+		if err := eventProcessor.consumeLine("data: [DONE]"); err != nil {
+			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+		}
+		if err := eventProcessor.finish(); err != nil {
+			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
+		}
 	}
 	if err := validateOpenAIStreamCompletion(acc, streamToolSanitizer); err != nil {
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
@@ -1794,6 +1893,19 @@ func canAttemptAlternateChatMode(cfg *config.AppConfig, ctx context.Context, err
 	// 流式/非流式互相兜底可能产生第二次上游请求，必须受同一个防御开关控制。
 	// 客户端已取消时不兜底，避免用户离开后代理继续消耗上游额度。
 	return proxyDefenseEnabled(cfg) && ctx != nil && ctx.Err() == nil && provider.ShouldAttemptAlternateChatMode(err)
+}
+
+// alternateChatModeFailure 保留备用模式和初始模式的完整失败链。
+// 备用模式是最后实际执行的步骤，放在错误前部并使用 %w，便于诊断分类和
+// errors.Is/As 反映最接近客户端结果的原因；初始错误仍保留用于现场还原。
+func alternateChatModeFailure(initialErr, fallbackErr error) error {
+	if fallbackErr == nil {
+		return initialErr
+	}
+	if initialErr == nil {
+		return fallbackErr
+	}
+	return fmt.Errorf("备用聊天模式失败: %w（初始模式错误: %v）", fallbackErr, initialErr)
 }
 
 func shouldStopCandidateFallback(category string) bool {

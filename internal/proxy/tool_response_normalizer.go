@@ -24,6 +24,7 @@ func newSyntheticToolCallID() string {
 // 实现会直接返回 object。这里用 encoding/json 生成稳定 JSON，禁止 fmt.Sprint(map)。
 func normalizeRawToolCalls(calls []any, allowedTools map[string]struct{}) (changed bool, complete bool) {
 	complete = len(calls) > 0
+	seenIDs := map[string]struct{}{}
 	for _, raw := range calls {
 		call, ok := raw.(map[string]any)
 		if !ok || call == nil {
@@ -32,6 +33,13 @@ func normalizeRawToolCalls(calls []any, allowedTools map[string]struct{}) (chang
 		}
 		if normalizeRawToolCallEnvelope(call) {
 			changed = true
+		}
+		if id, _ := call["id"].(string); strings.TrimSpace(id) != "" {
+			if _, duplicate := seenIDs[id]; duplicate {
+				call["id"] = newSyntheticToolCallID()
+				changed = true
+			}
+			seenIDs[call["id"].(string)] = struct{}{}
 		}
 		function, ok := call["function"].(map[string]any)
 		if !ok || function == nil {
@@ -86,11 +94,16 @@ func normalizeRawToolCallEnvelope(call map[string]any) bool {
 }
 
 func normalizeProviderToolCallEnvelopes(calls []provider.ToolCall) {
+	seenIDs := map[string]struct{}{}
 	for index := range calls {
 		call := &calls[index]
 		if strings.TrimSpace(call.ID) == "" {
 			call.ID = newSyntheticToolCallID()
 		}
+		if _, duplicate := seenIDs[call.ID]; duplicate {
+			call.ID = newSyntheticToolCallID()
+		}
+		seenIDs[call.ID] = struct{}{}
 		trimmedType := strings.TrimSpace(call.Type)
 		missingType := trimmedType == ""
 		isFunctionType := strings.EqualFold(trimmedType, "function")
@@ -138,6 +151,7 @@ func rawToolCallsComplete(calls []any) bool {
 	if len(calls) == 0 {
 		return false
 	}
+	seenIDs := map[string]struct{}{}
 	for _, raw := range calls {
 		call, _ := raw.(map[string]any)
 		if call == nil {
@@ -150,6 +164,10 @@ func rawToolCallsComplete(calls []any) bool {
 		if !hasValidEnvelope || !rawFunctionCallComplete(function) {
 			return false
 		}
+		if _, duplicate := seenIDs[id]; duplicate {
+			return false
+		}
+		seenIDs[id] = struct{}{}
 	}
 	return true
 }
@@ -186,6 +204,7 @@ func rawMessageHasResponsePayload(message map[string]any) bool {
 }
 
 func validateProviderToolCalls(calls []provider.ToolCall) error {
+	seenIDs := map[string]struct{}{}
 	for index, call := range calls {
 		if strings.TrimSpace(call.ID) == "" {
 			return fmt.Errorf("incomplete tool call at index %d: missing id", index)
@@ -193,6 +212,10 @@ func validateProviderToolCalls(calls []provider.ToolCall) error {
 		if call.Type != "function" {
 			return fmt.Errorf("incomplete tool call at index %d: invalid type %q", index, call.Type)
 		}
+		if _, duplicate := seenIDs[call.ID]; duplicate {
+			return fmt.Errorf("incomplete tool call at index %d: duplicate id %q", index, call.ID)
+		}
+		seenIDs[call.ID] = struct{}{}
 		if err := validateProviderFunctionCall(call.Function, index); err != nil {
 			return err
 		}
@@ -225,17 +248,15 @@ func normalizeOllamaStreamToolCallEnvelopes(chunk map[string]any, stableIDs map[
 		if rawIndex, ok := call["index"].(float64); ok {
 			callIndex = int(rawIndex)
 		}
-		id, _ := call["id"].(string)
-		if strings.TrimSpace(id) == "" {
-			id = stableIDs[callIndex]
-			if id == "" {
+		id := stableIDs[callIndex]
+		if id == "" {
+			id, _ = call["id"].(string)
+			if strings.TrimSpace(id) == "" || ollamaToolCallIDInUse(stableIDs, callIndex, id) {
 				id = newSyntheticToolCallID()
-				stableIDs[callIndex] = id
 			}
-			call["id"] = id
-		} else {
 			stableIDs[callIndex] = id
 		}
+		call["id"] = id
 		typeName, _ := call["type"].(string)
 		trimmedType := strings.TrimSpace(typeName)
 		missingType := trimmedType == ""
@@ -250,9 +271,29 @@ func normalizeOllamaStreamToolCallEnvelopes(chunk map[string]any, stableIDs map[
 	return nil
 }
 
+func ollamaToolCallIDInUse(stableIDs map[int]string, currentIndex int, id string) bool {
+	for index, existing := range stableIDs {
+		if index != currentIndex && existing == id {
+			return true
+		}
+	}
+	return false
+}
+
 func isOpenAITruncationFinishReason(finishReason string) bool {
 	switch strings.ToLower(strings.TrimSpace(finishReason)) {
 	case "length", "content_filter":
+		return true
+	default:
+		return false
+	}
+}
+
+// isToolCallFinishReason 表示客户端会据此等待可执行工具 payload 的结束原因。
+// 该判断必须和 modern/legacy 两套工具字段同时使用，不能单独把它当成功终态。
+func isToolCallFinishReason(finishReason string) bool {
+	switch strings.ToLower(strings.TrimSpace(finishReason)) {
+	case "tool_calls", "function_call":
 		return true
 	default:
 		return false
@@ -344,13 +385,25 @@ func validateOpenAIChatResponseBody(body []byte) error {
 			if !rawToolCallsComplete(calls) {
 				return fmt.Errorf("解析响应失败: incomplete tool_calls at choice %d", index)
 			}
+			if finishReason != "tool_calls" {
+				return fmt.Errorf("解析响应失败: choice %d tool_calls 的 finish_reason 必须为 tool_calls，实际为 %q", index, finishReason)
+			}
 			hasToolCall = true
 		}
 		if hasLegacyCall {
 			if !rawFunctionCallComplete(functionCall) {
 				return fmt.Errorf("解析响应失败: incomplete function_call at choice %d", index)
 			}
+			if finishReason != "function_call" {
+				return fmt.Errorf("解析响应失败: choice %d function_call 的 finish_reason 必须为 function_call，实际为 %q", index, finishReason)
+			}
 			hasToolCall = true
+		}
+		if finishReason == "tool_calls" && !hasModernCalls {
+			return fmt.Errorf("解析响应失败: choice %d 的 finish_reason=tool_calls 但没有 tool_calls", index)
+		}
+		if finishReason == "function_call" && !hasLegacyCall {
+			return fmt.Errorf("解析响应失败: choice %d 的 finish_reason=function_call 但没有 function_call", index)
 		}
 		hasPayload := rawMessageHasResponsePayload(message)
 		isEmptySuccess := !hasToolCall && !isOpenAITruncationFinishReason(finishReason) && !hasPayload

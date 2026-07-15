@@ -303,6 +303,28 @@ func TestInjectCachedReasoningByToolCallKey(t *testing.T) {
 	}
 }
 
+func TestInjectCachedReasoningRetainsLegacyFunctionCallHistory(t *testing.T) {
+	server := &Server{
+		config:         &config.AppConfig{},
+		reasoningCache: newReasoningCache(),
+	}
+	req := &provider.ChatRequest{
+		Messages: []provider.Message{{
+			Role: "assistant",
+			FunctionCall: &provider.FunctionCall{
+				Name:      "create_file",
+				Arguments: `{"path":"a.txt"}`,
+			},
+		}},
+	}
+
+	server.injectCachedReasoning(req)
+
+	if len(req.Messages) != 1 || req.Messages[0].FunctionCall == nil {
+		t.Fatalf("legacy function_call history was dropped: %#v", req.Messages)
+	}
+}
+
 func TestTransformRequestDoesNotInjectCachedReasoningForUseAIGateway(t *testing.T) {
 	server := &Server{config: &config.AppConfig{}, reasoningCache: newReasoningCache()}
 	server.reasoningCache.Set("assistant:0", "cached reasoning")

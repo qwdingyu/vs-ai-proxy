@@ -205,7 +205,8 @@ func TestOpenAIProviderChatStreamConvertsMaxOutputTokensForChatCompletions(t *te
 		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
+		// 故意声明错误 Content-Type，覆盖真实兼容网关未正确标记 SSE 的情况。
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
@@ -533,6 +534,58 @@ func TestCollectOpenAIChatSSEAggregatesLegacyFunctionCall(t *testing.T) {
 	}
 	if got := choice.Message.FunctionCall.Arguments; got != `{"path":"a.txt"}` {
 		t.Fatalf("arguments = %q, want complete JSON object", got)
+	}
+}
+
+func TestOpenAIProviderChatSSEStopsReadingAfterDone(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Join([]string{
+			`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, "\n")+"\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		// 模拟部分网关在应用层 DONE 后仍保持 HTTP body；provider 必须
+		// 以 DONE 结束聚合，不能把传输层 EOF 当成协议终态。
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability(
+		"openai",
+		"openai",
+		"sk-test",
+		upstream.URL,
+		true,
+		150*time.Millisecond,
+	)
+	result := make(chan struct {
+		resp *ChatResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := prov.Chat(context.Background(), &ChatRequest{
+			Model:    "gpt-test",
+			Messages: []Message{{Role: "user", Content: "hello"}},
+		})
+		result <- struct {
+			resp *ChatResponse
+			err  error
+		}{resp: resp, err: err}
+	}()
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("Chat returned error after [DONE]: %v", got.err)
+		}
+		if got.resp == nil || got.resp.Choices[0].Message.Content != "ok" {
+			t.Fatalf("unexpected response after [DONE]: %#v", got.resp)
+		}
+	case <-time.After(800 * time.Millisecond):
+		t.Fatal("Chat waited for transport EOF after [DONE]")
 	}
 }
 
@@ -954,7 +1007,7 @@ func TestOpenAIProviderTimeoutReportsWaitingResponseHeaders(t *testing.T) {
 		"sk-test",
 		upstream.URL,
 		true,
-		time.Second,
+		5*time.Second,
 	)
 	_, err := prov.ChatStream(context.Background(), &ChatRequest{
 		Model: "gpt-5.6-sol",
@@ -992,7 +1045,7 @@ func TestOpenAIProviderTraceResetsForRedirectedHop(t *testing.T) {
 		"sk-test",
 		upstream.URL,
 		true,
-		100*time.Millisecond,
+		5*time.Second,
 	)
 	_, err := prov.ChatStream(context.Background(), &ChatRequest{
 		Model:    "gpt-test",
@@ -1376,6 +1429,44 @@ func TestOllamaProviderBuildsNativeChatRequest(t *testing.T) {
 	}
 	if _, ok := options["custom_option"]; !ok {
 		t.Fatalf("custom_option was not preserved: %#v", options)
+	}
+}
+
+func TestOllamaProviderPreservesGenericToolControlFields(t *testing.T) {
+	prov := NewOllamaProvider("ollama", "http://localhost:11434", true, time.Second)
+	req := prov.buildChatRequest(&ChatRequest{
+		Model: "qwen3",
+		Extra: map[string]json.RawMessage{
+			"functions":           []byte(`[{"name":"legacy_tool","description":"legacy","parameters":{"type":"object"}}]`),
+			"function_call":       []byte(`{"name":"legacy_tool"}`),
+			"tool_choice":         []byte(`{"type":"function","function":{"name":"legacy_tool"}}`),
+			"parallel_tool_calls": []byte(`true`),
+		},
+		Stop: []string{"END"},
+	}, false)
+
+	tools, ok := req["tools"].([]Tool)
+	if !ok || len(tools) != 1 || tools[0].Function.Name != "legacy_tool" {
+		t.Fatalf("legacy functions were not converted to tools: %#v", req["tools"])
+	}
+	if got, ok := req["tool_choice"].(map[string]any); !ok || got["type"] != "function" {
+		t.Fatalf("tool_choice was not preserved: %#v", req["tool_choice"])
+	}
+	if got, ok := req["parallel_tool_calls"].(bool); !ok || !got {
+		t.Fatalf("parallel_tool_calls was not preserved: %#v", req["parallel_tool_calls"])
+	}
+	if got, ok := req["function_call"].(map[string]any); !ok || got["name"] != "legacy_tool" {
+		t.Fatalf("function_call was not preserved: %#v", req["function_call"])
+	}
+	options, ok := req["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("Ollama options were not created: %#v", req["options"])
+	}
+	if got, ok := options["stop"].([]string); !ok || len(got) != 1 || got[0] != "END" {
+		t.Fatalf("stop was not mapped to options.stop: %#v", options["stop"])
+	}
+	if _, leaked := req["stop"]; leaked {
+		t.Fatalf("OpenAI stop leaked to unsupported Ollama top-level field: %#v", req)
 	}
 }
 

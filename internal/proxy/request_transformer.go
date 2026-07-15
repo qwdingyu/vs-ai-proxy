@@ -79,10 +79,19 @@ func shouldDropAssistantPlaceholder(msg provider.Message) bool {
 	if len(msg.ToolCalls) > 0 {
 		return false
 	}
+	if msg.FunctionCall != nil {
+		return false
+	}
 	if strings.TrimSpace(msg.Reasoning) != "" {
 		return false
 	}
+	if strings.TrimSpace(msg.Refusal) != "" {
+		return false
+	}
 	if len(msg.ContentRaw) > 0 {
+		return false
+	}
+	if len(msg.Extra) > 0 {
 		return false
 	}
 	return strings.TrimSpace(msg.Content) == ""

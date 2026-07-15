@@ -93,6 +93,8 @@ STREAMING_OLLAMA_OK
 - 覆盖 OpenAI/Ollama 空响应、无终态 EOF，以及截断响应同时残留 modern/legacy 调用的防执行规则。
 - 覆盖 OpenAI/Ollama 双向转换的逻辑多行 SSE、synthetic finish、截断/残缺工具尾部和 typed fallback 空响应。
 - 覆盖有无空行的 `[DONE]` 后上游延迟 EOF、DSML 探测终态、SSE 元数据含 `data:`、refusal-only 合法响应、空 legacy functions 普通聊天回归和独立 wire 客户端解析。
+- 覆盖非流式 SSE 在 `[DONE]` 后不等待 EOF、无工具 payload 的伪工具终态降级、跨分片工具 ID 稳定和重复 ID 修复。
+- 覆盖 Ollama `options.stop` 映射、原生非流 `done=true` 门禁、实际 raw body 工具参数/终态规范化，以及无效 typed fallback 不污染缓存和诊断。
 - 再运行 OpenAI/Ollama 本地流式冒烟。
 
 运行：

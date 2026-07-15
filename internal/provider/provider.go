@@ -260,12 +260,9 @@ func CollectOpenAIChatSSE(reader io.Reader, model string, maxBytes int64) (*Chat
 	if maxBytes <= 0 {
 		maxBytes = maxProviderResponseBodyBytes
 	}
-	body, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	body, err := readOpenAIChatSSEBodyUntilDone(reader, maxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("读取 SSE 响应失败: %w", err)
-	}
-	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("%w: 最大允许 %d 字节", ErrOpenAIStreamTooLarge, maxBytes)
 	}
 	body = bytes.TrimPrefix(body, []byte{0xEF, 0xBB, 0xBF})
 	if !bytes.Contains(body, []byte("data:")) {
@@ -422,6 +419,41 @@ func CollectOpenAIChatSSE(reader io.Reader, model string, maxBytes int64) (*Chat
 			FinishReason: acc.finishReason,
 		}},
 	}, nil
+}
+
+// readOpenAIChatSSEBodyUntilDone 以应用层 data:[DONE] 作为读取终点。
+// 有些网关发送 DONE 后会复用或延迟关闭 HTTP body；如果这里继续等待 EOF，
+// 非流式 SSE 兜底会在已有完整响应时错误触发 timeout。ReadString 能处理超过
+// Scanner 默认上限的单行，累计字节仍受统一 maxBytes 限制。
+func readOpenAIChatSSEBodyUntilDone(reader io.Reader, maxBytes int64) ([]byte, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("SSE reader 不能为空")
+	}
+	var body bytes.Buffer
+	buffered := bufio.NewReaderSize(io.LimitReader(reader, maxBytes+1), 64*1024)
+	for {
+		line, err := buffered.ReadString('\n')
+		if len(line) > 0 {
+			if int64(body.Len()+len(line)) > maxBytes {
+				return nil, fmt.Errorf("%w: 最大允许 %d 字节", ErrOpenAIStreamTooLarge, maxBytes)
+			}
+			body.WriteString(line)
+			if isOpenAIChatSSEDoneLine(line) {
+				return body.Bytes(), nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return body.Bytes(), nil
+			}
+			return nil, err
+		}
+	}
+}
+
+func isOpenAIChatSSEDoneLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "data:") && strings.TrimSpace(trimmed[5:]) == "[DONE]"
 }
 
 // openAIChatSSEAccumulator 是非流请求收到 SSE 时的最小协议状态机。
@@ -734,7 +766,15 @@ func (p *OpenAIProvider) doChatRaw(ctx context.Context, body []byte) ([]byte, er
 	}
 	defer resp.Body.Close()
 
-	respBody, err := readProviderResponseBody(resp)
+	var respBody []byte
+	if resp.StatusCode == http.StatusOK {
+		// stream=false 的兼容上游也可能返回 SSE，并且 Content-Type 可能缺失
+		// 或错误；成功正文统一用有界 reader 读取。普通 JSON 仍读到 EOF，
+		// SSE 则在应用层 DONE 处停止，不依赖响应头猜测协议。
+		respBody, err = readOpenAIChatSSEBodyUntilDone(resp.Body, maxProviderResponseBodyBytes)
+	} else {
+		respBody, err = readProviderResponseBody(resp)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败（HTTP %d）: %w", resp.StatusCode, err)
 	}
@@ -1499,6 +1539,11 @@ func (p *OllamaProvider) buildChatRequest(req *ChatRequest, stream bool) map[str
 	if strings.TrimSpace(req.ReasoningEffort) != "" {
 		options["reasoning_effort"] = req.ReasoningEffort
 	}
+	if len(req.Stop) > 0 {
+		// Ollama 原生 ChatRequest 把停止词定义在 options.stop，而不是请求顶层。
+		// 放错层级时字段虽然还在 JSON 中，却会被原生 Ollama 静默忽略。
+		options["stop"] = req.Stop
+	}
 
 	ollamaReq := map[string]any{
 		"model":    req.Model,
@@ -1510,8 +1555,51 @@ func (p *OllamaProvider) buildChatRequest(req *ChatRequest, stream bool) map[str
 	}
 	if len(req.Tools) > 0 {
 		ollamaReq["tools"] = req.Tools
+	} else if tools := legacyFunctionsToTools(req.Extra["functions"]); len(tools) > 0 {
+		// Visual Studio 仍可能发送 legacy functions；Ollama 原生接口只接受
+		// tools，因此在 provider 边界做一次结构化转换，避免声明在中转时消失。
+		ollamaReq["tools"] = tools
+	}
+	for _, field := range []string{"tool_choice", "parallel_tool_calls", "function_call"} {
+		if value, ok := decodeRequestExtraValue(req.Extra[field]); ok {
+			// 保留工具选择/并行控制和 legacy 强制调用语义；支持该字段的
+			// Ollama-compatible 网关可以直接使用，不支持的原生版本会忽略未知字段。
+			ollamaReq[field] = value
+		}
 	}
 	return ollamaReq
+}
+
+// legacyFunctionsToTools 把 OpenAI legacy functions 转成 Ollama 支持的 tools。
+// 非法或空声明不在这里猜测修复，避免生成名称为空、客户端无法执行的工具。
+func legacyFunctionsToTools(raw json.RawMessage) []Tool {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	var functions []ToolFunc
+	if err := json.Unmarshal(raw, &functions); err != nil {
+		return nil
+	}
+	tools := make([]Tool, 0, len(functions))
+	for _, function := range functions {
+		// 不静默丢弃缺少 name 的声明；让上游按原始工具契约返回明确错误，
+		// 否则请求中的 functions 数量会在 provider 边界无提示地改变。
+		tools = append(tools, Tool{Type: "function", Function: function})
+	}
+	return tools
+}
+
+// decodeRequestExtraValue 将已由 ChatRequest 保留的扩展字段恢复为结构化值。
+// 返回 false 表示字段缺失、为 null 或无法解码，调用方不应向上游发送占位值。
+func decodeRequestExtraValue(raw json.RawMessage) (any, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, false
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false
+	}
+	return value, true
 }
 
 func messageToMap(msg Message) map[string]any {

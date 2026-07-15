@@ -47,6 +47,30 @@ type fakeProvider struct {
 	typedChatResp *provider.ChatResponse
 }
 
+// typedOnlyProvider 刻意不实现 ChatRaw，用于覆盖 server 直接消费 Provider.Chat
+// 的协议边界；否则 fakeProvider 的 raw 兜底会把非法 typed 响应提前转换成 JSON，
+// 测不到非流式 typed provider 的最终校验。
+type typedOnlyProvider struct {
+	name string
+	resp *provider.ChatResponse
+}
+
+func (p *typedOnlyProvider) Name() string { return p.name }
+
+func (p *typedOnlyProvider) IsEnabled() bool { return true }
+
+func (p *typedOnlyProvider) Chat(context.Context, *provider.ChatRequest) (*provider.ChatResponse, error) {
+	return p.resp, nil
+}
+
+func (p *typedOnlyProvider) ChatStream(context.Context, *provider.ChatRequest) (io.ReadCloser, error) {
+	return nil, errors.New("typed-only provider does not stream")
+}
+
+func (p *typedOnlyProvider) ListModels(context.Context) ([]string, error) {
+	return []string{"gpt-5.5"}, nil
+}
+
 func newFakeProvider(name string, enabled bool, models []string, resp *fakeChatResponse, streamBody string) *fakeProvider {
 	return &fakeProvider{
 		name:       name,
@@ -148,6 +172,28 @@ func (r *errAfterEOFReader) Read(p []byte) (int, error) {
 
 func (r *errAfterEOFReader) Close() error {
 	return nil
+}
+
+// failingResponseWriter 模拟下游在代理提交响应头后立即断开连接。
+// 该 writer 只用于验证兜底响应写失败时不会把未送达内容写入 reasoning cache。
+type failingResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *failingResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingResponseWriter) WriteHeader(status int) {
+	w.status = status
+}
+
+func (w *failingResponseWriter) Write([]byte) (int, error) {
+	return 0, errors.New("client disconnected while writing response")
 }
 
 // -----------------------------------------------------------------------------
@@ -660,6 +706,32 @@ func TestOpenAIChatFallsBackToStreamWhenNonStreamUpstreamFails(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatFallbackDoesNotCacheWhenResponseWriteFails(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"fallback"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+	prov.rawErr = errors.New(`API 错误 503: {"error":{"message":"Service temporarily unavailable"}}`)
+	server := newOpenServer(prov)
+	server.reasoningCache = newReasoningCache()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	w := &failingResponseWriter{}
+
+	server.handleChatCompletions(w, req)
+
+	if w.status != http.StatusOK {
+		t.Fatalf("fallback should commit HTTP 200 before downstream write: status=%d", w.status)
+	}
+	if _, ok := server.reasoningCache.TryGet("assistant:0"); ok {
+		t.Fatal("undelivered fallback response polluted reasoning cache")
+	}
+}
+
 func TestOpenAIChatDoesNotFallbackToStreamForClientError(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, `data: [DONE]`+"\n")
 	prov.rawErr = errors.New(`API 错误 400: {"error":{"message":"invalid tools"}}`)
@@ -781,6 +853,97 @@ func TestOpenAIStreamFallbackPreservesLegacyFunctionCall(t *testing.T) {
 		!strings.Contains(body, `"arguments":"{\"path\":\"a.txt\",\"content\":\"ok\"}"`) ||
 		!strings.Contains(body, `"finish_reason":"function_call"`) {
 		t.Fatalf("legacy function_call was lost by stream fallback: %s", body)
+	}
+}
+
+func TestOpenAIStreamFallbackDoesNotCacheInvalidTypedToolResponse(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
+	prov.streamErr = errors.New(`API 错误 503: {"error":{"message":"Service temporarily unavailable"}}`)
+	prov.typedChatResp = &provider.ChatResponse{
+		Model: "gpt-5.5",
+		Choices: []provider.Choice{{
+			Index: 0,
+			Message: provider.Message{
+				Role:      "assistant",
+				Reasoning: "invalid fallback must not enter reasoning cache",
+				ToolCalls: []provider.ToolCall{{
+					ID:   "call-invalid",
+					Type: "computer",
+					Function: provider.FunctionCall{
+						Name:      "create_file",
+						Arguments: `{}`,
+					},
+				}},
+			},
+			FinishReason: "tool_calls",
+		}},
+	}
+	server := newOpenServer(prov)
+	server.reasoningCache = newReasoningCache()
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"create a file"}],
+		"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}],
+		"stream":true
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("invalid fallback response returned HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Fallback-Mode"); got != "" {
+		t.Fatalf("invalid fallback response exposed fallback header %q", got)
+	}
+	if !strings.Contains(rec.Body.String(), "备用非流式响应契约无效") {
+		t.Fatalf("fallback failure detail was lost: %s", rec.Body.String())
+	}
+	if _, ok := server.reasoningCache.TryGet("assistant:0"); ok {
+		t.Fatal("invalid fallback response polluted reasoning cache")
+	}
+}
+
+func TestTypedProviderInvalidToolResponseIsRejectedBeforeHTTP200(t *testing.T) {
+	prov := &typedOnlyProvider{name: "typed-only", resp: &provider.ChatResponse{
+		Model: "gpt-5.5",
+		Choices: []provider.Choice{{
+			Index: 0,
+			Message: provider.Message{
+				Role: "assistant",
+				ToolCalls: []provider.ToolCall{{
+					ID:   "call-invalid",
+					Type: "computer",
+					Function: provider.FunctionCall{
+						Name:      "create_file",
+						Arguments: `{"path":"a.txt"}`,
+					},
+				}},
+			},
+			FinishReason: "tool_calls",
+		}},
+	}}
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"create a file"}],
+		"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}]
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("invalid typed tool response returned HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "call-invalid") {
+		t.Fatalf("invalid tool response leaked to client: %s", rec.Body.String())
 	}
 }
 
@@ -2578,5 +2741,108 @@ func TestOllamaChatNativeProviderPreservesRawResponseFields(t *testing.T) {
 	}
 	if message["content"] != "reasoned" {
 		t.Fatalf("content should be filled from thinking, got %#v", message["content"])
+	}
+}
+
+func TestOllamaChatNativeRawInvalidToolResponseIsRejected(t *testing.T) {
+	prov := newFakeProvider("ollama", true, []string{"llama"}, nil, "")
+	prov.rawBody = []byte(`{
+		"model":"llama",
+		"message":{"role":"assistant","content":"","tool_calls":[{
+			"id":"call-invalid","type":"function",
+			"function":{"name":"create_file","arguments":"{\"path\":"}
+		}]},
+		"done":true,
+		"done_reason":"tool_calls"
+	}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/chat", server.handleOllamaChat)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat",
+		strings.NewReader(`{"model":"llama","messages":[{"role":"user","content":"create"}]}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("invalid Ollama tool response returned HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "call-invalid") {
+		t.Fatalf("invalid Ollama tool response leaked to client: %s", rec.Body.String())
+	}
+}
+
+func TestOllamaChatNativeRawNormalizesActualToolBody(t *testing.T) {
+	prov := newFakeProvider("ollama", true, []string{"llama"}, nil, "")
+	prov.rawBody = []byte(`{
+		"model":"llama",
+		"message":{"role":"assistant","content":"", "tool_calls":[
+			{"id":"same","function":{"name":"create_file","arguments":"{\"path\":\"a.txt\"}"}},
+			{"id":"same","function":{"name":"create_file","arguments":{"path":"b.txt"}}}
+		]},
+		"done":true,
+		"done_reason":"stop",
+		"total_duration":123
+	}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/chat", server.handleOllamaChat)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{
+		"model":"llama",
+		"messages":[{"role":"user","content":"create files"}],
+		"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}]
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("normalized native Ollama response returned HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode normalized native Ollama response: %v", err)
+	}
+	if body["done_reason"] != "tool_calls" || body["total_duration"] != float64(123) {
+		t.Fatalf("native terminal fields were not normalized/preserved: %#v", body)
+	}
+	message := body["message"].(map[string]any)
+	calls := message["tool_calls"].([]any)
+	if len(calls) != 2 {
+		t.Fatalf("tool call count = %d, want 2", len(calls))
+	}
+	firstID := calls[0].(map[string]any)["id"]
+	secondID := calls[1].(map[string]any)["id"]
+	if firstID == secondID {
+		t.Fatalf("duplicate native tool IDs were not repaired: %#v", calls)
+	}
+	for index, raw := range calls {
+		function := raw.(map[string]any)["function"].(map[string]any)
+		if _, ok := function["arguments"].(map[string]any); !ok {
+			t.Fatalf("native tool_calls[%d].function.arguments is not an object: %#v", index, function["arguments"])
+		}
+	}
+}
+
+func TestOllamaChatNativeRawIncompleteTerminalIsRejected(t *testing.T) {
+	prov := newFakeProvider("ollama", true, []string{"llama"}, nil, "")
+	prov.rawBody = []byte(`{
+		"model":"llama",
+		"message":{"role":"assistant","content":"partial"},
+		"done":false
+	}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/chat", server.handleOllamaChat)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"llama","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("incomplete native Ollama response returned HTTP %d: %s", rec.Code, rec.Body.String())
 	}
 }

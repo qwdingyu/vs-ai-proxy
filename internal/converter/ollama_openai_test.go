@@ -186,6 +186,7 @@ func TestOllamaChatResponse2OpenAIConvertsObjectToolArgumentsToJSONString(t *tes
 func TestOpenAI2OllamaChatRequestPreservesToolsAndToolMessages(t *testing.T) {
 	out, err := OpenAI2OllamaChatRequest([]byte(`{
 		"model":"glm-5.2",
+		"temperature":0.25,
 		"messages":[
 			{"role":"user","content":"create a file"},
 			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"create_file","arguments":"{\"path\":\"a.txt\"}"}}]},
@@ -193,7 +194,8 @@ func TestOpenAI2OllamaChatRequestPreservesToolsAndToolMessages(t *testing.T) {
 		],
 		"tools":[{"type":"function","strict":true,"function":{"name":"create_file","description":"Create file","parameters":{"type":"object"}}}],
 		"tool_choice":"auto",
-		"parallel_tool_calls":true
+		"parallel_tool_calls":true,
+		"stop":["END"]
 	}`))
 	if err != nil {
 		t.Fatalf("OpenAI2OllamaChatRequest returned error: %v", err)
@@ -210,6 +212,25 @@ func TestOpenAI2OllamaChatRequestPreservesToolsAndToolMessages(t *testing.T) {
 	tool := tools[0].(map[string]any)
 	if tool["strict"] != true {
 		t.Fatalf("tool strict flag not preserved: %s", string(out))
+	}
+	if choice, ok := got["tool_choice"].(string); !ok || choice != "auto" {
+		t.Fatalf("tool_choice = %#v, want auto", got["tool_choice"])
+	}
+	if parallel, ok := got["parallel_tool_calls"].(bool); !ok || !parallel {
+		t.Fatalf("parallel_tool_calls = %#v, want true", got["parallel_tool_calls"])
+	}
+	options, ok := got["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("options = %#v, want object", got["options"])
+	}
+	if stop, ok := options["stop"].([]any); !ok || len(stop) != 1 || stop[0] != "END" {
+		t.Fatalf("options.stop = %#v, want END", options["stop"])
+	}
+	if options["temperature"] != 0.25 {
+		t.Fatalf("options.temperature = %#v, want 0.25", options["temperature"])
+	}
+	if _, leaked := got["stop"]; leaked {
+		t.Fatalf("OpenAI stop leaked to unsupported Ollama top-level field: %s", string(out))
 	}
 	messages := got["messages"].([]any)
 	toolMessage := messages[2].(map[string]any)

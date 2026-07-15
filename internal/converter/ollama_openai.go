@@ -108,15 +108,33 @@ func OpenAI2OllamaChatRequest(body []byte) ([]byte, error) {
 		"stream":   getBool(src, "stream"),
 	}
 
-	if v, ok := src["options"]; ok && v != nil {
-		dst["options"] = v
-	} else if hasOptions(src) {
-		dst["options"] = buildOptions(src)
+	// OpenAI 的采样参数和 stop 必须映射到 Ollama options；stop 放在请求
+	// 顶层会被原生 Ollama 忽略。显式 options 的值优先于顶层兼容字段。
+	options := buildOptions(src)
+	if rawOptions, exists := src["options"]; exists && rawOptions != nil {
+		explicitOptions, ok := rawOptions.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("convert openai to ollama chat request failed: options must be an object")
+		}
+		for key, value := range explicitOptions {
+			options[key] = value
+		}
+	}
+	if stop, exists := src["stop"]; exists && stop != nil {
+		options["stop"] = stop
+	}
+	if len(options) > 0 {
+		dst["options"] = options
 	}
 	if v, ok := src["tools"]; ok && v != nil {
 		dst["tools"] = v
 	} else if functions, ok := src["functions"]; ok && functions != nil {
 		dst["tools"] = toolsFromLegacyFunctions(functions)
+	}
+	for _, field := range []string{"tool_choice", "parallel_tool_calls", "function_call"} {
+		if value, ok := src[field]; ok && value != nil {
+			dst[field] = value
+		}
 	}
 
 	out, err := json.Marshal(dst)
@@ -267,11 +285,6 @@ func coalesceString(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func hasOptions(src map[string]any) bool {
-	_, ok := src["options"]
-	return ok
 }
 
 func buildOptions(src map[string]any) map[string]any {

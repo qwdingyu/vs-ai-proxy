@@ -667,14 +667,14 @@ func TestNormalizeOpenAIStreamLineAllowsArgumentOnlyToolCallChunks(t *testing.T)
 	}
 }
 
-func TestNormalizeOpenAIStreamLinePreservesToolCallsFinishWithoutObservedName(t *testing.T) {
+func TestNormalizeOpenAIStreamLineDowngradesToolFinishWithoutObservedPayload(t *testing.T) {
 	sanitizer := newOpenAIStreamToolSanitizer(map[string]struct{}{"create_file": {}})
 	line := `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`
 
 	normalized := normalizeOpenAIStreamLineForVisualStudioWithToolState(line, sanitizer)
 
-	if !strings.Contains(normalized, `"finish_reason":"tool_calls"`) {
-		t.Fatalf("stable mode must not downgrade tool_calls finish_reason without observed name: %s", normalized)
+	if !strings.Contains(normalized, `"finish_reason":"stop"`) || strings.Contains(normalized, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("tool finish without observed payload must become stop: %s", normalized)
 	}
 }
 
