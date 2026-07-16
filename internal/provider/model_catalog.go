@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -457,7 +458,7 @@ func (c *ModelCatalog) loadModelSelectionsFromFS(fsys fs.FS, dir string) {
 			continue
 		}
 
-		data, err := fs.ReadFile(fsys, filepath.Join(dir, entry.Name()))
+		data, err := fs.ReadFile(fsys, path.Join(dir, entry.Name()))
 		if err != nil {
 			continue
 		}
