@@ -8,7 +8,16 @@ package proxy
 // 3. 只做语义兼容映射：文件语义工具不会降级到 shell/powershell，避免参数 schema 不匹配导致“工具已调用但无法运行”。
 var copilotToolCatalog = map[string]copilotToolFamily{
 	"planning": {
-		Canonical: []string{"adapt_plan", "ask_question", "clarify_requirements", "detect_memories"},
+		Canonical: []string{
+			"adapt_plan",
+			"ask_question",
+			"clarify_requirements",
+			"detect_memories",
+			"finish_plan",
+			"record_observation",
+			"signal_plan_ready",
+			"update_plan_progress",
+		},
 		Aliases: map[string][]string{
 			"update_plan":        {"adapt_plan"},
 			"plan":               {"adapt_plan"},
@@ -59,7 +68,7 @@ var copilotToolCatalog = map[string]copilotToolFamily{
 		},
 	},
 	"file_write": {
-		Canonical: []string{"create_file", "edit_file", "apply_patch"},
+		Canonical: []string{"create_file", "edit_file", "edit_files", "apply_patch"},
 		Aliases: map[string][]string{
 			"write_file":      {"create_file", "edit_file", "apply_patch"},
 			"save_file":       {"create_file", "edit_file", "apply_patch"},
@@ -114,6 +123,37 @@ var copilotToolCatalog = map[string]copilotToolFamily{
 			"find_symbol":   {"find_symbol", "code_search", "grep_search"},
 			"search_symbol": {"find_symbol", "code_search", "grep_search"},
 		},
+	},
+	"vs_workspace": {
+		Canonical: []string{
+			"get_background_terminal_output",
+			"get_errors",
+			"get_files_in_project",
+			"get_output_window_logs",
+			"get_projects_in_solution",
+			"get_tests",
+			"get_web_pages",
+		},
+		Aliases: map[string][]string{},
+	},
+	"vs_agents": {
+		Canonical: []string{
+			"profiler_agent",
+			"search_agent",
+			"start_modernization",
+		},
+		Aliases: map[string][]string{},
+	},
+	"nuget": {
+		Canonical: []string{
+			"fix_vulnerable_packages",
+			"get_latest_package_version",
+			"get_package_context",
+			"review_supply_chain_security",
+			"update_package_version",
+			"upgrade_packages_to_latest",
+		},
+		Aliases: map[string][]string{},
 	},
 }
 
