@@ -345,6 +345,7 @@ func applyEnvOverrides(cfg *AppConfig) {
 // Manager 管理应用配置的加载和保存
 type Manager struct {
 	mu         sync.RWMutex
+	saveMu     sync.Mutex
 	configPath string
 	config     *AppConfig
 }
@@ -398,6 +399,9 @@ func (m *Manager) ConfigPath() string {
 
 // Save 保存配置
 func (m *Manager) Save(cfg *AppConfig) error {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
 	NormalizeForRuntime(cfg)
 	next := CloneAppConfig(cfg)
 	if err := m.save(next); err != nil {
@@ -411,6 +415,9 @@ func (m *Manager) Save(cfg *AppConfig) error {
 
 // Reload 从磁盘重新加载配置并更新内存快照。
 func (m *Manager) Reload() (*AppConfig, error) {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
 	cfg, err := m.load()
 	if err != nil {
 		return nil, err

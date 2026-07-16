@@ -29,6 +29,7 @@ type ChatRequest struct {
 	TopP            *float64                   `json:"top_p,omitempty"`
 	TopK            *int                       `json:"top_k,omitempty"`
 	MaxTokens       *int                       `json:"max_tokens,omitempty"`
+	ContextLength   *int                       `json:"-"`
 	ReasoningEffort string                     `json:"reasoning_effort,omitempty"`
 	Stream          bool                       `json:"stream"`
 	Tools           []Tool                     `json:"tools,omitempty"`
@@ -1534,7 +1535,10 @@ func (p *OllamaProvider) buildChatRequest(req *ChatRequest, stream bool) map[str
 		options["top_k"] = *req.TopK
 	}
 	if req.MaxTokens != nil {
-		options["max_tokens"] = *req.MaxTokens
+		options["num_predict"] = *req.MaxTokens
+	}
+	if req.ContextLength != nil {
+		options["num_ctx"] = *req.ContextLength
 	}
 	if strings.TrimSpace(req.ReasoningEffort) != "" {
 		options["reasoning_effort"] = req.ReasoningEffort

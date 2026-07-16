@@ -40,6 +40,7 @@ type Options struct {
 	Owner          string
 	Repo           string
 	APIBaseURL     string
+	ManifestURL    string
 	AuthToken      string
 	HTTPClient     *http.Client
 	ExecutablePath string
@@ -91,6 +92,7 @@ type releaseAsset struct {
 
 func Check(ctx context.Context, opts Options) (CheckResult, error) {
 	opts = normalizeOptions(opts)
+	sourceName := updateSourceName(opts)
 	current := normalizeVersion(opts.CurrentVersion)
 	if current == "" || current == "dev" {
 		return CheckResult{CurrentVersion: opts.CurrentVersion}, errors.New("当前版本不是正式 release 版本，无法安全比较更新")
@@ -101,7 +103,7 @@ func Check(ctx context.Context, opts Options) (CheckResult, error) {
 		return CheckResult{}, err
 	}
 	if release.TagName == "" {
-		return CheckResult{}, errors.New("GitHub latest release 响应缺少 tag_name")
+		return CheckResult{}, fmt.Errorf("%s 响应缺少 tag_name", sourceName)
 	}
 
 	latest := normalizeVersion(release.TagName)
@@ -138,15 +140,23 @@ func Check(ctx context.Context, opts Options) (CheckResult, error) {
 	}
 	if result.UpdateAvailable && result.AssetURL == "" {
 		return result, fmt.Errorf(
-			"发现新版本 %s，但没有匹配 %s/%s 的发布资产；期望资产前缀 %q；Release 当前资产: %s；如果刚发布新版本，可能是 GitHub Release 资产/CDN 尚未完全可见，请稍后重试",
+			"发现新版本 %s，但没有匹配 %s/%s 的发布资产；期望资产前缀 %q；Release 当前资产: %s；如果刚发布新版本，可能是 %s 资产/CDN 尚未完全可见，请稍后重试",
 			release.TagName,
 			opts.GOOS,
 			opts.GOARCH,
 			expectedAssetPrefix(opts.GOOS, opts.GOARCH, latest),
 			releaseAssetNames(release.Assets),
+			sourceName,
 		)
 	}
 	return result, nil
+}
+
+func updateSourceName(opts Options) string {
+	if strings.TrimSpace(opts.ManifestURL) != "" {
+		return "更新 manifest"
+	}
+	return "GitHub Release"
 }
 
 func expectedAssetPrefix(goos, goarch, version string) string {
@@ -380,6 +390,9 @@ func normalizeOptions(opts Options) Options {
 	if opts.APIBaseURL == "" {
 		opts.APIBaseURL = defaultGitHubAPIBase
 	}
+	if opts.ManifestURL == "" {
+		opts.ManifestURL = strings.TrimSpace(os.Getenv("VS_AI_PROXY_UPDATE_MANIFEST_URL"))
+	}
 	if opts.AuthToken == "" {
 		opts.AuthToken = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	}
@@ -393,6 +406,9 @@ func normalizeOptions(opts Options) Options {
 }
 
 func fetchLatestRelease(ctx context.Context, opts Options) (releaseResponse, error) {
+	if strings.TrimSpace(opts.ManifestURL) != "" {
+		return fetchReleaseManifest(ctx, opts)
+	}
 	apiBase := strings.TrimRight(opts.APIBaseURL, "/")
 	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", apiBase, opts.Owner, opts.Repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -422,6 +438,49 @@ func fetchLatestRelease(ctx context.Context, opts Options) (releaseResponse, err
 		return releaseResponse{}, fmt.Errorf("解析 GitHub Release 响应失败: %w", err)
 	}
 	return release, nil
+}
+
+func fetchReleaseManifest(ctx context.Context, opts Options) (releaseResponse, error) {
+	manifestURL := strings.TrimSpace(opts.ManifestURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
+	if err != nil {
+		return releaseResponse{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", appName+"-updater")
+	resp, err := opts.HTTPClient.Do(req)
+	if err != nil {
+		return releaseResponse{}, fmt.Errorf("请求更新 manifest 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return releaseResponse{}, fmt.Errorf("更新 manifest 返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var release releaseResponse
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return releaseResponse{}, fmt.Errorf("解析更新 manifest 失败: %w", err)
+	}
+	resolveManifestAssetURLs(&release, manifestURL)
+	return release, nil
+}
+
+func resolveManifestAssetURLs(release *releaseResponse, manifestURL string) {
+	base, err := http.NewRequest(http.MethodGet, manifestURL, nil)
+	if err != nil || base.URL == nil {
+		return
+	}
+	for index := range release.Assets {
+		value := strings.TrimSpace(release.Assets[index].BrowserDownloadURL)
+		if value == "" {
+			continue
+		}
+		assetURL, err := base.URL.Parse(value)
+		if err != nil {
+			continue
+		}
+		release.Assets[index].BrowserDownloadURL = assetURL.String()
+	}
 }
 
 func selectAssets(assets []releaseAsset, goos, goarch, version string) (releaseAsset, releaseAsset) {

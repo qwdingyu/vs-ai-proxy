@@ -20,46 +20,29 @@ func (s *Server) buildOllamaShowBody(
 	model string,
 ) ([]byte, error) {
 	providerName := s.resolveProviderName(registry, model)
-	modelCfg, _ := findModelConfig(cfg, model, model, providerName)
-
-	meta := modelCapabilityMeta(cfg, catalog, model, model, providerName)
-	exec := executionMapFromModelConfig(modelCfg)
-
-	if catalog != nil {
-		if profile, ok := catalog.Profile(model, providerName); ok {
-			mergeProfileExecution(exec, profile)
+	upstreamModel := model
+	if candidates := registry.ResolveCandidates(model); len(candidates) > 0 {
+		upstreamModel = coalesceString(candidates[0].UpstreamID, candidates[0].ModelID, upstreamModel)
+		if candidates[0].Provider != nil && candidates[0].Provider.Provider != nil {
+			providerName = candidates[0].Provider.Provider.Name()
 		}
 	}
+	profile, _ := effectiveModelProfile(cfg, catalog, upstreamModel, model, providerName)
+	meta := modelCapabilitiesFromProfile(profile)
+	exec := map[string]any{}
+	mergeProfileExecution(exec, profile)
 
 	return converter.BuildOllamaShowResponse(
 		model,
+		provider.ModelBasename(upstreamModel),
 		meta.contextLength,
+		meta.inputTokenLimit,
 		meta.maxOutputTokens,
 		meta.family,
 		meta.supportsTools,
 		meta.supportsVision,
 		exec,
 	)
-}
-
-func executionMapFromModelConfig(modelCfg config.ModelConfig) map[string]any {
-	exec := map[string]any{}
-	if modelCfg.Temperature != nil {
-		exec["temperature"] = *modelCfg.Temperature
-	}
-	if modelCfg.TopP != nil {
-		exec["top_p"] = *modelCfg.TopP
-	}
-	if modelCfg.MaxTokens != nil {
-		exec["max_tokens"] = *modelCfg.MaxTokens
-	}
-	if strings.TrimSpace(modelCfg.ReasoningEffort) != "" {
-		exec["reasoning_effort"] = modelCfg.ReasoningEffort
-	}
-	if modelCfg.TimeoutSeconds != nil {
-		exec["timeout_seconds"] = *modelCfg.TimeoutSeconds
-	}
-	return exec
 }
 
 func mergeProfileExecution(exec map[string]any, profile provider.ModelProfile) {

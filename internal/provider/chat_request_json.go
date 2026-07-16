@@ -60,6 +60,8 @@ var ollamaOptionKnownFields = map[string]struct{}{
 	"max_tokens":            {},
 	"max_completion_tokens": {},
 	"max_output_tokens":     {},
+	"num_predict":           {},
+	"num_ctx":               {},
 	"reasoning_effort":      {},
 }
 

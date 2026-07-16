@@ -117,7 +117,15 @@ func OpenAI2OllamaChatRequest(body []byte) ([]byte, error) {
 			return nil, fmt.Errorf("convert openai to ollama chat request failed: options must be an object")
 		}
 		for key, value := range explicitOptions {
-			options[key] = value
+			if !isOllamaTokenAlias(key) {
+				options[key] = value
+			}
+		}
+		for _, key := range []string{"num_predict", "max_tokens", "max_completion_tokens", "max_output_tokens"} {
+			if value, exists := explicitOptions[key]; exists {
+				options["num_predict"] = value
+				break
+			}
 		}
 	}
 	if stop, exists := src["stop"]; exists && stop != nil {
@@ -142,6 +150,15 @@ func OpenAI2OllamaChatRequest(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("convert openai to ollama chat request failed: %w", err)
 	}
 	return out, nil
+}
+
+func isOllamaTokenAlias(key string) bool {
+	switch key {
+	case "num_predict", "max_tokens", "max_completion_tokens", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 // OllamaChatResponse2OpenAI 将单条 Ollama chat 响应转换为 OpenAI chat completion 响应。
@@ -188,7 +205,7 @@ func OllamaChatResponse2OpenAI(body []byte, requestModel string) ([]byte, error)
 }
 
 // BuildOllamaShowResponse 构建 /api/show 的 Ollama 展示响应。
-func BuildOllamaShowResponse(model string, ctxLength, maxOutput int, family string, supportsTools, supportsVision bool, exec map[string]any) ([]byte, error) {
+func BuildOllamaShowResponse(model, basename string, ctxLength, inputLimit, maxOutput int, family string, supportsTools, supportsVision bool, exec map[string]any) ([]byte, error) {
 	capabilities := []string{"completion"}
 	if supportsTools {
 		capabilities = append(capabilities, "tools")
@@ -197,6 +214,15 @@ func BuildOllamaShowResponse(model string, ctxLength, maxOutput int, family stri
 		capabilities = append(capabilities, "vision")
 	}
 
+	modelInfo := BuildOllamaModelInfo(
+		basename,
+		ctxLength,
+		inputLimit,
+		maxOutput,
+		family,
+		supportsTools,
+		supportsVision,
+	)
 	resp := map[string]any{
 		"model":       model,
 		"modified_at": timeNowRFC3339(),
@@ -214,23 +240,11 @@ func BuildOllamaShowResponse(model string, ctxLength, maxOutput int, family stri
 			"parameter_size":     "api",
 			"quantization_level": "none",
 		},
-		"model_info": map[string]any{
-			"general.architecture":   coalesceString(family, "api"),
-			"general.basename":       model,
-			"general.context_length": ctxLength,
-			"context_length":         ctxLength,
-			"max_output_tokens":      maxOutput,
-			"input_token_limit":      ctxLength,
-			"output_token_limit":     maxOutput,
-			"supports_tools":         supportsTools,
-			"supports_tool_calls":    supportsTools,
-			"supports_vision":        supportsVision,
-			"supports_images":        supportsVision,
-		},
+		"model_info":             modelInfo,
 		"capabilities":           capabilities,
 		"context_length":         ctxLength,
 		"max_output_tokens":      maxOutput,
-		"input_token_limit":      ctxLength,
+		"input_token_limit":      inputLimit,
 		"output_token_limit":     maxOutput,
 		"supports_tools":         supportsTools,
 		"supports_tool_calls":    supportsTools,
@@ -244,6 +258,35 @@ func BuildOllamaShowResponse(model string, ctxLength, maxOutput int, family stri
 		return nil, fmt.Errorf("build ollama show response failed: %w", err)
 	}
 	return out, nil
+}
+
+// BuildOllamaModelInfo builds the model_info object used by Ollama-compatible
+// discovery endpoints. The architecture-qualified context key is the native
+// Ollama shape; the general/flat keys remain for existing clients.
+func BuildOllamaModelInfo(
+	basename string,
+	ctxLength int,
+	inputLimit int,
+	maxOutput int,
+	family string,
+	supportsTools bool,
+	supportsVision bool,
+) map[string]any {
+	architecture := coalesceString(family, "api")
+	return map[string]any{
+		"general.architecture":           architecture,
+		"general.basename":               basename,
+		"general.context_length":         ctxLength,
+		architecture + ".context_length": ctxLength,
+		"context_length":                 ctxLength,
+		"max_output_tokens":              maxOutput,
+		"input_token_limit":              inputLimit,
+		"output_token_limit":             maxOutput,
+		"supports_tools":                 supportsTools,
+		"supports_tool_calls":            supportsTools,
+		"supports_vision":                supportsVision,
+		"supports_images":                supportsVision,
+	}
 }
 
 func getString(src map[string]any, key string) string {
@@ -291,9 +334,14 @@ func buildOptions(src map[string]any) map[string]any {
 	options := map[string]any{}
 	copyIfPresent(options, src, "temperature")
 	copyIfPresent(options, src, "top_p")
-	copyIfPresent(options, src, "max_tokens")
 	copyIfPresent(options, src, "top_k")
 	copyIfPresent(options, src, "reasoning_effort")
+	for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens", "num_predict"} {
+		if value, ok := src[key]; ok && value != nil {
+			options["num_predict"] = value
+			break
+		}
+	}
 	return options
 }
 
@@ -455,21 +503,19 @@ func timeNowRFC3339() string {
 }
 
 func buildParametersString(ctxLength, maxOutput int, exec map[string]any) string {
+	predict := maxOutput
+	if value, ok := exec["max_tokens"].(int); ok && value > 0 && value < predict {
+		predict = value
+	}
 	parts := []string{
 		fmt.Sprintf("num_ctx %d", ctxLength),
-		fmt.Sprintf("num_predict %d", maxOutput),
+		fmt.Sprintf("num_predict %d", predict),
 	}
 	if v, ok := exec["temperature"].(float64); ok {
 		parts = append(parts, fmt.Sprintf("temperature %g", v))
 	}
 	if v, ok := exec["top_p"].(float64); ok {
 		parts = append(parts, fmt.Sprintf("top_p %g", v))
-	}
-	if v, ok := exec["max_tokens"].(int); ok {
-		parts = append(parts, fmt.Sprintf("max_tokens %d", v))
-	}
-	if v, ok := exec["reasoning_effort"].(string); ok && strings.TrimSpace(v) != "" {
-		parts = append(parts, fmt.Sprintf("reasoning_effort %s", v))
 	}
 	return strings.Join(parts, "\n")
 }

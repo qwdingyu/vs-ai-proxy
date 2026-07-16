@@ -77,7 +77,7 @@ func TestRecoverableUpdateCheckErrorDoesNotFailCommand(t *testing.T) {
 }
 
 func TestRestartArgsWithoutSelfUpdate(t *testing.T) {
-	args := restartArgsWithoutSelfUpdate([]string{"--self-update", "--version", "--check-update", "--update", "--update-dir", "/tmp/update", "--config", "x", "--update-dir=/tmp/other"})
+	args := restartArgsWithoutSelfUpdate([]string{"--self-update", "--version", "--check-update", "--update", "--update-dir", "/tmp/update", "--update-manifest-url", "https://updates.example/latest.json", "--config", "x", "--update-dir=/tmp/other", "--update-manifest-url=https://updates.example/other.json"})
 	want := []string{"--config", "x"}
 	if len(args) != len(want) {
 		t.Fatalf("args = %#v, want %#v", args, want)
@@ -86,6 +86,32 @@ func TestRestartArgsWithoutSelfUpdate(t *testing.T) {
 		if args[i] != want[i] {
 			t.Fatalf("args = %#v, want %#v", args, want)
 		}
+	}
+}
+
+func TestHandleCommandLineCheckUpdateAcceptsManifestURL(t *testing.T) {
+	oldVersion := version
+	t.Cleanup(func() {
+		version = oldVersion
+	})
+
+	version = "v0.2.14"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/latest.json" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"tag_name":"v0.2.14","html_url":"https://updates.example/v0.2.14","assets":[]}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	handled, exitCode := handleCommandLine([]string{"--check-update", "--update-manifest-url", server.URL + "/latest.json"}, &stdout, &stderr)
+	if !handled || exitCode != 0 {
+		t.Fatalf("handled=%v exitCode=%d stderr=%q", handled, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "当前已是最新版本") {
+		t.Fatalf("stdout = %q, want latest-version message", stdout.String())
 	}
 }
 
@@ -246,7 +272,9 @@ func TestAutoSelfUpdateOnStartupSkipsDevVersion(t *testing.T) {
 
 func TestDescribeStartupUpdateErrorExplainsDeadline(t *testing.T) {
 	message := describeStartupUpdateError(context.DeadlineExceeded)
-	if !strings.Contains(message, "访问 GitHub Release 超时") || !strings.Contains(message, "不影响代理服务启动") {
+	if !strings.Contains(message, "访问更新源超时") ||
+		!strings.Contains(message, "VS_AI_PROXY_UPDATE_MANIFEST_URL") ||
+		!strings.Contains(message, "不影响代理服务启动") {
 		t.Fatalf("message = %q, want friendly timeout guidance", message)
 	}
 }

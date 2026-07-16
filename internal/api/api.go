@@ -1291,6 +1291,10 @@ func applySafeModelFallbacks(model *config.ModelConfig) {
 	if model.SupportsVision == nil {
 		model.SupportsVision = boolPtr(false)
 	}
+	if model.ContextLength != nil && model.MaxOutputTokens != nil &&
+		*model.MaxOutputTokens > *model.ContextLength {
+		model.MaxOutputTokens = copyIntPtr(model.ContextLength)
+	}
 }
 
 func copyIntPtr(value *int) *int {

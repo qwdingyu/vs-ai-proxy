@@ -1537,6 +1537,81 @@ func TestModelSaveEnrichesAPISwitchMetadataSeed(t *testing.T) {
 	}
 }
 
+func TestModelSavePreservesExplicitContextAndInheritsUnsetDefaults(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	explicitContext := 222222
+	models := []config.ModelConfig{{
+		Name:          "deepseek-v4-flash",
+		ProviderID:    config.UseAIProviderID,
+		Provider:      config.UseAIProviderID,
+		ContextLength: &explicitContext,
+		Enabled:       true,
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/models", mustJSONBody(t, models))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/models status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	configRec := httptest.NewRecorder()
+	configReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	apiSrv.engine.ServeHTTP(configRec, configReq)
+	if configRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d, want %d", configRec.Code, http.StatusOK)
+	}
+
+	var got config.AppConfig
+	if err := json.Unmarshal(configRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if len(got.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(got.Models))
+	}
+	model := got.Models[0]
+	if model.ContextLength == nil || *model.ContextLength != explicitContext {
+		t.Fatalf("context_length = %v, want explicit %d", model.ContextLength, explicitContext)
+	}
+	if model.MaxOutputTokens == nil || *model.MaxOutputTokens != 131072 {
+		t.Fatalf("max_output_tokens = %v, want inherited 131072", model.MaxOutputTokens)
+	}
+	if model.SupportsTools == nil || !*model.SupportsTools {
+		t.Fatalf("supports_tools = %v, want inherited true", model.SupportsTools)
+	}
+}
+
+func TestModelSaveClampsOutputToExplicitContext(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	contextLength := 1000
+	maxOutput := 4096
+	models := []config.ModelConfig{{
+		Name:            "unknown-model",
+		ProviderID:      config.UseAIProviderID,
+		Provider:        config.UseAIProviderID,
+		ContextLength:   &contextLength,
+		MaxOutputTokens: &maxOutput,
+		Enabled:         true,
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/models", mustJSONBody(t, models))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/models status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	configRec := httptest.NewRecorder()
+	apiSrv.engine.ServeHTTP(configRec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	var got config.AppConfig
+	if err := json.Unmarshal(configRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if len(got.Models) != 1 || got.Models[0].MaxOutputTokens == nil || *got.Models[0].MaxOutputTokens != contextLength {
+		t.Fatalf("saved limits = %#v, want max_output_tokens=%d", got.Models, contextLength)
+	}
+}
+
 func TestModelMetadataEndpointReturnsCatalogDefaults(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 

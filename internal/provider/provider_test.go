@@ -1374,6 +1374,7 @@ func TestOllamaProviderBuildsNativeChatRequest(t *testing.T) {
 	topP := 0.8
 	topK := 40
 	maxTokens := 2048
+	contextLength := 8192
 	prov := NewOllamaProvider("ollama", "http://localhost:11434", true, time.Second)
 
 	req := prov.buildChatRequest(&ChatRequest{
@@ -1382,6 +1383,7 @@ func TestOllamaProviderBuildsNativeChatRequest(t *testing.T) {
 		TopP:            &topP,
 		TopK:            &topK,
 		MaxTokens:       &maxTokens,
+		ContextLength:   &contextLength,
 		ReasoningEffort: "high",
 		OptionsExtra: map[string]json.RawMessage{
 			"num_keep":      []byte(`24`),
@@ -1418,8 +1420,14 @@ func TestOllamaProviderBuildsNativeChatRequest(t *testing.T) {
 	if options["top_k"] != topK {
 		t.Fatalf("top_k = %#v, want %v", options["top_k"], topK)
 	}
-	if options["max_tokens"] != maxTokens {
-		t.Fatalf("max_tokens = %#v, want %v", options["max_tokens"], maxTokens)
+	if options["num_predict"] != maxTokens {
+		t.Fatalf("num_predict = %#v, want %v", options["num_predict"], maxTokens)
+	}
+	if _, leaked := options["max_tokens"]; leaked {
+		t.Fatalf("OpenAI max_tokens leaked into native Ollama options: %#v", options)
+	}
+	if options["num_ctx"] != contextLength {
+		t.Fatalf("num_ctx = %#v, want %v", options["num_ctx"], contextLength)
 	}
 	if options["reasoning_effort"] != "high" {
 		t.Fatalf("reasoning_effort = %#v, want high", options["reasoning_effort"])

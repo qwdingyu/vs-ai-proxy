@@ -73,6 +73,72 @@ func TestCheckSelectsMatchingReleaseAsset(t *testing.T) {
 	}
 }
 
+func TestCheckCanUseStaticManifestWithRelativeAssetURLs(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/updates/latest.json" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"tag_name":"v0.2.13",
+			"html_url":"https://intranet.example/vs-ai-proxy/v0.2.13",
+			"assets":[
+				{"name":"vs-ai-proxy-v0.2.13-windows-x64.exe.zip","browser_download_url":"./vs-ai-proxy-v0.2.13-windows-x64.exe.zip"},
+				{"name":"checksums.txt","browser_download_url":"checksums.txt"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	result, err := Check(context.Background(), Options{
+		CurrentVersion: "0.2.12",
+		ManifestURL:    server.URL + "/updates/latest.json",
+		GOOS:           "windows",
+		GOARCH:         "amd64",
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if !result.UpdateAvailable {
+		t.Fatalf("UpdateAvailable = false, want true")
+	}
+	if result.AssetURL != server.URL+"/updates/vs-ai-proxy-v0.2.13-windows-x64.exe.zip" {
+		t.Fatalf("AssetURL = %q, want manifest-relative asset URL", result.AssetURL)
+	}
+	if result.ChecksumURL != server.URL+"/updates/checksums.txt" {
+		t.Fatalf("ChecksumURL = %q, want manifest-relative checksum URL", result.ChecksumURL)
+	}
+}
+
+func TestCheckUsesManifestURLFromEnvironment(t *testing.T) {
+	var requested bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = true
+		_, _ = w.Write([]byte(`{
+			"tag_name":"v0.2.13",
+			"html_url":"https://intranet.example/vs-ai-proxy/v0.2.13",
+			"assets":[
+				{"name":"vs-ai-proxy-v0.2.13-linux-x64.tar.gz","browser_download_url":"https://intranet.example/vs-ai-proxy/v0.2.13/linux"},
+				{"name":"checksums.txt","browser_download_url":"https://intranet.example/vs-ai-proxy/v0.2.13/checksums"}
+			]
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("VS_AI_PROXY_UPDATE_MANIFEST_URL", server.URL+"/latest.json")
+
+	result, err := Check(context.Background(), Options{
+		CurrentVersion: "0.2.12",
+		GOOS:           "linux",
+		GOARCH:         "amd64",
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if !requested || result.AssetName != "vs-ai-proxy-v0.2.13-linux-x64.tar.gz" {
+		t.Fatalf("requested=%v result=%#v, want environment manifest source", requested, result)
+	}
+}
+
 func TestCheckRetriesWhenLatestReleaseAssetIsTemporarilyMissing(t *testing.T) {
 	oldWait := releaseAssetWait
 	releaseAssetWait = time.Millisecond

@@ -102,6 +102,39 @@ $env:VS_AI_PROXY_AUTO_UPDATE="0"
 .\vs-ai-proxy.exe
 ```
 
+如果客户环境不能访问 GitHub，可以把更新源改成内网静态 manifest：
+
+```powershell
+$env:VS_AI_PROXY_UPDATE_MANIFEST_URL="https://intranet.example/vs-ai-proxy/latest.json"
+.\vs-ai-proxy.exe --check-update
+.\vs-ai-proxy.exe --self-update
+```
+
+`latest.json` 使用 GitHub Release 响应的最小字段即可，资产文件和 `checksums.txt` 可以放在同一目录并使用相对 URL：
+
+```json
+{
+  "tag_name": "v0.2.53",
+  "html_url": "https://intranet.example/vs-ai-proxy/v0.2.53",
+  "assets": [
+    {
+      "name": "vs-ai-proxy-v0.2.53-windows-x64.exe.zip",
+      "browser_download_url": "./vs-ai-proxy-v0.2.53-windows-x64.exe.zip"
+    },
+    {
+      "name": "checksums.txt",
+      "browser_download_url": "./checksums.txt"
+    }
+  ]
+}
+```
+
+也可以只针对一次命令指定：
+
+```powershell
+.\vs-ai-proxy.exe --check-update --update-manifest-url "https://intranet.example/vs-ai-proxy/latest.json"
+```
+
 ## 配置文件位置
 
 Windows 默认配置文件通常位于：

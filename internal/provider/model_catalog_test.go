@@ -110,6 +110,171 @@ func TestModelCatalogProfileAnyFindsEmbeddedModelAcrossProviders(t *testing.T) {
 	}
 }
 
+func TestModelCatalogProfileUsesDefaultsForDiscoveredCustomProvider(t *testing.T) {
+	registry := NewRegistry("deepseek-v4-flash", time.Minute)
+	prov := &fakeProvider{
+		name:    "custom-provider",
+		enabled: true,
+		models:  []string{"deepseek-v4-flash"},
+	}
+	registry.Add(&ProviderEntry{Provider: prov, Models: prov.models, Priority: 1})
+	registry.SetModels(prov.Name(), prov.models)
+
+	catalog := NewModelCatalog(registry, "", time.Minute)
+	profile, ok := catalog.Profile("deepseek-v4-flash", "custom-provider")
+	if !ok {
+		t.Fatalf("expected discovered model profile")
+	}
+	if profile.ContextLength == nil || *profile.ContextLength != 1048576 {
+		t.Fatalf("context_length = %v, want 1048576", profile.ContextLength)
+	}
+	if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 131072 {
+		t.Fatalf("max_output_tokens = %v, want 131072", profile.MaxOutputTokens)
+	}
+	if profile.SupportsReasoning == nil || !*profile.SupportsReasoning {
+		t.Fatalf("supports_reasoning = %v, want inherited metadata true", profile.SupportsReasoning)
+	}
+
+	for _, alias := range []string{"deepseek-v4-flash:latest", "CUSTOM-PROVIDER - deepseek-v4-flash:latest"} {
+		aliasProfile, aliasOK := catalog.Profile(alias, "custom-provider")
+		if !aliasOK || aliasProfile.ContextLength == nil || *aliasProfile.ContextLength != 1048576 {
+			t.Fatalf("alias %q profile = %#v, want same context", alias, aliasProfile)
+		}
+		if aliasProfile.MaxOutputTokens == nil || *aliasProfile.MaxOutputTokens != 131072 {
+			t.Fatalf("alias %q output = %v, want 131072", alias, aliasProfile.MaxOutputTokens)
+		}
+	}
+}
+
+func TestModelCatalogProfileMergesPartialProviderSelectionWithDefaults(t *testing.T) {
+	dir := t.TempDir()
+	selectionDir := filepath.Join(dir, "model-selection")
+	if err := os.MkdirAll(selectionDir, 0755); err != nil {
+		t.Fatalf("mkdir model-selection: %v", err)
+	}
+	data := []byte(`{
+		"provider":"custom-provider",
+		"models":[{
+			"match":"deepseek-v4-flash",
+			"enabled":true,
+			"execution":{"context_length":222222}
+		}]
+	}`)
+	if err := os.WriteFile(filepath.Join(selectionDir, "custom-provider.json"), data, 0644); err != nil {
+		t.Fatalf("write model selection: %v", err)
+	}
+
+	registry := NewRegistry("deepseek-v4-flash", time.Minute)
+	prov := &fakeProvider{
+		name:    "custom-provider",
+		enabled: true,
+		models:  []string{"deepseek-v4-flash"},
+	}
+	registry.Add(&ProviderEntry{Provider: prov, Models: prov.models, Priority: 1})
+	registry.SetModels(prov.Name(), prov.models)
+
+	catalog := NewModelCatalog(registry, dir, time.Minute)
+	profile, ok := catalog.Profile("deepseek-v4-flash", "custom-provider")
+	if !ok {
+		t.Fatalf("expected custom provider profile")
+	}
+	if profile.ContextLength == nil || *profile.ContextLength != 222222 {
+		t.Fatalf("context_length = %v, want explicit 222222", profile.ContextLength)
+	}
+	if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 131072 {
+		t.Fatalf("max_output_tokens = %v, want inherited 131072", profile.MaxOutputTokens)
+	}
+	if profile.SupportsTools == nil || !*profile.SupportsTools {
+		t.Fatalf("supports_tools = %v, want inherited true", profile.SupportsTools)
+	}
+}
+
+func TestModelCatalogProfileUsesExactMetadataForGpt54Discovery(t *testing.T) {
+	registry := NewRegistry("gpt-5.4", time.Minute)
+	prov := &fakeProvider{
+		name:    "useai2",
+		enabled: true,
+		models:  []string{"gpt-5.4"},
+	}
+	registry.Add(&ProviderEntry{Provider: prov, Models: prov.models, Priority: 1})
+	registry.SetModels(prov.Name(), prov.models)
+
+	catalog := NewModelCatalog(registry, "", time.Minute)
+	profile, ok := catalog.Profile("gpt-5.4", "useai2")
+	if !ok {
+		t.Fatalf("expected gpt-5.4 profile")
+	}
+	if profile.ContextLength == nil || *profile.ContextLength != 1050000 {
+		t.Fatalf("context_length = %v, want 1050000", profile.ContextLength)
+	}
+	if profile.InputTokenLimit == nil || *profile.InputTokenLimit != 922000 {
+		t.Fatalf("input_token_limit = %v, want 922000", profile.InputTokenLimit)
+	}
+	if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 128000 {
+		t.Fatalf("max_output_tokens = %v, want 128000", profile.MaxOutputTokens)
+	}
+	if profile.Family != "gpt" {
+		t.Fatalf("family = %q, want gpt", profile.Family)
+	}
+}
+
+func TestModelCatalogProfileUsesExactMetadataForGpt56Family(t *testing.T) {
+	models := []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+	registry := NewRegistry("gpt-5.6", time.Minute)
+	prov := &fakeProvider{
+		name:    "useai2",
+		enabled: true,
+		models:  models,
+	}
+	registry.Add(&ProviderEntry{Provider: prov, Models: prov.models, Priority: 1})
+	registry.SetModels(prov.Name(), prov.models)
+
+	catalog := NewModelCatalog(registry, "", time.Minute)
+	for _, model := range models {
+		profile, ok := catalog.Profile(model, "useai2")
+		if !ok {
+			t.Fatalf("expected %s profile", model)
+		}
+		if profile.ContextLength == nil || *profile.ContextLength != 1050000 {
+			t.Fatalf("%s context_length = %v, want 1050000", model, profile.ContextLength)
+		}
+		if profile.InputTokenLimit == nil || *profile.InputTokenLimit != 922000 {
+			t.Fatalf("%s input_token_limit = %v, want 922000", model, profile.InputTokenLimit)
+		}
+		if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 128000 {
+			t.Fatalf("%s max_output_tokens = %v, want 128000", model, profile.MaxOutputTokens)
+		}
+		if profile.Family != "gpt" {
+			t.Fatalf("%s family = %q, want gpt", model, profile.Family)
+		}
+	}
+}
+
+func TestModelCatalogProfileAnyMatchesCustomProviderFallbackForConflictingDefaults(t *testing.T) {
+	model := "nvidia/nemotron-3-super-120b-a12b"
+	registry := NewRegistry(model, time.Minute)
+	prov := &fakeProvider{name: "custom-provider", enabled: true, models: []string{model}}
+	registry.Add(&ProviderEntry{Provider: prov, Models: prov.models, Priority: 1})
+	registry.SetModels(prov.Name(), prov.models)
+	catalog := NewModelCatalog(registry, "", time.Minute)
+
+	for i := 0; i < 20; i++ {
+		anyProfile, anyOK := catalog.ProfileAny(model)
+		exactProfile, exactOK := catalog.Profile(model, prov.Name())
+		if !anyOK || !exactOK {
+			t.Fatalf("iteration %d: profileAny=%t profile=%t", i, anyOK, exactOK)
+		}
+		if anyProfile.ContextLength == nil || exactProfile.ContextLength == nil ||
+			*anyProfile.ContextLength != *exactProfile.ContextLength {
+			t.Fatalf("iteration %d: context differs: any=%v exact=%v", i, anyProfile.ContextLength, exactProfile.ContextLength)
+		}
+		if anyProfile.MaxOutputTokens == nil || exactProfile.MaxOutputTokens == nil ||
+			*anyProfile.MaxOutputTokens != *exactProfile.MaxOutputTokens {
+			t.Fatalf("iteration %d: output differs: any=%v exact=%v", i, anyProfile.MaxOutputTokens, exactProfile.MaxOutputTokens)
+		}
+	}
+}
+
 func TestModelCatalogProfileAnyFindsEmbeddedMetadataSeed(t *testing.T) {
 	catalog := NewModelCatalog(nil, "", time.Minute)
 	profile, ok := catalog.ProfileAny("openai/gpt-4.1")

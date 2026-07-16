@@ -604,6 +604,30 @@ func TestModelTimeoutSecondsUsesConfiguredClientBudget(t *testing.T) {
 	}
 }
 
+func TestModelTimeoutSecondsPrefersExplicitModelConfig(t *testing.T) {
+	modelTimeout := 25
+	profileTimeout := 120
+	cfg := &config.AppConfig{Models: []config.ModelConfig{{
+		Name:           "gpt-5.4",
+		ProviderID:     "useai2",
+		TimeoutSeconds: &modelTimeout,
+		Enabled:        true,
+	}}}
+	profile := provider.ModelProfile{TimeoutSeconds: &profileTimeout}
+
+	configured, effective := modelTimeoutSeconds(
+		cfg,
+		"gpt-5.4",
+		"gpt-5.4",
+		"useai2",
+		profile,
+		true,
+	)
+	if configured != modelTimeout || effective != modelTimeout {
+		t.Fatalf("timeout = configured:%d effective:%d, want explicit %d", configured, effective, modelTimeout)
+	}
+}
+
 func TestProfileForProviderFallsBackToCapabilityProfile(t *testing.T) {
 	dir := t.TempDir()
 	selectionDir := filepath.Join(dir, "model-selection")
@@ -634,6 +658,42 @@ func TestProfileForProviderFallsBackToCapabilityProfile(t *testing.T) {
 	}
 	if profile.TimeoutSeconds == nil || *profile.TimeoutSeconds != 120 {
 		t.Fatalf("timeout_seconds = %v, want 120 from openai gpt-5 profile", profile.TimeoutSeconds)
+	}
+}
+
+func TestProfileForProviderKeepsExactProviderSelectionHighestPriority(t *testing.T) {
+	dir := t.TempDir()
+	selectionDir := filepath.Join(dir, "model-selection")
+	if err := os.MkdirAll(selectionDir, 0755); err != nil {
+		t.Fatalf("mkdir model-selection: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(selectionDir, "useai2.json"), []byte(`{
+		"provider":"useai2",
+		"models":[{
+			"match":"gpt-5.5",
+			"priority":1,
+			"enabled":true,
+			"execution":{"context_length":222222,"timeout_seconds":25}
+		}]
+	}`), 0644); err != nil {
+		t.Fatalf("write model selection: %v", err)
+	}
+
+	registry := provider.NewRegistry("gpt-5.5", time.Minute)
+	prov := provider.NewOpenAIProviderWithCapability("useai2", "useai", "sk-test", "https://api.eforge.xyz/v1", true, time.Second)
+	registry.Add(&provider.ProviderEntry{Provider: prov, Models: []string{"gpt-5.5"}, Priority: 1})
+	registry.SetModels("useai2", []string{"gpt-5.5"})
+	catalog := provider.NewModelCatalog(registry, dir, time.Minute)
+
+	profile, ok := profileForProvider(catalog, "gpt-5.5", prov)
+	if !ok {
+		t.Fatalf("expected profile")
+	}
+	if profile.ContextLength == nil || *profile.ContextLength != 222222 {
+		t.Fatalf("context_length = %v, want exact provider 222222", profile.ContextLength)
+	}
+	if profile.TimeoutSeconds == nil || *profile.TimeoutSeconds != 25 {
+		t.Fatalf("timeout_seconds = %v, want exact provider 25", profile.TimeoutSeconds)
 	}
 }
 

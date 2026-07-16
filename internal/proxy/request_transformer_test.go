@@ -206,6 +206,33 @@ func TestApplyExecutionDefaultsMatchesVisualStudioDisplayAndLatestAlias(t *testi
 	}
 }
 
+func TestFindModelConfigUsesMostSpecificModelMatch(t *testing.T) {
+	genericMax := 5000
+	exactMax := 5400
+	cfg := &config.AppConfig{Models: []config.ModelConfig{
+		{
+			Name:       "gpt-5",
+			ProviderID: "useai2",
+			MaxTokens:  &genericMax,
+			Enabled:    true,
+		},
+		{
+			Name:       "gpt-5.4",
+			ProviderID: "useai2",
+			MaxTokens:  &exactMax,
+			Enabled:    true,
+		},
+	}}
+
+	modelCfg, ok := findModelConfig(cfg, "gpt-5.4", "gpt-5.4", "useai2")
+	if !ok {
+		t.Fatalf("expected matching model config")
+	}
+	if modelCfg.MaxTokens == nil || *modelCfg.MaxTokens != exactMax {
+		t.Fatalf("max_tokens = %v, want most-specific %d", modelCfg.MaxTokens, exactMax)
+	}
+}
+
 func TestApplyProfileDefaultsOverrideClientParams(t *testing.T) {
 	server := &Server{}
 	clientTemp := 0.2
@@ -233,8 +260,48 @@ func TestApplyProfileDefaultsOverrideClientParams(t *testing.T) {
 	if req.MaxTokens == nil || *req.MaxTokens != profileCtx {
 		t.Fatalf("max_tokens = %v, want context cap %d", req.MaxTokens, profileCtx)
 	}
+	if req.ContextLength == nil || *req.ContextLength != profileCtx {
+		t.Fatalf("context_length = %v, want profile context %d", req.ContextLength, profileCtx)
+	}
 	if req.ReasoningEffort != "high" {
 		t.Fatalf("reasoning_effort = %q, want high", req.ReasoningEffort)
+	}
+}
+
+func TestApplyProfileDefaultsClampsOutputToMaxOutputTokens(t *testing.T) {
+	server := &Server{}
+	clientMax := 10000
+	contextLength := 100000
+	maxOutput := 4096
+	req := &provider.ChatRequest{Model: "deepseek-v4-flash", MaxTokens: &clientMax}
+
+	server.applyProfileDefaults(req, provider.ModelProfile{
+		ContextLength:   &contextLength,
+		MaxOutputTokens: &maxOutput,
+	}, &stubProvider{name: "deepseek"})
+
+	if req.MaxTokens == nil || *req.MaxTokens != maxOutput {
+		t.Fatalf("max_tokens = %v, want output cap %d", req.MaxTokens, maxOutput)
+	}
+}
+
+func TestModelConfigOutputLimitOverridesProfileForRequests(t *testing.T) {
+	server := &Server{}
+	clientMax := 10000
+	builtInMaxOutput := 8192
+	explicitMaxOutput := 2048
+	profile := provider.ModelProfile{MaxOutputTokens: &builtInMaxOutput}
+	profile = mergeModelConfigProfile(profile, config.ModelConfig{
+		Name:            "deepseek-v4-flash",
+		MaxOutputTokens: &explicitMaxOutput,
+		Enabled:         true,
+	})
+	req := &provider.ChatRequest{Model: "deepseek-v4-flash", MaxTokens: &clientMax}
+
+	server.applyProfileDefaults(req, profile, &stubProvider{name: "deepseek"})
+
+	if req.MaxTokens == nil || *req.MaxTokens != explicitMaxOutput {
+		t.Fatalf("max_tokens = %v, want explicit output cap %d", req.MaxTokens, explicitMaxOutput)
 	}
 }
 

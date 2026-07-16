@@ -204,6 +204,11 @@ func (s *Server) applyProfileDefaults(
 	}
 	caps := provider.GetCapabilities(provider.CapabilityNameOf(prov))
 	isNativeReasoner := caps.SupportsReasoningEffort && strings.TrimSpace(profile.ReasoningEffort) != ""
+	if profile.ContextLength != nil && *profile.ContextLength > 0 &&
+		(req.ContextLength == nil || profile.OverrideClientParams) {
+		contextLength := *profile.ContextLength
+		req.ContextLength = &contextLength
+	}
 
 	if profile.OverrideClientParams {
 		if profile.Temperature != nil {
@@ -232,10 +237,16 @@ func (s *Server) applyProfileDefaults(
 			req.ReasoningEffort = profile.ReasoningEffort
 		}
 	}
+	outputLimit := 0
 	if profile.ContextLength != nil && *profile.ContextLength > 0 {
-		if req.MaxTokens == nil || *req.MaxTokens > *profile.ContextLength {
-			req.MaxTokens = intPtr(*profile.ContextLength)
-		}
+		outputLimit = *profile.ContextLength
+	}
+	if profile.MaxOutputTokens != nil && *profile.MaxOutputTokens > 0 &&
+		(outputLimit == 0 || *profile.MaxOutputTokens < outputLimit) {
+		outputLimit = *profile.MaxOutputTokens
+	}
+	if outputLimit > 0 && (req.MaxTokens == nil || *req.MaxTokens > outputLimit) {
+		req.MaxTokens = intPtr(outputLimit)
 	}
 	if !caps.SupportsReasoningEffort {
 		req.ReasoningEffort = ""
@@ -263,6 +274,10 @@ func cloneChatRequest(req *provider.ChatRequest) *provider.ChatRequest {
 	if req.MaxTokens != nil {
 		v := *req.MaxTokens
 		out.MaxTokens = &v
+	}
+	if req.ContextLength != nil {
+		v := *req.ContextLength
+		out.ContextLength = &v
 	}
 	out.Messages = append([]provider.Message(nil), req.Messages...)
 	for i := range out.Messages {
@@ -316,24 +331,63 @@ func findModelConfig(
 	upstreamModel = strings.TrimSpace(upstreamModel)
 	providerName = strings.TrimSpace(providerName)
 
+	bestScore := -1
+	var best config.ModelConfig
 	for _, m := range cfg.Models {
-		if !m.Enabled || !modelConfigNameMatches(m, requestedModel, upstreamModel) {
+		if !m.Enabled || !strings.EqualFold(modelProviderKey(m), providerName) {
 			continue
 		}
-		if providerName != "" && strings.EqualFold(modelProviderKey(m), providerName) {
-			return m, true
+		if score := modelConfigMatchScore(m, requestedModel, upstreamModel); score > bestScore {
+			best = m
+			bestScore = score
 		}
+	}
+	if bestScore >= 0 {
+		return best, true
 	}
 
+	bestScore = -1
 	for _, m := range cfg.Models {
-		if !m.Enabled || !modelConfigNameMatches(m, requestedModel, upstreamModel) {
+		if !m.Enabled || (modelProviderKey(m) != "" && providerName != "") {
 			continue
 		}
-		if modelProviderKey(m) == "" || providerName == "" {
-			return m, true
+		if score := modelConfigMatchScore(m, requestedModel, upstreamModel); score > bestScore {
+			best = m
+			bestScore = score
 		}
 	}
-	return config.ModelConfig{}, false
+	return best, bestScore >= 0
+}
+
+func mergeModelConfigProfile(profile provider.ModelProfile, model config.ModelConfig) provider.ModelProfile {
+	override := provider.ModelProfile{
+		Model:                strings.TrimSpace(model.Name),
+		Provider:             modelProviderKey(model),
+		SupportsTools:        model.SupportsTools,
+		SupportsVision:       model.SupportsVision,
+		Temperature:          model.Temperature,
+		TopP:                 model.TopP,
+		ReasoningEffort:      strings.TrimSpace(model.ReasoningEffort),
+		OverrideClientParams: model.OverrideClientParams,
+		Enabled:              model.Enabled,
+	}
+	if model.ContextLength != nil && *model.ContextLength > 0 {
+		override.ContextLength = model.ContextLength
+		override.InputTokenLimit = model.ContextLength
+	}
+	if model.MaxOutputTokens != nil && *model.MaxOutputTokens > 0 {
+		override.MaxOutputTokens = model.MaxOutputTokens
+	}
+	if model.MaxTokens != nil && *model.MaxTokens > 0 {
+		override.MaxTokens = model.MaxTokens
+	}
+	if model.TimeoutSeconds != nil && *model.TimeoutSeconds > 0 {
+		override.TimeoutSeconds = model.TimeoutSeconds
+	}
+
+	merged := provider.MergeModelProfiles(profile, override)
+	merged.OverrideClientParams = model.OverrideClientParams
+	return merged
 }
 
 func modelProviderKey(m config.ModelConfig) string {
@@ -344,21 +398,22 @@ func modelProviderKey(m config.ModelConfig) string {
 	return key
 }
 
-func modelConfigNameMatches(m config.ModelConfig, requestedModel, upstreamModel string) bool {
+func modelConfigMatchScore(m config.ModelConfig, requestedModel, upstreamModel string) int {
 	name := strings.TrimSpace(m.Name)
 	if name == "" {
-		return false
+		return -1
 	}
 
+	best := -1
 	for _, candidate := range []string{
 		requestedModel,
 		upstreamModel,
 		provider.DisplayNameModelSuffix(requestedModel),
 		provider.DisplayNameModelSuffix(upstreamModel),
 	} {
-		if provider.ProfileNameMatchScore(candidate, name) >= 0 {
-			return true
+		if score := provider.ProfileNameMatchScore(candidate, name); score > best {
+			best = score
 		}
 	}
-	return false
+	return best
 }

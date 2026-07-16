@@ -285,11 +285,11 @@ func describeStartupUpdateError(err error) string {
 		return ""
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return "访问 GitHub Release 超时，请检查 Windows 网络、代理、防火墙或 github.com/api.github.com 可达性；本次仅跳过自动更新，不影响代理服务启动"
+		return "访问更新源超时，请检查 Windows 网络、代理、防火墙或更新源可达性；默认更新源是 GitHub Release，也可通过 VS_AI_PROXY_UPDATE_MANIFEST_URL 指向内网 manifest；本次仅跳过自动更新，不影响代理服务启动"
 	}
 	message := err.Error()
 	if strings.Contains(message, "context deadline exceeded") || strings.Contains(message, "Client.Timeout exceeded") {
-		return "访问 GitHub Release 超时，请检查 Windows 网络、代理、防火墙或 github.com/api.github.com 可达性；本次仅跳过自动更新，不影响代理服务启动"
+		return "访问更新源超时，请检查 Windows 网络、代理、防火墙或更新源可达性；默认更新源是 GitHub Release，也可通过 VS_AI_PROXY_UPDATE_MANIFEST_URL 指向内网 manifest；本次仅跳过自动更新，不影响代理服务启动"
 	}
 	return message
 }
@@ -302,6 +302,7 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 	doUpdate := flags.Bool("update", false, "check for a newer version and download the matching release asset")
 	doSelfUpdate := flags.Bool("self-update", false, "download, install, and restart into the latest release")
 	updateDir := flags.String("update-dir", "", "directory for downloaded updates; default is <config-dir>/updates")
+	updateManifestURL := flags.String("update-manifest-url", "", "custom static update manifest URL; overrides GitHub Releases when set")
 	if err := flags.Parse(args); err != nil {
 		return true, 2
 	}
@@ -318,7 +319,11 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 		if dir == "" {
 			dir = filepath.Join(config.DefaultConfigDir(), "updates")
 		}
-		opts := update.Options{CurrentVersion: version, TargetDir: dir}
+		opts := update.Options{
+			CurrentVersion: version,
+			TargetDir:      dir,
+			ManifestURL:    strings.TrimSpace(*updateManifestURL),
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		if *doSelfUpdate {
@@ -396,6 +401,13 @@ func restartArgsWithoutSelfUpdate(args []string) []string {
 			continue
 		}
 		if strings.HasPrefix(arg, "--update-dir=") {
+			continue
+		}
+		if arg == "--update-manifest-url" && index+1 < len(args) {
+			index++
+			continue
+		}
+		if strings.HasPrefix(arg, "--update-manifest-url=") {
 			continue
 		}
 		out = append(out, arg)

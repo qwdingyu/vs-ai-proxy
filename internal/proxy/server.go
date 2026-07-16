@@ -794,8 +794,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if p, ok := profileForProvider(catalog, modelName, prov); ok {
 				profile = p
 				hasProfile = true
-				s.applyProfileDefaults(req, profile, prov)
 			}
+		}
+		if modelCfg, ok := findModelConfig(cfg, modelName, modelID, prov.Name()); ok {
+			profile = mergeModelConfigProfile(profile, modelCfg)
+			hasProfile = true
+		}
+		if hasProfile {
+			s.applyProfileDefaults(req, profile, prov)
 		}
 		setUpstreamRequestBytes(w, req)
 		configuredTimeout, effectiveTimeout := modelTimeoutSeconds(cfg, modelName, modelID, prov.Name(), profile, hasProfile)
@@ -1093,7 +1099,11 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				topK := int(v)
 				req.TopK = &topK
 			}
-			if v, ok := firstIntOption(options, "max_tokens", "max_completion_tokens", "max_output_tokens"); ok {
+			if v, ok := firstIntOption(options, "num_ctx"); ok {
+				contextLength := v
+				req.ContextLength = &contextLength
+			}
+			if v, ok := firstIntOption(options, "num_predict", "max_tokens", "max_completion_tokens", "max_output_tokens"); ok {
 				maxTokens := v
 				req.MaxTokens = &maxTokens
 			}
@@ -1119,8 +1129,14 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			if p, ok := profileForProvider(catalog, modelName, prov); ok {
 				profile = p
 				hasProfile = true
-				s.applyProfileDefaults(req, profile, prov)
 			}
+		}
+		if modelCfg, ok := findModelConfig(cfg, modelName, modelID, prov.Name()); ok {
+			profile = mergeModelConfigProfile(profile, modelCfg)
+			hasProfile = true
+		}
+		if hasProfile {
+			s.applyProfileDefaults(req, profile, prov)
 		}
 		setUpstreamRequestBytes(w, req)
 		configuredTimeout, effectiveTimeout := modelTimeoutSeconds(cfg, modelName, modelID, prov.Name(), profile, hasProfile)
@@ -1817,10 +1833,10 @@ func modelTimeoutSeconds(
 	hasProfile bool,
 ) (int, int) {
 	configuredTimeout := defaultModelTimeoutSeconds
-	if hasProfile && profile.TimeoutSeconds != nil && *profile.TimeoutSeconds > 0 {
-		configuredTimeout = *profile.TimeoutSeconds
-	} else if modelCfg, ok := findModelConfig(cfg, requestedModel, upstreamModel, providerName); ok && modelCfg.TimeoutSeconds != nil && *modelCfg.TimeoutSeconds > 0 {
+	if modelCfg, ok := findModelConfig(cfg, requestedModel, upstreamModel, providerName); ok && modelCfg.TimeoutSeconds != nil && *modelCfg.TimeoutSeconds > 0 {
 		configuredTimeout = *modelCfg.TimeoutSeconds
+	} else if hasProfile && profile.TimeoutSeconds != nil && *profile.TimeoutSeconds > 0 {
+		configuredTimeout = *profile.TimeoutSeconds
 	}
 
 	return configuredTimeout, effectiveClientBoundTimeoutSeconds(cfg, configuredTimeout)
@@ -1849,37 +1865,41 @@ func profileForProvider(catalog *provider.ModelCatalog, model string, prov provi
 	if catalog == nil || prov == nil {
 		return provider.ModelProfile{}, false
 	}
-	if profile, ok := catalog.Profile(model, prov.Name()); ok {
-		if profileHasExecutionDefaults(profile) {
-			return profile, true
+	var merged provider.ModelProfile
+	found := false
+	merge := func(profile provider.ModelProfile, ok bool) {
+		if !ok {
+			return
 		}
+		if !found {
+			merged = profile
+			found = true
+			return
+		}
+		merged = provider.MergeModelProfiles(merged, profile)
 	}
+
+	merge(catalog.ProfileAny(model))
+	selectionProviders := []string{prov.Name()}
 	capabilityName := provider.CapabilityNameOf(prov)
 	if strings.TrimSpace(capabilityName) != "" && !strings.EqualFold(capabilityName, prov.Name()) {
-		if profile, ok := catalog.Profile(model, capabilityName); ok {
-			return profile, true
-		}
-		selectionProviders := []string{capabilityName}
-		if provider.ResolveApiFormat(prov) == provider.ApiFormatOpenAi && !strings.EqualFold(capabilityName, "openai") {
-			selectionProviders = append(selectionProviders, "openai")
-		}
-		if profile, ok := catalog.ProfileFromSelections(model, selectionProviders...); ok {
-			return profile, true
-		}
+		selectionProviders = append(selectionProviders, capabilityName)
 	}
-	if profile, ok := catalog.ProfileAny(model); ok {
-		return profile, true
+	if provider.ResolveApiFormat(prov) == provider.ApiFormatOpenAi && !containsFold(selectionProviders, "openai") {
+		selectionProviders = append(selectionProviders, "openai")
 	}
-	return provider.ModelProfile{}, false
+	merge(catalog.ProfileFromSelections(model, selectionProviders...))
+	merge(catalog.Profile(model, prov.Name()))
+	return merged, found
 }
 
-func profileHasExecutionDefaults(profile provider.ModelProfile) bool {
-	return profile.Temperature != nil ||
-		profile.TopP != nil ||
-		profile.MaxTokens != nil ||
-		strings.TrimSpace(profile.ReasoningEffort) != "" ||
-		profile.TimeoutSeconds != nil ||
-		profile.ContextLength != nil
+func containsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(want)) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestContextWithTimeout(parent context.Context, timeoutSeconds int) (context.Context, context.CancelFunc) {
@@ -1968,6 +1988,9 @@ func (s *Server) handleOllamaShow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg, registry, catalog := s.snapshot()
+	if catalog != nil {
+		catalog.Rebuild()
+	}
 	body, err := s.buildOllamaShowBody(cfg, registry, catalog, model)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2175,6 +2198,8 @@ func providerOllamaOptionKnownFields() map[string]struct{} {
 		"max_tokens":            {},
 		"max_completion_tokens": {},
 		"max_output_tokens":     {},
+		"num_predict":           {},
+		"num_ctx":               {},
 		"reasoning_effort":      {},
 	}
 }

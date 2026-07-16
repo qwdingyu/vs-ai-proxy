@@ -16,6 +16,7 @@ type ModelProfile struct {
 	Model                string   `json:"model"`
 	Provider             string   `json:"provider"`
 	ContextLength        *int     `json:"context_length"`
+	InputTokenLimit      *int     `json:"input_token_limit"`
 	MaxOutputTokens      *int     `json:"max_output_tokens"`
 	SupportsTools        *bool    `json:"supports_tools"`
 	SupportsVision       *bool    `json:"supports_vision"`
@@ -71,14 +72,15 @@ type CatalogEntry struct {
 
 // ModelCatalog 负责生成 Visual Studio 可见模型、provider-qualified alias、upstream 映射、failover candidates、定时刷新。
 type ModelCatalog struct {
-	mu           sync.RWMutex
-	registry     *Registry
-	configs      []ModelSelection
-	metadata     []ModelProfile
-	entries      map[string]CatalogEntry
-	upstreamMap  map[string][]CatalogEntry
-	refreshEvery time.Duration
-	lastRefresh  time.Time
+	mu              sync.RWMutex
+	registry        *Registry
+	configs         []ModelSelection
+	embeddedConfigs []ModelSelection
+	metadata        []ModelProfile
+	entries         map[string]CatalogEntry
+	upstreamMap     map[string][]CatalogEntry
+	refreshEvery    time.Duration
+	lastRefresh     time.Time
 }
 
 // NewModelCatalog 创建 model catalog。
@@ -113,7 +115,10 @@ func (c *ModelCatalog) AllEntries() []CatalogEntry {
 		if out[i].Priority != out[j].Priority {
 			return out[i].Priority < out[j].Priority
 		}
-		return strings.Compare(out[i].Model, out[j].Model) < 0
+		if out[i].Model != out[j].Model {
+			return strings.Compare(out[i].Model, out[j].Model) < 0
+		}
+		return strings.Compare(out[i].Provider, out[j].Provider) < 0
 	})
 	return out
 }
@@ -144,7 +149,10 @@ func (c *ModelCatalog) UpstreamEntries(upstream string) []CatalogEntry {
 		if out[i].Priority != out[j].Priority {
 			return out[i].Priority < out[j].Priority
 		}
-		return strings.Compare(out[i].Model, out[j].Model) < 0
+		if out[i].Model != out[j].Model {
+			return strings.Compare(out[i].Model, out[j].Model) < 0
+		}
+		return strings.Compare(out[i].Provider, out[j].Provider) < 0
 	})
 	return out
 }
@@ -174,21 +182,33 @@ func (c *ModelCatalog) Profile(model, provider string) (ModelProfile, bool) {
 		if score < 0 {
 			continue
 		}
-		if !hasBest || score > bestScore || (score == bestScore && len(entry.Model) > len(best.Model)) {
+		if !hasBest || score > bestScore || (score == bestScore && betterCatalogEntry(entry, best)) {
 			best = entry
 			bestScore = score
 			hasBest = true
 		}
 	}
 	if hasBest {
-		return best.Profile, true
+		fallback, _ := c.builtInProfileLocked(model)
+		return MergeModelProfiles(fallback, best.Profile), true
 	}
 
 	key := catalogKey(model, provider)
 	if e, ok := c.entries[key]; ok && e.Enabled {
-		return e.Profile, true
+		fallback, _ := c.builtInProfileLocked(model)
+		return MergeModelProfiles(fallback, e.Profile), true
 	}
-	return ModelProfile{}, false
+	return c.builtInProfileLocked(model)
+}
+
+func betterCatalogEntry(candidate, best CatalogEntry) bool {
+	if len(candidate.Model) != len(best.Model) {
+		return len(candidate.Model) > len(best.Model)
+	}
+	if candidate.Model != best.Model {
+		return strings.Compare(candidate.Model, best.Model) < 0
+	}
+	return strings.Compare(candidate.Provider, best.Provider) < 0
 }
 
 // ProfileFromSelections 只从内置/用户 model-selection 中读取执行 profile，
@@ -227,7 +247,7 @@ func (c *ModelCatalog) ProfileFromSelections(model string, providers ...string) 
 			if strings.TrimSpace(profile.Provider) == "" {
 				profile.Provider = sel.Provider
 			}
-			if score := ProfileNameMatchScore(model, profile.Model); betterProfileMatch(score, profile.MatchPriority, bestScore, best) {
+			if score := ProfileNameMatchScore(model, profile.Model); betterProfileMatch(profile, score, profile.MatchPriority, bestScore, best) {
 				bestScore = score
 				best = profile
 			}
@@ -245,41 +265,142 @@ func (c *ModelCatalog) ProfileFromSelections(model string, providers ...string) 
 func (c *ModelCatalog) ProfileAny(model string) (ModelProfile, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.builtInProfileLocked(model)
+}
 
+func (c *ModelCatalog) builtInProfileLocked(model string) (ModelProfile, bool) {
 	model = StripModelTag(strings.TrimSpace(model))
 	if model == "" {
 		return ModelProfile{}, false
 	}
 
-	bestScore := -1
-	var best ModelProfile
-	for _, entry := range c.entries {
-		if !entry.Enabled || !entry.Configured {
-			continue
-		}
-		if score := ProfileNameMatchScore(model, entry.Model); betterProfileMatch(score, entry.Priority, bestScore, best) {
-			bestScore = score
-			best = entry.Profile
+	type candidate struct {
+		profile ModelProfile
+		score   int
+		source  int
+		key     string
+	}
+	candidates := make([]candidate, 0, len(c.metadata))
+	for _, selection := range c.embeddedConfigs {
+		for _, profile := range selection.Models {
+			if !profile.Enabled || !profileHasMetadata(profile) {
+				continue
+			}
+			if strings.TrimSpace(profile.Provider) == "" {
+				profile.Provider = selection.Provider
+			}
+			if score := ProfileNameMatchScore(model, profile.Model); score >= 0 {
+				candidates = append(candidates, candidate{
+					profile: profile,
+					score:   score,
+					source:  1,
+					key:     strings.ToLower(selection.Provider + "\x00" + profile.Model),
+				})
+			}
 		}
 	}
 	for _, profile := range c.metadata {
-		if !profile.Enabled {
+		if !profile.Enabled || !profileHasMetadata(profile) {
 			continue
 		}
-		if score := ProfileNameMatchScore(model, profile.Model); betterProfileMatch(
-			score,
-			profile.MatchPriority,
-			bestScore,
-			best,
-		) {
-			bestScore = score
-			best = profile
+		if score := ProfileNameMatchScore(model, profile.Model); score >= 0 {
+			candidates = append(candidates, candidate{
+				profile: profile,
+				score:   score,
+				source:  0,
+				key:     strings.ToLower(profile.Model),
+			})
 		}
 	}
-	if bestScore < 0 {
+	if len(candidates) == 0 {
 		return ModelProfile{}, false
 	}
-	return best, true
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score < candidates[j].score
+		}
+		if candidates[i].source != candidates[j].source {
+			return candidates[i].source < candidates[j].source
+		}
+		if candidates[i].profile.MatchPriority != candidates[j].profile.MatchPriority {
+			return candidates[i].profile.MatchPriority > candidates[j].profile.MatchPriority
+		}
+		return candidates[i].key < candidates[j].key
+	})
+
+	merged := ModelProfile{}
+	for _, candidate := range candidates {
+		merged = MergeModelProfiles(merged, candidate.profile)
+	}
+	return merged, true
+}
+
+func profileHasMetadata(profile ModelProfile) bool {
+	return profile.ContextLength != nil ||
+		profile.InputTokenLimit != nil ||
+		profile.MaxOutputTokens != nil ||
+		profile.SupportsTools != nil ||
+		profile.SupportsVision != nil ||
+		strings.TrimSpace(profile.Family) != "" ||
+		strings.TrimSpace(profile.ReasoningEffort) != "" ||
+		profile.SupportsReasoning != nil
+}
+
+// MergeModelProfiles overlays non-empty fields from override onto base.
+// It is shared by discovery and request execution so partial profiles inherit
+// the same defaults regardless of which endpoint first resolved the model.
+func MergeModelProfiles(base, override ModelProfile) ModelProfile {
+	merged := base
+	if strings.TrimSpace(override.Model) != "" {
+		merged.Model = override.Model
+	}
+	if strings.TrimSpace(override.Provider) != "" {
+		merged.Provider = override.Provider
+	}
+	if override.ContextLength != nil {
+		merged.ContextLength = override.ContextLength
+	}
+	if override.InputTokenLimit != nil {
+		merged.InputTokenLimit = override.InputTokenLimit
+	}
+	if override.MaxOutputTokens != nil {
+		merged.MaxOutputTokens = override.MaxOutputTokens
+	}
+	if override.SupportsTools != nil {
+		merged.SupportsTools = override.SupportsTools
+	}
+	if override.SupportsVision != nil {
+		merged.SupportsVision = override.SupportsVision
+	}
+	if strings.TrimSpace(override.Family) != "" {
+		merged.Family = override.Family
+	}
+	if override.Temperature != nil {
+		merged.Temperature = override.Temperature
+	}
+	if override.TopP != nil {
+		merged.TopP = override.TopP
+	}
+	if override.MaxTokens != nil {
+		merged.MaxTokens = override.MaxTokens
+	}
+	if strings.TrimSpace(override.ReasoningEffort) != "" {
+		merged.ReasoningEffort = override.ReasoningEffort
+	}
+	if override.TimeoutSeconds != nil {
+		merged.TimeoutSeconds = override.TimeoutSeconds
+	}
+	if override.OverrideClientParams {
+		merged.OverrideClientParams = true
+	}
+	if override.SupportsReasoning != nil {
+		merged.SupportsReasoning = override.SupportsReasoning
+	}
+	if override.MatchPriority != 0 {
+		merged.MatchPriority = override.MatchPriority
+	}
+	merged.Enabled = override.Enabled || merged.Enabled
+	return merged
 }
 
 // Rebuild 重建 catalog，通常在 provider 发现结果或配置变更后调用。
@@ -313,7 +434,9 @@ func (c *ModelCatalog) loadModelSelections(configDir string) {
 }
 
 func (c *ModelCatalog) loadEmbeddedModelSelections() {
+	start := len(c.configs)
 	c.loadModelSelectionsFromFS(defaultModelSelectionFS, "model-selection")
+	c.embeddedConfigs = append(c.embeddedConfigs, c.configs[start:]...)
 }
 
 func (c *ModelCatalog) loadEmbeddedModelMetadata() {
@@ -396,6 +519,7 @@ func appendModelMetadataProfile(
 		Model:             modelID,
 		Provider:          providerID,
 		ContextLength:     positiveIntPtr(contextLength),
+		InputTokenLimit:   positiveIntPtr(metadata.Limit.Input),
 		MaxOutputTokens:   positiveIntPtr(metadata.Limit.Output),
 		SupportsTools:     boolPtr(metadata.ToolCall),
 		SupportsVision:    boolPtr(metadataSupportsVision(metadata)),
@@ -447,11 +571,21 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
-func betterProfileMatch(score, priority, bestScore int, best ModelProfile) bool {
+func betterProfileMatch(candidate ModelProfile, score, priority, bestScore int, best ModelProfile) bool {
 	if score < 0 {
 		return false
 	}
-	return score > bestScore || (score == bestScore && priority < best.MatchPriority)
+	if score != bestScore {
+		return score > bestScore
+	}
+	if priority != best.MatchPriority {
+		return priority < best.MatchPriority
+	}
+	return profileTieKey(candidate) < profileTieKey(best)
+}
+
+func profileTieKey(profile ModelProfile) string {
+	return strings.ToLower(strings.TrimSpace(profile.Provider)) + "\x00" + strings.ToLower(strings.TrimSpace(profile.Model))
 }
 
 func (c *ModelCatalog) rebuildLocked() {
@@ -704,6 +838,7 @@ func appendUniqueCatalogEntry(entries []CatalogEntry, entry CatalogEntry) []Cata
 func (p *ModelProfile) UnmarshalJSON(data []byte) error {
 	type rawExecution struct {
 		ContextLength        *int     `json:"context_length"`
+		InputTokenLimit      *int     `json:"input_token_limit"`
 		MaxOutputTokens      *int     `json:"max_output_tokens"`
 		SupportsTools        *bool    `json:"supports_tools"`
 		SupportsVision       *bool    `json:"supports_vision"`
@@ -754,6 +889,7 @@ func (p *ModelProfile) UnmarshalJSON(data []byte) error {
 		Model:                model,
 		Provider:             raw.Provider,
 		ContextLength:        exec.ContextLength,
+		InputTokenLimit:      exec.InputTokenLimit,
 		MaxOutputTokens:      exec.MaxOutputTokens,
 		SupportsTools:        exec.SupportsTools,
 		SupportsVision:       exec.SupportsVision,

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
+	"github.com/dingyuwang/vs-ai-proxy/internal/converter"
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
 
@@ -51,7 +52,7 @@ func buildOpenAIModelItem(entry provider.CatalogEntry, catalog *provider.ModelCa
 		"capabilities":        meta.capabilities(),
 		"context_length":      meta.contextLength,
 		"max_output_tokens":   meta.maxOutputTokens,
-		"input_token_limit":   meta.contextLength,
+		"input_token_limit":   meta.inputTokenLimit,
 		"output_token_limit":  meta.maxOutputTokens,
 		"supports_tools":      meta.supportsTools,
 		"supports_tool_calls": meta.supportsTools,
@@ -156,7 +157,7 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 		// 这些字段不是上游 Ollama 原生必需项，但对 Copilot BYOM 体验很关键。
 		"context_length":      meta.contextLength,
 		"max_output_tokens":   meta.maxOutputTokens,
-		"input_token_limit":   meta.contextLength,
+		"input_token_limit":   meta.inputTokenLimit,
 		"output_token_limit":  meta.maxOutputTokens,
 		"supports_tools":      meta.supportsTools,
 		"supports_tool_calls": meta.supportsTools,
@@ -168,6 +169,7 @@ func buildOllamaTagModel(entry provider.CatalogEntry, catalog *provider.ModelCat
 
 type modelCapabilities struct {
 	contextLength   int
+	inputTokenLimit int
 	maxOutputTokens int
 	supportsTools   bool
 	supportsVision  bool
@@ -181,48 +183,64 @@ func modelCapabilityMeta(
 	alias string,
 	providerName string,
 ) modelCapabilities {
+	profile, _ := effectiveModelProfile(cfg, catalog, model, alias, providerName)
+	return modelCapabilitiesFromProfile(profile)
+}
+
+func effectiveModelProfile(
+	cfg *config.AppConfig,
+	catalog *provider.ModelCatalog,
+	model string,
+	alias string,
+	providerName string,
+) (provider.ModelProfile, bool) {
+	var profile provider.ModelProfile
+	found := false
+	if catalog != nil {
+		profile, found = catalog.Profile(model, providerName)
+		if !found && !strings.EqualFold(strings.TrimSpace(alias), strings.TrimSpace(model)) {
+			profile, found = catalog.Profile(alias, providerName)
+		}
+	}
+	if modelCfg, ok := findModelConfig(cfg, model, alias, providerName); ok {
+		profile = mergeModelConfigProfile(profile, modelCfg)
+		found = true
+	}
+	return profile, found
+}
+
+func modelCapabilitiesFromProfile(profile provider.ModelProfile) modelCapabilities {
 	meta := modelCapabilities{
 		contextLength:   defaultContextLength,
+		inputTokenLimit: defaultContextLength,
 		maxOutputTokens: defaultMaxOutputTokens,
 		supportsTools:   true,
 		supportsVision:  false,
-		family:          coalesceString(providerName, "api"),
+		family:          "api",
 	}
 
-	modelCfg, hasModelCfg := findModelConfig(cfg, model, alias, providerName)
-	if hasModelCfg {
-		if modelCfg.ContextLength != nil && *modelCfg.ContextLength > 0 {
-			meta.contextLength = *modelCfg.ContextLength
-		}
-		if modelCfg.MaxOutputTokens != nil && *modelCfg.MaxOutputTokens > 0 {
-			meta.maxOutputTokens = *modelCfg.MaxOutputTokens
-		}
-		if modelCfg.SupportsTools != nil {
-			meta.supportsTools = *modelCfg.SupportsTools
-		}
-		if modelCfg.SupportsVision != nil {
-			meta.supportsVision = *modelCfg.SupportsVision
-		}
-		meta.family = coalesceString(modelCfg.ProviderID, modelCfg.Provider, meta.family)
+	if profile.ContextLength != nil && *profile.ContextLength > 0 {
+		meta.contextLength = *profile.ContextLength
+		meta.inputTokenLimit = *profile.ContextLength
 	}
-	if catalog != nil {
-		if profile, ok := catalog.Profile(model, providerName); ok {
-			if (modelCfg.ContextLength == nil || *modelCfg.ContextLength <= 0) && profile.ContextLength != nil && *profile.ContextLength > 0 {
-				meta.contextLength = *profile.ContextLength
-			}
-			if (modelCfg.MaxOutputTokens == nil || *modelCfg.MaxOutputTokens <= 0) && profile.MaxOutputTokens != nil && *profile.MaxOutputTokens > 0 {
-				meta.maxOutputTokens = *profile.MaxOutputTokens
-			}
-			if (!hasModelCfg || modelCfg.SupportsTools == nil) && profile.SupportsTools != nil {
-				meta.supportsTools = *profile.SupportsTools
-			}
-			if (!hasModelCfg || modelCfg.SupportsVision == nil) && profile.SupportsVision != nil {
-				meta.supportsVision = *profile.SupportsVision
-			}
-			if !hasModelCfg || (strings.TrimSpace(modelCfg.ProviderID) == "" && strings.TrimSpace(modelCfg.Provider) == "") {
-				meta.family = coalesceString(profile.Family, meta.family)
-			}
-		}
+	if profile.InputTokenLimit != nil && *profile.InputTokenLimit > 0 {
+		meta.inputTokenLimit = *profile.InputTokenLimit
+	}
+	if profile.MaxOutputTokens != nil && *profile.MaxOutputTokens > 0 {
+		meta.maxOutputTokens = *profile.MaxOutputTokens
+	}
+	if profile.SupportsTools != nil {
+		meta.supportsTools = *profile.SupportsTools
+	}
+	if profile.SupportsVision != nil {
+		meta.supportsVision = *profile.SupportsVision
+	}
+	meta.family = coalesceString(profile.Family, meta.family)
+	if meta.inputTokenLimit > meta.contextLength {
+		meta.inputTokenLimit = meta.contextLength
+	}
+	if meta.maxOutputTokens > meta.contextLength {
+		meta.maxOutputTokens = meta.contextLength
 	}
 	return meta
 }
@@ -239,19 +257,15 @@ func (m modelCapabilities) capabilities() []string {
 }
 
 func (m modelCapabilities) modelInfo(basename string) map[string]any {
-	return map[string]any{
-		"general.architecture":   m.family,
-		"general.basename":       basename,
-		"general.context_length": m.contextLength,
-		"context_length":         m.contextLength,
-		"max_output_tokens":      m.maxOutputTokens,
-		"input_token_limit":      m.contextLength,
-		"output_token_limit":     m.maxOutputTokens,
-		"supports_tools":         m.supportsTools,
-		"supports_tool_calls":    m.supportsTools,
-		"supports_vision":        m.supportsVision,
-		"supports_images":        m.supportsVision,
-	}
+	return converter.BuildOllamaModelInfo(
+		basename,
+		m.contextLength,
+		m.inputTokenLimit,
+		m.maxOutputTokens,
+		m.family,
+		m.supportsTools,
+		m.supportsVision,
+	)
 }
 
 func providerDisplayNameFromConfig(cfg *config.AppConfig, providerName string) string {

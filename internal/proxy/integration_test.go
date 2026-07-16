@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -1165,6 +1166,102 @@ func TestOllamaTagsUseModelConfigLimits(t *testing.T) {
 	if got := int(item["max_output_tokens"].(float64)); got != 65536 {
 		t.Fatalf("max_output_tokens = %d, want 65536; body=%s", got, rec.Body.String())
 	}
+	modelInfo, _ := item["model_info"].(map[string]any)
+	if modelInfo["general.architecture"] != "deepseek" {
+		t.Fatalf("general.architecture = %v, want model family deepseek", modelInfo["general.architecture"])
+	}
+	if modelInfo["deepseek.context_length"] != float64(1048576) {
+		t.Fatalf("deepseek.context_length = %v, want 1048576", modelInfo["deepseek.context_length"])
+	}
+}
+
+func TestModelDiscoveryEndpointsShareBuiltInLimitsForCustomProvider(t *testing.T) {
+	prov := newFakeProvider(
+		"custom-provider",
+		true,
+		[]string{"deepseek-v4-flash"},
+		&fakeChatResponse{Model: "deepseek-v4-flash", Content: "ok"},
+		"",
+	)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/models", server.handleListModels)
+		mux.HandleFunc("/api/tags", server.handleOllamaTags)
+		mux.HandleFunc("/api/show", server.handleOllamaShow)
+	})
+
+	openAIRec := httptest.NewRecorder()
+	handler.ServeHTTP(openAIRec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if openAIRec.Code != http.StatusOK {
+		t.Fatalf("/v1/models status = %d; body=%s", openAIRec.Code, openAIRec.Body.String())
+	}
+	var openAI map[string]any
+	if err := json.Unmarshal(openAIRec.Body.Bytes(), &openAI); err != nil {
+		t.Fatalf("decode /v1/models: %v", err)
+	}
+	openAIItem := modelItemByUpstream(t, openAI["data"], "deepseek-v4-flash")
+
+	tagsRec := httptest.NewRecorder()
+	handler.ServeHTTP(tagsRec, httptest.NewRequest(http.MethodGet, "/api/tags", nil))
+	if tagsRec.Code != http.StatusOK {
+		t.Fatalf("/api/tags status = %d; body=%s", tagsRec.Code, tagsRec.Body.String())
+	}
+	var tags map[string]any
+	if err := json.Unmarshal(tagsRec.Body.Bytes(), &tags); err != nil {
+		t.Fatalf("decode /api/tags: %v", err)
+	}
+	tagItem := modelItemByUpstream(t, tags["models"], "deepseek-v4-flash")
+
+	showRec := httptest.NewRecorder()
+	handler.ServeHTTP(showRec, httptest.NewRequest(http.MethodGet, "/api/show?model=deepseek-v4-flash", nil))
+	if showRec.Code != http.StatusOK {
+		t.Fatalf("/api/show status = %d; body=%s", showRec.Code, showRec.Body.String())
+	}
+	var show map[string]any
+	if err := json.Unmarshal(showRec.Body.Bytes(), &show); err != nil {
+		t.Fatalf("decode /api/show: %v", err)
+	}
+
+	assertModelLimits(t, "v1/models", openAIItem, 1048576, 131072)
+	assertModelLimits(t, "api/tags", tagItem, 1048576, 131072)
+	if show["context_length"] != float64(1048576) || show["max_output_tokens"] != float64(131072) {
+		t.Fatalf("/api/show limits = context:%v output:%v, want 1048576/131072", show["context_length"], show["max_output_tokens"])
+	}
+	showInfo, _ := show["model_info"].(map[string]any)
+	if showInfo["deepseek.context_length"] != float64(1048576) {
+		t.Fatalf("/api/show model_info = %#v, want deepseek.context_length", showInfo)
+	}
+}
+
+func modelItemByUpstream(t *testing.T, raw any, upstream string) map[string]any {
+	t.Helper()
+	items, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("models = %#v, want array", raw)
+	}
+	for _, item := range items {
+		model, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		modelID, _ := model["model"].(string)
+		if model["upstream_model"] == upstream || modelID == upstream || strings.HasPrefix(modelID, upstream+"@") {
+			return model
+		}
+	}
+	t.Fatalf("missing model %q in %#v", upstream, items)
+	return nil
+}
+
+func assertModelLimits(t *testing.T, endpoint string, item map[string]any, contextLength, maxOutput int) {
+	t.Helper()
+	if item["context_length"] != float64(contextLength) || item["input_token_limit"] != float64(contextLength) || item["max_output_tokens"] != float64(maxOutput) {
+		t.Fatalf("%s limits = context:%v input:%v output:%v, want %d/%d", endpoint, item["context_length"], item["input_token_limit"], item["max_output_tokens"], contextLength, maxOutput)
+	}
+	modelInfo, _ := item["model_info"].(map[string]any)
+	if modelInfo["deepseek.context_length"] != float64(contextLength) {
+		t.Fatalf("%s model_info = %#v, want deepseek.context_length", endpoint, modelInfo)
+	}
 }
 
 func TestOllamaTagsUseConfiguredProviderDisplayName(t *testing.T) {
@@ -1915,6 +2012,137 @@ func TestOllamaShowReturnsModelCapabilities(t *testing.T) {
 	}
 }
 
+func TestOllamaShowPrefersExplicitExecutionSettings(t *testing.T) {
+	temperature := 0.77
+	maxTokens := 12345
+	timeout := 17
+	contextLength := 222222
+	prov := newFakeProvider(
+		"deepseek",
+		true,
+		[]string{"deepseek-v4-flash"},
+		&fakeChatResponse{Model: "deepseek-v4-flash", Content: "ok"},
+		"",
+	)
+	server := newOpenServer(prov)
+	server.config.Models = []config.ModelConfig{{
+		Name:           "deepseek-v4-flash",
+		ProviderID:     "deepseek",
+		Provider:       "deepseek",
+		ContextLength:  &contextLength,
+		Temperature:    &temperature,
+		MaxTokens:      &maxTokens,
+		TimeoutSeconds: &timeout,
+		Enabled:        true,
+	}}
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/show", server.handleOllamaShow)
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/show?model=deepseek-v4-flash", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/show status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /api/show: %v", err)
+	}
+	if body["context_length"] != float64(contextLength) {
+		t.Fatalf("context_length = %v, want explicit %d", body["context_length"], contextLength)
+	}
+	recommended, _ := body["recommended_parameters"].(map[string]any)
+	if recommended["temperature"] != temperature {
+		t.Fatalf("temperature = %v, want explicit %v", recommended["temperature"], temperature)
+	}
+	if recommended["max_tokens"] != float64(maxTokens) {
+		t.Fatalf("max_tokens = %v, want explicit %d", recommended["max_tokens"], maxTokens)
+	}
+	if recommended["timeout_seconds"] != float64(timeout) {
+		t.Fatalf("timeout_seconds = %v, want explicit %d", recommended["timeout_seconds"], timeout)
+	}
+	parameters, _ := body["parameters"].(string)
+	if !strings.Contains(parameters, "num_predict 12345") || strings.Contains(parameters, "max_tokens") {
+		t.Fatalf("parameters = %q, want native num_predict without max_tokens", parameters)
+	}
+}
+
+func TestOllamaShowAliasesShareModelDescriptor(t *testing.T) {
+	prov := newFakeProvider(
+		"custom-provider",
+		true,
+		[]string{"deepseek-v4-flash"},
+		&fakeChatResponse{Model: "deepseek-v4-flash", Content: "ok"},
+		"",
+	)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/show", server.handleOllamaShow)
+	})
+
+	aliases := []string{
+		"deepseek-v4-flash",
+		"deepseek-v4-flash:latest",
+		"deepseek-v4-flash@custom-provider",
+		"deepseek-v4-flash@custom-provider:latest",
+		"custom-provider - deepseek-v4-flash",
+	}
+	for _, alias := range aliases {
+		t.Run(alias, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			path := "/api/show?model=" + url.QueryEscape(alias)
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode /api/show: %v", err)
+			}
+			if body["context_length"] != float64(1048576) || body["max_output_tokens"] != float64(131072) {
+				t.Fatalf("limits = context:%v output:%v", body["context_length"], body["max_output_tokens"])
+			}
+			modelInfo, _ := body["model_info"].(map[string]any)
+			if modelInfo["general.basename"] != "deepseek-v4-flash" {
+				t.Fatalf("general.basename = %v, want deepseek-v4-flash", modelInfo["general.basename"])
+			}
+			if modelInfo["general.architecture"] != "deepseek" ||
+				modelInfo["deepseek.context_length"] != float64(1048576) {
+				t.Fatalf("model_info = %#v, want shared deepseek descriptor", modelInfo)
+			}
+		})
+	}
+}
+
+func TestModelConfigContextLengthDerivesInputTokenLimit(t *testing.T) {
+	contextLength := 2000000
+	prov := newFakeProvider("useai2", true, []string{"gpt-5.4"}, &fakeChatResponse{Model: "gpt-5.4", Content: "ok"}, "")
+	server := newOpenServer(prov)
+	server.config.Models = []config.ModelConfig{{
+		Name:          "gpt-5.4",
+		ProviderID:    "useai2",
+		ContextLength: &contextLength,
+		Enabled:       true,
+	}}
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/models", server.handleListModels)
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1/models status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /v1/models: %v", err)
+	}
+	item := modelItemByUpstream(t, body["data"], "gpt-5.4")
+	if item["context_length"] != float64(contextLength) || item["input_token_limit"] != float64(contextLength) {
+		t.Fatalf("limits = context:%v input:%v, want both %d", item["context_length"], item["input_token_limit"], contextLength)
+	}
+}
+
 func TestModelDiscoveryDoesNotAdvertiseDisabledTools(t *testing.T) {
 	supportsTools := false
 	cfg := &config.AppConfig{
@@ -2579,6 +2807,8 @@ func TestOllamaChatPreservesMessageAndOptionExtensions(t *testing.T) {
 		}],
 		"options":{
 			"temperature":0.2,
+			"num_ctx":16384,
+			"num_predict":321,
 			"num_keep":24,
 			"custom_option":{"enabled":true}
 		}
@@ -2606,6 +2836,18 @@ func TestOllamaChatPreservesMessageAndOptionExtensions(t *testing.T) {
 	}
 	if _, ok := prov.lastReq.OptionsExtra["custom_option"]; !ok {
 		t.Fatalf("custom_option was not preserved: %#v", prov.lastReq.OptionsExtra)
+	}
+	if prov.lastReq.MaxTokens == nil || *prov.lastReq.MaxTokens != 321 {
+		t.Fatalf("max_tokens = %v, want num_predict 321", prov.lastReq.MaxTokens)
+	}
+	if _, leaked := prov.lastReq.OptionsExtra["num_predict"]; leaked {
+		t.Fatalf("num_predict should be parsed, not duplicated in OptionsExtra: %#v", prov.lastReq.OptionsExtra)
+	}
+	if prov.lastReq.ContextLength == nil || *prov.lastReq.ContextLength != 16384 {
+		t.Fatalf("context_length = %v, want num_ctx 16384", prov.lastReq.ContextLength)
+	}
+	if _, leaked := prov.lastReq.OptionsExtra["num_ctx"]; leaked {
+		t.Fatalf("num_ctx should be parsed, not duplicated in OptionsExtra: %#v", prov.lastReq.OptionsExtra)
 	}
 }
 

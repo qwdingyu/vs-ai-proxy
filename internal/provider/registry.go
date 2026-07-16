@@ -843,7 +843,14 @@ func (r *Registry) RefreshIfNeeded() {
 		return
 	}
 
+	r.mu.RLock()
+	entries := make([]*ProviderEntry, 0, len(r.entries))
 	for _, entry := range r.entries {
+		entries = append(entries, entry)
+	}
+	r.mu.RUnlock()
+
+	for _, entry := range entries {
 		if entry.Provider.IsEnabled() {
 			go r.refreshModels(entry)
 		}
