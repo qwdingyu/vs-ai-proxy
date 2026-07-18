@@ -295,6 +295,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		DefaultBaseUrl:          "https://api.moonshot.ai",
 		EnvPrefix:               "MOONSHOT",
 	},
+	// Kimi coding endpoint 的默认 base URL 已经带 /coding/v1，因此 ChatPath/ModelsPath
+	// 必须是不带 v1 前缀的相对路径。否则管理页测试、/v1/models 代理和聊天请求
+	// 都会被错误拼成 /coding/v1/v1/...。
 	"kimi": {
 		Category:                ProviderCategoryDirect,
 		ApiFormat:               ApiFormatOpenAi,
@@ -305,6 +308,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		DefaultBaseUrl:          "https://api.kimi.com/coding/v1",
 		EnvPrefix:               "KIMI",
 	},
+	// MiMo 虽然暴露 OpenAI-compatible chat/completions，但输出预算字段
+	// 与多数网关不同：小预算下 max_tokens 会先消耗在 reasoning_content，
+	// 可能导致空 content 或 length 终态；实测应使用 max_completion_tokens。
 	"xiaomimimo": {
 		Category:                ProviderCategoryDirect,
 		ApiFormat:               ApiFormatOpenAi,

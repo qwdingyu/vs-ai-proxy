@@ -518,6 +518,9 @@ func monthPeriod(t time.Time) tokenPeriod {
 }
 
 func currentTokenPeriods(now time.Time) CurrentTokenPeriods {
+	// 统计桶按服务进程本地时间聚合，首页也必须按同一套日历 key 查询。
+	// 这里不要使用浏览器时间，也不要把“本周/本月”的 EndDate 改成自然周/月末；
+	// 首页语义是“截至今天用了多少”，历史周期桶才保留完整归档范围。
 	local := now.Local()
 	today := dayPeriod(local)
 	week := weekPeriod(local)

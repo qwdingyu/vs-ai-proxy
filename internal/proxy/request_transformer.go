@@ -23,6 +23,9 @@ func (s *Server) transformRequest(
 	if preserveReasoningOnly {
 		s.injectCachedReasoning(req)
 	}
+	// VS/Copilot 历史里可能出现空 assistant 占位；Kimi 这类 provider 会把
+	// 空 assistant 判为非法消息。只有 direct reasoning provider 才保留纯
+	// reasoning assistant，用于 reasoning cache；其它 provider 一律按空占位清理。
 	dropEmptyAssistantPlaceholders(req, preserveReasoningOnly)
 	s.applyExecutionDefaults(cfg, req, requestedModel, prov)
 }
@@ -126,6 +129,8 @@ func (s *Server) applyExecutionDefaults(
 	hasDeclaredTools := requestDeclaresTools(req)
 	if !ok {
 		if !hasDeclaredTools {
+			// 普通聊天没有模型配置时给一个保守输出上限；工具请求不能这样做，
+			// 否则大工具参数可能被 max_tokens=4096 截断，表现为 VS 工具无法执行。
 			s.applyGlobalDefaults(req)
 		}
 		if !caps.SupportsTopK {
@@ -140,6 +145,8 @@ func (s *Server) applyExecutionDefaults(
 	isNativeReasoner := caps.SupportsReasoningEffort && strings.TrimSpace(modelCfg.ReasoningEffort) != ""
 
 	if modelCfg.OverrideClientParams {
+		// 用户显式选择“覆盖客户端参数”时，模型配置优先；但仍必须经过
+		// provider capability 过滤，避免把 unsupported top_k/reasoning_effort 透传给严格上游。
 		if modelCfg.Temperature != nil {
 			req.Temperature = modelCfg.Temperature
 		}
@@ -153,6 +160,8 @@ func (s *Server) applyExecutionDefaults(
 			req.ReasoningEffort = modelCfg.ReasoningEffort
 		}
 	} else {
+		// 默认策略是“客户端显式值优先，模型配置只补缺省值”。这保护 VS/Copilot
+		// 针对工具调用和长上下文动态设置的参数，不让管理页配置无意覆盖客户端意图。
 		if req.Temperature == nil && modelCfg.Temperature != nil {
 			req.Temperature = modelCfg.Temperature
 		}
