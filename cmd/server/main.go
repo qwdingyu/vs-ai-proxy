@@ -201,7 +201,7 @@ func autoSelfUpdateOnStartup(logger *log.Logger, args []string) bool {
 
 	check, err := checkUpdateFn(ctx, opts)
 	if err != nil {
-		logger.Warn("启动自动更新检查失败，继续启动当前版本: %v", describeStartupUpdateError(err))
+		logger.Warn("启动自动更新检查失败，继续启动当前版本: %s", updateFailureMessage(describeStartupUpdateError(err), opts, check, err))
 		return false
 	}
 	if !check.UpdateAvailable {
@@ -220,7 +220,7 @@ func runStartupSelfUpdate(logger *log.Logger, opts update.Options, args []string
 
 	result, err := selfUpdateFn(ctx, opts)
 	if err != nil {
-		logger.Warn("后台自动更新失败，继续运行当前版本: %v", describeStartupUpdateError(err))
+		logger.Warn("后台自动更新失败，继续运行当前版本: %s", updateFailureMessage(describeStartupUpdateError(err), opts, result.CheckResult, err))
 		return
 	}
 	if !result.UpdateAvailable {
@@ -296,6 +296,27 @@ func describeStartupUpdateError(err error) string {
 	return message
 }
 
+func updateFailureMessage(reason string, opts update.Options, result update.CheckResult, err error) string {
+	var downloadErr *update.DownloadError
+	if errors.As(err, &downloadErr) {
+		result = downloadErr.CheckResult
+	}
+
+	lines := []string{}
+	if message := strings.TrimSpace(reason); message != "" {
+		lines = append(lines, message)
+	}
+	if result.AssetURL != "" {
+		lines = append(lines, "当前平台下载: "+result.AssetURL)
+	}
+	if result.ReleaseURL != "" {
+		lines = append(lines, "Release: "+result.ReleaseURL)
+	}
+	lines = append(lines, "GitHub 最新版本: "+update.GitHubLatestReleaseURL(opts))
+	lines = append(lines, "若当前网络无法访问 GitHub，可复制上述链接到可访问网络环境下载 Windows x64 包后手动替换 exe。")
+	return strings.Join(lines, "\n")
+}
+
 func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 	flags := flag.NewFlagSet("vs-ai-proxy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -331,7 +352,7 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 		if *doSelfUpdate {
 			result, err := selfUpdateFn(ctx, opts)
 			if err != nil {
-				fmt.Fprintf(stderr, "自更新失败: %v\n", err)
+				fmt.Fprintf(stderr, "自更新失败: %s\n", updateFailureMessage(err.Error(), opts, result.CheckResult, err))
 				return true, 1
 			}
 			if !result.UpdateAvailable {
@@ -361,7 +382,7 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 		if *doUpdate {
 			result, err := update.Download(ctx, opts)
 			if err != nil {
-				fmt.Fprintf(stderr, "更新失败: %v\n", err)
+				fmt.Fprintf(stderr, "更新失败: %s\n", updateFailureMessage(err.Error(), opts, result.CheckResult, err))
 				return true, 1
 			}
 			printDownloadResult(stdout, result)
@@ -370,10 +391,10 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 		result, err := update.Check(ctx, opts)
 		if err != nil {
 			if isRecoverableUpdateCheckError(err) {
-				fmt.Fprintf(stdout, "暂时无法检查更新: %v\n", err)
+				fmt.Fprintf(stdout, "暂时无法检查更新: %s\n", updateFailureMessage(err.Error(), opts, result, err))
 				return true, 0
 			}
-			fmt.Fprintf(stderr, "检查更新失败: %v\n", err)
+			fmt.Fprintf(stderr, "检查更新失败: %s\n", updateFailureMessage(err.Error(), opts, result, err))
 			return true, 1
 		}
 		printCheckResult(stdout, result)

@@ -2006,7 +2006,7 @@ func (s *Server) logProviderAttemptFailureForRequest(ctx context.Context, reques
 	s.logProviderAttemptFailure(requestIDFromContext(ctx), requestedModel, modelID, providerName, attempt)
 }
 
-// logProviderAttemptFailure 记录单个候选 provider 的失败。
+// logProviderAttemptFailure 记录单个候选 provider 或备用聊天模式尝试的失败。
 // 这不是最终客户端请求日志：同一个 request_id 可能先有多个 WARN attempt，
 // 最后仍由 loggingMiddleware 写一条 200/4xx/5xx 的最终请求日志。
 func (s *Server) logProviderAttemptFailure(requestID, requestedModel, modelID, providerName string, attempt attemptDiagnostic) {
@@ -2017,7 +2017,7 @@ func (s *Server) logProviderAttemptFailure(requestID, requestedModel, modelID, p
 		s.logger.Debug("模型 %s（%s）上游原始错误: request_id=%s%s %s", modelID, providerName, strings.TrimSpace(requestID), consoleRouteSuffix(providerName, requestedModel, modelID), diagnosticHeaderValue(attempt.Message))
 	}
 	reason := userFacingDiagnosticFor(attempt.Category).Reason
-	s.logger.Warn("模型 %s（%s）失败: request_id=%s%s reason=%s", modelID, providerName, strings.TrimSpace(requestID), consoleRouteSuffix(providerName, requestedModel, modelID), reason)
+	s.logger.Warn("模型 %s（%s）候选尝试失败: request_id=%s%s reason=%s", modelID, providerName, strings.TrimSpace(requestID), consoleRouteSuffix(providerName, requestedModel, modelID), reason)
 }
 
 func isClientGoneError(err error) bool {

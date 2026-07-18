@@ -72,6 +72,27 @@ type SelfUpdateResult struct {
 	NeedsExternalApply bool
 }
 
+// DownloadError 保留下载阶段已经确认的发布信息，便于调用方在失败时继续展示
+// Release 页面或当前平台的手动下载地址。
+type DownloadError struct {
+	CheckResult CheckResult
+	Err         error
+}
+
+func (e *DownloadError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *DownloadError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type WindowsSelfUpdatePaths struct {
 	ScriptPath string
 	LogPath    string
@@ -159,6 +180,17 @@ func updateSourceName(opts Options) string {
 	return "GitHub Release"
 }
 
+// GitHubLatestReleaseURL 返回可直接打开的 GitHub 最新 Release 页面。
+func GitHubLatestReleaseURL(opts Options) string {
+	if strings.TrimSpace(opts.Owner) == "" {
+		opts.Owner = defaultRepoOwner
+	}
+	if strings.TrimSpace(opts.Repo) == "" {
+		opts.Repo = defaultRepoName
+	}
+	return fmt.Sprintf("https://github.com/%s/%s/releases/latest", strings.TrimSpace(opts.Owner), strings.TrimSpace(opts.Repo))
+}
+
 func expectedAssetPrefix(goos, goarch, version string) string {
 	alias := platformAlias(goos, goarch)
 	if alias == "" {
@@ -201,30 +233,31 @@ func Download(ctx context.Context, opts Options) (DownloadResult, error) {
 	opts = normalizeOptions(opts)
 	check, err := Check(ctx, opts)
 	if err != nil {
-		return DownloadResult{}, err
+		return DownloadResult{CheckResult: check}, err
 	}
 	if !check.UpdateAvailable {
 		return DownloadResult{CheckResult: check}, nil
 	}
+	failedResult := DownloadResult{CheckResult: check}
 	if check.ChecksumURL == "" {
-		return DownloadResult{}, errors.New("发布缺少 checksums.txt，拒绝下载未校验的更新包")
+		return failedResult, &DownloadError{CheckResult: check, Err: errors.New("发布缺少 checksums.txt，拒绝下载未校验的更新包")}
 	}
 
 	if err := os.MkdirAll(opts.TargetDir, 0o755); err != nil {
-		return DownloadResult{}, fmt.Errorf("创建更新目录失败: %w", err)
+		return failedResult, &DownloadError{CheckResult: check, Err: fmt.Errorf("创建更新目录失败: %w", err)}
 	}
 	archivePath := filepath.Join(opts.TargetDir, check.AssetName)
 	sha, err := downloadFile(ctx, opts.HTTPClient, check.AssetURL, archivePath)
 	if err != nil {
-		return DownloadResult{}, err
+		return failedResult, &DownloadError{CheckResult: check, Err: err}
 	}
 	if err := verifyChecksum(ctx, opts.HTTPClient, check.ChecksumURL, check.AssetName, sha); err != nil {
-		return DownloadResult{}, err
+		return failedResult, &DownloadError{CheckResult: check, Err: err}
 	}
 
 	binaryPath := filepath.Join(opts.TargetDir, binaryName(opts.GOOS))
 	if err := extractBinary(archivePath, binaryPath, opts.GOOS); err != nil {
-		return DownloadResult{}, err
+		return failedResult, &DownloadError{CheckResult: check, Err: err}
 	}
 	return DownloadResult{CheckResult: check, ArchivePath: archivePath, BinaryPath: binaryPath, SHA256: sha}, nil
 }

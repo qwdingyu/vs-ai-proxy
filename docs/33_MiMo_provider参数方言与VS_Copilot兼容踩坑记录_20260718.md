@@ -170,6 +170,27 @@ MiMo 默认会输出 `reasoning_content`，并且推理 token 会占用输出预
 - provider attempt warning 也带同一组路由字段。
 - 排查时以 `request_id` 为主键，不再只按时间相邻推断。
 
+### 4.3 为什么会出现 WARN 后同一 request_id 最终 200
+
+例如：
+
+```text
+[21:45:40 WARN] 模型 mimo-v2.5-pro（xiaomimimo）候选尝试失败: request_id=... reason=上游响应格式不兼容
+[21:45:40 INFO] POST /v1/chat/completions - 200 (...) request_id=... provider=xiaomimimo requested_model="xiaomimimo - mimo-v2.5-pro" upstream=mimo-v2.5-pro
+```
+
+这类日志不能直接理解为“客户端收到失败”。proxy 里有两个层次：
+
+1. `WARN 模型 ... 候选尝试失败`：单个候选 provider 或备用聊天模式的一次 attempt 失败。
+2. `INFO POST ... - 200`：同一个客户端请求最终已经成功返回。
+
+因此排查顺序应为：
+
+1. 先按 `request_id` 聚合日志。
+2. 如果同一 `request_id` 最终是 `200`，优先判断为一次可恢复 attempt 失败，观察是否影响 VS 实际输出。
+3. 如果最终是 `4xx/5xx`，再按 `error_code`、`reason`、`attempts` 判断是网络、鉴权、额度、参数还是响应契约问题。
+4. 如果频繁出现 `proxy_parse_error` 但最终仍 200，说明备用路径正在兜底，后续应收集上游原始 DEBUG 日志评估是否需要补 provider capability，而不是在 handler 中按模型名继续打补丁。
+
 ## 5. 修复方案
 
 本次采用 provider capability 方案，而不是在 handler 里写 `if model == mimo-v2.5`：

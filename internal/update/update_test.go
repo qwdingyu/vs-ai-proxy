@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -380,6 +381,45 @@ func TestDownloadRejectsReleaseWithoutChecksumAsset(t *testing.T) {
 	}
 	if assetRequested {
 		t.Fatalf("release asset was downloaded before checksum availability was verified")
+	}
+}
+
+func TestDownloadErrorPreservesManualAssetURL(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/qwdingyu/vs-ai-proxy/releases/latest":
+			_, _ = fmt.Fprintf(
+				w,
+				`{"tag_name":"v0.2.58","html_url":"https://github.com/qwdingyu/vs-ai-proxy/releases/tag/v0.2.58","assets":[{"name":"vs-ai-proxy-v0.2.58-windows-x64.exe.zip","browser_download_url":"%s/asset"},{"name":"checksums.txt","browser_download_url":"%s/checksums"}]}`,
+				server.URL,
+				server.URL,
+			)
+		case "/asset":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("temporarily unavailable"))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	_, err := Download(context.Background(), Options{
+		CurrentVersion: "v0.2.57",
+		TargetDir:      t.TempDir(),
+		APIBaseURL:     server.URL,
+		GOOS:           "windows",
+		GOARCH:         "amd64",
+	})
+	var downloadErr *DownloadError
+	if !errors.As(err, &downloadErr) {
+		t.Fatalf("Download() error = %T %[1]v, want DownloadError", err)
+	}
+	if downloadErr.CheckResult.AssetURL != server.URL+"/asset" {
+		t.Fatalf("AssetURL = %q, want preserved manual asset URL", downloadErr.CheckResult.AssetURL)
+	}
+	if downloadErr.CheckResult.ReleaseURL != "https://github.com/qwdingyu/vs-ai-proxy/releases/tag/v0.2.58" {
+		t.Fatalf("ReleaseURL = %q, want preserved release URL", downloadErr.CheckResult.ReleaseURL)
 	}
 }
 

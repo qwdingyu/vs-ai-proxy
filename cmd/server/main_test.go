@@ -227,6 +227,58 @@ func TestHandleCommandLineSelfUpdatePrintsWindowsDiagnostics(t *testing.T) {
 	}
 }
 
+func TestHandleCommandLineSelfUpdateFailurePrintsManualGitHubLink(t *testing.T) {
+	oldVersion := version
+	oldSelfUpdate := selfUpdateFn
+	t.Cleanup(func() {
+		version = oldVersion
+		selfUpdateFn = oldSelfUpdate
+	})
+
+	version = "v0.2.14"
+	selfUpdateFn = func(context.Context, update.Options) (update.SelfUpdateResult, error) {
+		return update.SelfUpdateResult{}, errors.New("network unavailable")
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	handled, exitCode := handleCommandLine([]string{"--self-update"}, &stdout, &stderr)
+	if !handled || exitCode != 1 {
+		t.Fatalf("handled=%v exitCode=%d stdout=%q stderr=%q", handled, exitCode, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"自更新失败: network unavailable",
+		"GitHub 最新版本: https://github.com/qwdingyu/vs-ai-proxy/releases/latest",
+		"手动替换 exe",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want contains %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestUpdateFailureMessageIncludesKnownAssetURL(t *testing.T) {
+	err := &update.DownloadError{
+		CheckResult: update.CheckResult{
+			ReleaseURL: "https://github.com/qwdingyu/vs-ai-proxy/releases/tag/v0.2.58",
+			AssetURL:   "https://github.com/qwdingyu/vs-ai-proxy/releases/download/v0.2.58/vs-ai-proxy-v0.2.58-windows-x64.exe.zip",
+		},
+		Err: errors.New("下载更新包返回 HTTP 503"),
+	}
+
+	message := updateFailureMessage(err.Error(), update.Options{}, update.CheckResult{}, err)
+	for _, want := range []string{
+		"下载更新包返回 HTTP 503",
+		"当前平台下载: https://github.com/qwdingyu/vs-ai-proxy/releases/download/v0.2.58/vs-ai-proxy-v0.2.58-windows-x64.exe.zip",
+		"Release: https://github.com/qwdingyu/vs-ai-proxy/releases/tag/v0.2.58",
+		"GitHub 最新版本: https://github.com/qwdingyu/vs-ai-proxy/releases/latest",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message = %q, want contains %q", message, want)
+		}
+	}
+}
+
 func TestAutoSelfUpdateOnStartupContinuesWhenCheckFails(t *testing.T) {
 	oldVersion := version
 	oldCheckUpdate := checkUpdateFn
@@ -247,6 +299,9 @@ func TestAutoSelfUpdateOnStartupContinuesWhenCheckFails(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "继续启动当前版本") {
 		t.Fatalf("logs = %q, want continue message", logs.String())
+	}
+	if !strings.Contains(logs.String(), "https://github.com/qwdingyu/vs-ai-proxy/releases/latest") {
+		t.Fatalf("logs = %q, want manual GitHub release link", logs.String())
 	}
 }
 

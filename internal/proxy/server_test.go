@@ -218,7 +218,7 @@ func TestProviderAttemptWarningUsesShortUserFacingReason(t *testing.T) {
 	})
 
 	out := buf.String()
-	if !strings.Contains(out, "模型 kimi-for-coding（kimi）失败: request_id=req-kimi provider=kimi requested_model=kimi-for-coding upstream=kimi-for-coding reason=上游额度已用完") {
+	if !strings.Contains(out, "模型 kimi-for-coding（kimi）候选尝试失败: request_id=req-kimi provider=kimi requested_model=kimi-for-coding upstream=kimi-for-coding reason=上游额度已用完") {
 		t.Fatalf("warning = %q, want concise reason", out)
 	}
 	if strings.Contains(out, "API 错误") || strings.Contains(out, "long upstream error") {
