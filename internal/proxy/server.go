@@ -429,6 +429,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			FallbackMode:             fallbackMode,
 			Normalization:            normalization,
 			StreamState:              streamState,
+			Usage:                    ww.usage,
 		})
 
 		if logErrorCode != "" {
@@ -467,9 +468,6 @@ func consoleDiagnosticSuffix(diag logDiagnosticSummary, attemptsSummary string, 
 	if strings.TrimSpace(diag.Action) != "" {
 		parts = append(parts, "action="+quoteLogValue(diag.Action))
 	}
-	if strings.TrimSpace(diag.Summary) != "" {
-		parts = append(parts, "summary="+quoteLogValue(diag.Summary))
-	}
 	if strings.TrimSpace(attemptsSummary) != "" {
 		parts = append(parts, "attempts="+quoteLogValue(attemptsSummary))
 	}
@@ -496,11 +494,8 @@ func enrichClientGoneDiagnostics(statusCode int, elapsedMs float64, requestBytes
 	if statusCode != 499 || code != "client_gone" || elapsedMs < clientDeadlineDiagnosticThreshold {
 		return code, message, hint
 	}
-	message = "客户端在接近等待上限时取消请求；通常表示上游模型首 token/完整响应过慢，而不是代理主动中断。"
-	hint = "优先检查 new-api/sub2api 内部渠道首 token 耗时、单渠道超时与重试策略；建议把单渠道超时控制在 20-30 秒，让上游网关在 VS/Copilot 约 100 秒等待上限前完成切换。"
-	if requestBytes > 0 {
-		hint += fmt.Sprintf(" 本次请求体约 %.1f KB，若小请求稳定而大请求超时，应减少上下文/文件内容或选择更稳的大上下文渠道。", float64(requestBytes)/1024)
-	}
+	message = "客户端等待超时。"
+	hint = "减少会话内容，或切换响应更快的模型。"
 	return "client_deadline_reached", message, hint
 }
 
@@ -595,6 +590,7 @@ type responseWriter struct {
 	fallbackMode             string
 	normalization            string
 	streamState              string
+	usage                    *store.TokenUsage
 }
 
 func requestIDFromRequest(r *http.Request, start time.Time) string {
@@ -643,8 +639,8 @@ func (w *responseWriter) finalizeRequestStatus(r *http.Request) {
 		w.statusCode = 499
 	}
 	w.Header().Set("X-Proxy-Error-Code", "client_gone")
-	w.Header().Set("X-Proxy-Error-Message", "客户端在请求完成前取消或断开连接。")
-	w.Header().Set("X-Proxy-Error-Hint", "如果请求耗时接近 VS/Copilot 等待上限，优先检查上游延迟、模型超时和请求体大小。")
+	w.Header().Set("X-Proxy-Error-Message", "客户端已取消请求。")
+	w.Header().Set("X-Proxy-Error-Hint", "重新发送；若反复出现，请新建会话。")
 }
 
 func (w *responseWriter) WriteHeader(code int) {
@@ -821,7 +817,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 				attempts = append(attempts, attempt)
-				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
+				s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 				if isClientGoneError(err) {
 					return
 				}
@@ -859,6 +855,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 								cancel()
 								setProxyFallbackMode(w, "nonstream-to-stream")
 								setResponseToolDiagnosticHeader(w, fallbackResp)
+								setResponseUsage(w, fallbackResp.Usage)
 								w.Header().Set("Content-Type", "application/json")
 								w.WriteHeader(http.StatusOK)
 								if _, writeErr := w.Write(append(fallbackBody, '\n')); writeErr != nil {
@@ -878,7 +875,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 					attempts = append(attempts, attempt)
-					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
+					s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 					registry.RecordCandidateFailure(prov.Name(), err)
 					if shouldStopCandidateFallback(attempt.Category) {
 						break
@@ -896,7 +893,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						lastErr = fmt.Errorf("解析响应失败: 非流式 SSE 聚合失败: %w", convErr)
 						attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
 						attempts = append(attempts, attempt)
-						s.logger.Warn("模型 %s 在提供商 %s 返回无法聚合的 SSE: %v", modelID, prov.Name(), convErr)
+						s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 						registry.RecordCandidateFailure(prov.Name(), lastErr)
 						if shouldStopCandidateFallback(attempt.Category) {
 							break
@@ -919,7 +916,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						validationErr,
 					)
 					attempts = append(attempts, attempt)
-					s.logger.Warn("模型 %s 在提供商 %s 返回无效 OpenAI 响应: %v", modelID, prov.Name(), validationErr)
+					s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 					registry.RecordCandidateFailure(prov.Name(), validationErr)
 					if shouldStopCandidateFallback(attempt.Category) {
 						break
@@ -927,6 +924,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				setRawResponseToolDiagnosticHeader(w, body)
+				setRawOpenAIResponseUsage(w, body)
 				s.cacheRawOpenAIChatResponse(body)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
@@ -949,6 +947,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						cancel()
 						setProxyFallbackMode(w, "nonstream-to-stream")
 						setResponseToolDiagnosticHeader(w, fallbackResp)
+						setResponseUsage(w, fallbackResp.Usage)
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusOK)
 						if _, writeErr := w.Write(append(fallbackBody, '\n')); writeErr != nil {
@@ -968,7 +967,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 			attempts = append(attempts, attempt)
-			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
+			s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 			registry.RecordCandidateFailure(prov.Name(), err)
 			if shouldStopCandidateFallback(attempt.Category) {
 				break
@@ -981,7 +980,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = fmt.Errorf("解析响应失败: typed provider 响应契约无效: %w", validationErr)
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
 			attempts = append(attempts, attempt)
-			s.logger.Warn("模型 %s 在提供商 %s 返回无效 typed 响应: %v", modelID, prov.Name(), lastErr)
+			s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 			registry.RecordCandidateFailure(prov.Name(), lastErr)
 			if shouldStopCandidateFallback(attempt.Category) {
 				break
@@ -989,6 +988,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		setResponseToolDiagnosticHeader(w, resp)
+		setResponseUsage(w, resp.Usage)
 		s.cacheChatResponse(resp)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1155,7 +1155,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 				attempts = append(attempts, attempt)
-				s.logger.Warn("模型 %s 在提供商 %s 流式失败: %v", modelID, prov.Name(), err)
+				s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 				if streamWriter.HasWritten() {
 					// 已经写出部分 Ollama 响应后发生协议/网络错误，不能切换候选，
 					// 但仍必须记录 provider 失败，避免健康排序把半截响应当成功。
@@ -1181,7 +1181,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 					attempts = append(attempts, attempt)
-					s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
+					s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 					registry.RecordCandidateFailure(prov.Name(), err)
 					if shouldStopCandidateFallback(attempt.Category) {
 						break
@@ -1221,13 +1221,14 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 					lastErr = protocolErr
 					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, protocolErr)
 					attempts = append(attempts, attempt)
-					s.logger.Warn("模型 %s 在提供商 %s 返回无效 Ollama 响应: %v", modelID, prov.Name(), protocolErr)
+					s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 					registry.RecordCandidateFailure(prov.Name(), protocolErr)
 					if shouldStopCandidateFallback(attempt.Category) {
 						break
 					}
 					continue
 				}
+				setRawOllamaResponseUsage(w, body)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				w.Write(ensureOllamaContentFromThinking(body))
@@ -1242,7 +1243,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 			attempts = append(attempts, attempt)
-			s.logger.Warn("模型 %s 在提供商 %s 失败: %v", modelID, prov.Name(), err)
+			s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 			registry.RecordCandidateFailure(prov.Name(), err)
 			if shouldStopCandidateFallback(attempt.Category) {
 				break
@@ -1254,7 +1255,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			lastErr = fmt.Errorf("解析响应失败: typed provider 响应契约无效: %w", validationErr)
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
 			attempts = append(attempts, attempt)
-			s.logger.Warn("模型 %s 在提供商 %s 返回无效 typed 响应: %v", modelID, prov.Name(), lastErr)
+			s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
 			registry.RecordCandidateFailure(prov.Name(), lastErr)
 			if shouldStopCandidateFallback(attempt.Category) {
 				break
@@ -1262,6 +1263,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		setResponseToolDiagnosticHeader(w, resp)
+		setResponseUsage(w, resp.Usage)
 		s.cacheChatResponse(resp)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1353,6 +1355,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 				if validationErr := validateProviderResponseToolContract(resp); validationErr == nil {
 					setProxyFallbackMode(w, "stream-to-nonstream")
 					setResponseToolDiagnosticHeader(w, resp)
+					setResponseUsage(w, resp.Usage)
 					if writeErr := writeOpenAIChatResponseAsSSE(w, flusher, resp); writeErr == nil {
 						s.cacheChatResponse(resp)
 						return nil
@@ -1391,6 +1394,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		fillMissingStreamResponseModel(dsmlResp, req.Model)
 		normalizeProviderSpecificToolCalls(dsmlResp, allowedToolNames(req))
 		setResponseToolDiagnosticHeader(w, dsmlResp)
+		setResponseUsage(w, dsmlResp.Usage)
 		s.cacheChatResponse(dsmlResp)
 		return writeOpenAIChatResponseAsSSE(w, flusher, dsmlResp)
 	}
@@ -1439,6 +1443,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 	if err := validateOpenAIStreamCompletion(acc, streamToolSanitizer); err != nil {
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 	}
+	setResponseUsage(w, acc.usage)
 	if err := eventProcessor.commit(); err != nil {
 		return fmt.Errorf("写入响应失败: OpenAI SSE: %w", err)
 	}
@@ -1531,6 +1536,7 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 	if err := validateOpenAIStreamCompletion(openAIAcc, streamToolSanitizer); err != nil {
 		return fmt.Errorf("解析 Ollama 工具流失败: %w", err)
 	}
+	setResponseUsage(w, ollamaAcc.usage)
 	if err := eventProcessor.commit(); err != nil {
 		return fmt.Errorf("写入 Ollama 工具流失败: %w", err)
 	}
@@ -1573,6 +1579,7 @@ func (s *Server) streamOllamaPassthrough(w http.ResponseWriter, r *http.Request,
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+	setResponseUsage(w, acc.usage)
 	s.cacheStreamAccumulator(acc)
 	setStreamToolDiagnosticHeader(w, acc)
 	return nil
@@ -1629,6 +1636,7 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 	if err := validateOpenAIStreamCompletion(acc, streamToolSanitizer); err != nil {
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 	}
+	setResponseUsage(w, acc.usage)
 	if err := eventProcessor.commit(); err != nil {
 		return fmt.Errorf("写入响应失败: Ollama NDJSON: %w", err)
 	}
@@ -1743,6 +1751,7 @@ type openAIStreamChunk struct {
 	Refusal      string
 	ToolCalls    []any
 	FinishReason string
+	Usage        *provider.Usage
 }
 
 func parseOpenAIStreamPayload(payload string) (openAIStreamChunk, error) {
@@ -1758,16 +1767,25 @@ func parseOpenAIStreamPayload(payload string) (openAIStreamChunk, error) {
 		return openAIStreamChunk{}, fmt.Errorf("upstream SSE error: %s", sanitizeDiagnosticMessage(string(encoded)))
 	}
 
+	out := openAIStreamChunk{}
+	if rawUsage, ok := root["usage"]; ok && rawUsage != nil {
+		if encoded, err := json.Marshal(rawUsage); err == nil {
+			var usage provider.Usage
+			if json.Unmarshal(encoded, &usage) == nil {
+				out.Usage = provider.NormalizeUsage(&usage)
+			}
+		}
+	}
+
 	choices, _ := root["choices"].([]any)
 	if len(choices) == 0 {
-		return openAIStreamChunk{}, nil
+		return out, nil
 	}
 	choice, _ := choices[0].(map[string]any)
 	if choice == nil {
-		return openAIStreamChunk{}, nil
+		return out, nil
 	}
 
-	out := openAIStreamChunk{}
 	if finish, ok := choice["finish_reason"].(string); ok {
 		out.FinishReason = finish
 	}
@@ -1930,11 +1948,22 @@ func alternateChatModeFailure(initialErr, fallbackErr error) error {
 
 func shouldStopCandidateFallback(category string) bool {
 	switch category {
-	case "client_gone", "upstream_auth_error", "upstream_rate_limit", "upstream_payload_too_large", "upstream_request_error":
+	case "client_gone", "upstream_quota_exhausted", "upstream_auth_error", "upstream_rate_limit", "upstream_payload_too_large", "upstream_message_error", "upstream_request_error":
 		return true
 	default:
 		return false
 	}
+}
+
+func (s *Server) logProviderAttemptFailure(modelID, providerName string, attempt attemptDiagnostic) {
+	if s == nil || s.logger == nil {
+		return
+	}
+	if strings.TrimSpace(attempt.Message) != "" {
+		s.logger.Debug("模型 %s（%s）上游原始错误: %s", modelID, providerName, diagnosticHeaderValue(attempt.Message))
+	}
+	reason := userFacingDiagnosticFor(attempt.Category).Reason
+	s.logger.Warn("模型 %s（%s）失败: %s", modelID, providerName, reason)
 }
 
 func isClientGoneError(err error) bool {

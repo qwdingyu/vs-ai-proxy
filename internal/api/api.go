@@ -590,6 +590,24 @@ type providerHealthResponse struct {
 	LastError           string     `json:"last_error,omitempty"`
 }
 
+type providerCompatibilityProfileResponse struct {
+	Capability              string                    `json:"capability"`
+	Category                provider.ProviderCategory `json:"category"`
+	ApiFormat               provider.ApiFormat        `json:"api_format"`
+	ChatPath                string                    `json:"chat_path"`
+	ModelsPath              string                    `json:"models_path"`
+	OutputTokenParam        string                    `json:"output_token_param"`
+	SupportsReasoningEffort bool                      `json:"supports_reasoning_effort"`
+	SupportsTopK            bool                      `json:"supports_top_k"`
+	DefaultBaseURL          string                    `json:"default_base_url"`
+	EnvPrefix               string                    `json:"env_prefix"`
+}
+
+type providerListResponseItem struct {
+	config.ProviderConfig
+	CompatibilityProfile providerCompatibilityProfileResponse `json:"compatibility_profile"`
+}
+
 func (s *Server) getProviderHealth(c *gin.Context) {
 	if s.proxy == nil {
 		c.JSON(http.StatusOK, []providerHealthResponse{})
@@ -691,7 +709,36 @@ func (s *Server) validateConfig(c *gin.Context) {
 
 // listProviders 列出所有提供商
 func (s *Server) listProviders(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"providers": s.configMgr.Get().Providers})
+	cfg := s.configMgr.Get()
+	items := make([]providerListResponseItem, 0, len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		p = config.NormalizeProvider(p)
+		// 兼容档案是只读派生信息，不写回 config.json。
+		// 目的只是让管理页解释当前 provider 会按哪套 path / 参数能力处理，
+		// 避免用户把 zhipu/kimi 这类 versioned base URL 再错误拼成 /v4/v1。
+		items = append(items, providerListResponseItem{
+			ProviderConfig:       p,
+			CompatibilityProfile: providerCompatibilityProfileFromConfig(p),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"providers": items})
+}
+
+func providerCompatibilityProfileFromConfig(p config.ProviderConfig) providerCompatibilityProfileResponse {
+	// API 层保持薄封装：provider 包是能力事实来源，API 只负责稳定 JSON 形状。
+	profile := provider.CompatibilityProfileFor(config.ProviderKey(p), p.Name, p.BaseURL, p.Type)
+	return providerCompatibilityProfileResponse{
+		Capability:              profile.Capability,
+		Category:                profile.Category,
+		ApiFormat:               profile.ApiFormat,
+		ChatPath:                profile.ChatPath,
+		ModelsPath:              profile.ModelsPath,
+		OutputTokenParam:        profile.OutputTokenParam,
+		SupportsReasoningEffort: profile.SupportsReasoningEffort,
+		SupportsTopK:            profile.SupportsTopK,
+		DefaultBaseURL:          profile.DefaultBaseURL,
+		EnvPrefix:               profile.EnvPrefix,
+	}
 }
 
 // addProvider 新增提供商并热更新代理路由。

@@ -93,6 +93,24 @@ func TestModelCatalogLoadsEmbeddedDefaultSelections(t *testing.T) {
 	}
 }
 
+func TestModelCatalogLoadsKimiCodingParameterPolicy(t *testing.T) {
+	catalog := NewModelCatalog(nil, "", time.Minute)
+	profile, ok := catalog.ProfileFromSelections("kimi-for-coding", "kimi")
+	if !ok {
+		t.Fatal("expected Kimi execution profile")
+	}
+	if profile.FixedTemperature == nil || *profile.FixedTemperature != 1 {
+		t.Fatalf("fixed_temperature = %v, want 1", profile.FixedTemperature)
+	}
+	if profile.Temperature != nil || profile.OverrideClientParams {
+		t.Fatal("hard constraints must remain separate from configurable defaults")
+	}
+
+	if _, ok := catalog.ProfileFromSelections("kimi-for-coding-highspeed", "kimi"); ok {
+		t.Fatal("exact Kimi policy must not leak to an unverified model variant")
+	}
+}
+
 func TestModelCatalogProfileAnyFindsEmbeddedModelAcrossProviders(t *testing.T) {
 	catalog := NewModelCatalog(nil, "", time.Minute)
 	profile, ok := catalog.ProfileAny("deepseek-v4-flash")

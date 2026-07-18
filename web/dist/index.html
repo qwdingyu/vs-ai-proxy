@@ -46,7 +46,8 @@
     .logs-table .col-method { width: 58px; }
     .logs-table .col-path { width: 132px; }
     .logs-table .col-provider { width: 96px; }
-    .logs-table .col-model { width: 260px; }
+    .logs-table .col-model { width: 220px; }
+    .logs-table .col-tokens { width: 104px; text-align: right; }
     .logs-table .col-tools { width: auto; }
     .logs-table .col-error { width: 190px; }
     .logs-table .col-status { width: 58px; }
@@ -80,9 +81,13 @@
     .secret-row input { flex: 1; min-width: 0; }
     .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
     .hint { color: var(--muted); }
+    .token-usage-note { line-height: 1.6; margin: -4px 0 12px; }
     .hidden { display: none; }
     .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .token-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .table-scroll { overflow-x: auto; }
+    .token-table { min-width: 920px; }
     .hero-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.8fr); gap: 14px; align-items: stretch; margin-bottom: 16px; }
     .hero-card { background: linear-gradient(135deg, rgba(88,166,255,0.18), rgba(63,185,80,0.12)); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
     .hero-card h2 { margin-top: 0; }
@@ -198,10 +203,61 @@
           </div>
         </div>
 
+        <h2 data-i18n="dashboard.tokens.title">累计 Token 用量</h2>
+        <div class="hint token-usage-note" data-i18n="dashboard.tokens.note">Token 只统计上游返回 usage 的请求；未返回 usage 的请求为未知，不按 0 计算。缓存命中的输入和推理输出子项已包含在总 Token 中，不重复相加。</div>
+        <div class="stats token-stats">
+          <div class="stat">
+            <div class="label" data-i18n="dashboard.tokens.prompt">输入 Token</div>
+            <div class="value" id="promptTokens">-</div>
+          </div>
+          <div class="stat">
+            <div class="label" data-i18n="dashboard.tokens.completion">输出 Token</div>
+            <div class="value" id="completionTokens">-</div>
+          </div>
+          <div class="stat">
+            <div class="label" data-i18n="dashboard.tokens.total">总 Token</div>
+            <div class="value" id="totalTokens">-</div>
+          </div>
+          <div class="stat">
+            <div class="label" data-i18n="dashboard.tokens.coverage">Token 明细覆盖</div>
+            <div class="value" id="usageCoverage">-</div>
+          </div>
+          <div class="stat">
+            <div class="label" data-i18n="dashboard.tokens.cached">缓存命中的输入</div>
+            <div class="value" id="cachedTokens">-</div>
+          </div>
+          <div class="stat">
+            <div class="label" data-i18n="dashboard.tokens.reasoning">推理输出子项</div>
+            <div class="value" id="reasoningTokens">-</div>
+          </div>
+        </div>
+
+        <h3 data-i18n="dashboard.tokens.models">模型用量</h3>
+        <div class="table-scroll">
+          <table class="table token-table">
+            <thead>
+              <tr>
+                <th data-i18n="table.header.provider">提供商</th>
+                <th data-i18n="table.header.model">模型</th>
+                <th data-i18n="dashboard.tokens.requests">请求</th>
+                <th data-i18n="dashboard.tokens.reported">Token 明细覆盖</th>
+                <th data-i18n="dashboard.tokens.prompt">输入 Token</th>
+                <th data-i18n="dashboard.tokens.completion">输出 Token</th>
+                <th data-i18n="dashboard.tokens.total">总 Token</th>
+                <th data-i18n="dashboard.tokens.cached">缓存命中的输入</th>
+                <th data-i18n="dashboard.tokens.reasoning">推理输出子项</th>
+              </tr>
+            </thead>
+            <tbody id="modelTokenTable">
+              <tr><td colspan="9" class="empty" data-i18n="table.empty.modelUsage">暂无 Token 明细</td></tr>
+            </tbody>
+          </table>
+        </div>
+
         <h3 data-i18n="dashboard.recentLogs">最近日志</h3>
         <table class="table logs-table">
           <colgroup>
-            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency"><col class="col-action">
+            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tokens"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency"><col class="col-action">
           </colgroup>
           <thead>
             <tr>
@@ -210,6 +266,7 @@
               <th data-i18n="table.header.path">路径</th>
               <th data-i18n="table.header.provider">提供商</th>
               <th data-i18n="table.header.model">模型</th>
+              <th data-i18n="table.header.tokens">Token</th>
               <th data-i18n="table.header.tools">工具/恢复</th>
               <th data-i18n="table.header.error">错误</th>
               <th data-i18n="table.header.status">状态</th>
@@ -218,7 +275,7 @@
             </tr>
           </thead>
           <tbody id="dashboardLogs">
-            <tr><td colspan="10" class="empty" data-i18n="table.empty.logs">暂无日志</td></tr>
+            <tr><td colspan="11" class="empty" data-i18n="table.empty.logs">暂无日志</td></tr>
           </tbody>
         </table>
       </section>
@@ -289,6 +346,7 @@
               <th data-i18n="providers.form.name">名称</th>
               <th data-i18n="providers.form.type">类型</th>
               <th data-i18n="providers.form.baseUrl">Base URL</th>
+              <th data-i18n="providers.form.compatibilityProfile">兼容档案</th>
               <th data-i18n="table.header.model">模型</th>
               <th data-i18n="providers.form.priority">优先级</th>
               <th data-i18n="providers.form.enabled">启用</th>
@@ -296,7 +354,7 @@
             </tr>
           </thead>
           <tbody id="providerTable">
-            <tr><td colspan="8" class="empty" data-i18n="table.loading">加载中...</td></tr>
+            <tr><td colspan="9" class="empty" data-i18n="table.loading">加载中...</td></tr>
           </tbody>
         </table>
         <div id="providerModal" class="modal-backdrop hidden">
@@ -498,7 +556,7 @@
         </div>
         <table class="table logs-table">
           <colgroup>
-            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency"><col class="col-action">
+            <col class="col-time"><col class="col-method"><col class="col-path"><col class="col-provider"><col class="col-model"><col class="col-tokens"><col class="col-tools"><col class="col-error"><col class="col-status"><col class="col-latency"><col class="col-action">
           </colgroup>
           <thead>
             <tr>
@@ -507,6 +565,7 @@
               <th data-i18n="table.header.path">路径</th>
               <th data-i18n="table.header.provider">提供商</th>
               <th data-i18n="table.header.model">模型</th>
+              <th data-i18n="table.header.tokens">Token</th>
               <th data-i18n="table.header.tools">工具/恢复</th>
               <th data-i18n="table.header.error">错误</th>
               <th data-i18n="table.header.status">状态</th>
@@ -515,7 +574,7 @@
             </tr>
           </thead>
           <tbody id="logTable">
-            <tr><td colspan="10" class="empty" data-i18n="table.loading">加载中...</td></tr>
+            <tr><td colspan="11" class="empty" data-i18n="table.loading">加载中...</td></tr>
           </tbody>
         </table>
       </section>
@@ -733,6 +792,48 @@
       if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
       return `${(n / 1024 / 1024).toFixed(2)} MB`;
     };
+    const formatTokenCount = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) return '-';
+      return new Intl.NumberFormat(getCurrentLang() === 'en' ? 'en-US' : 'zh-CN').format(n);
+    };
+    const formatUsageCoverage = (reported, eligible) => {
+      const total = Number(eligible || 0);
+      const known = Number(reported || 0);
+      if (total <= 0) return '-';
+      return `${formatTokenCount(known)} / ${formatTokenCount(total)} (${(known * 100 / total).toFixed(0)}%)`;
+    };
+    const formatTokenUsage = (log) => {
+      if (!log || !log.usage) return '-';
+      const usage = log.usage;
+      const details = [
+        `${t('dashboard.tokens.prompt')}: ${formatTokenCount(usage.prompt_tokens)}`,
+        `${t('dashboard.tokens.completion')}: ${formatTokenCount(usage.completion_tokens)}`,
+        `${t('dashboard.tokens.cached')}: ${formatTokenCount(usage.cached_tokens || 0)}`,
+        `${t('dashboard.tokens.reasoning')}: ${formatTokenCount(usage.reasoning_tokens || 0)}`,
+      ].join(' | ');
+      return `<span class="badge" title="${escapeAttr(details)}">${formatTokenCount(usage.total_tokens)}</span>`;
+    };
+    const plainTokenUsage = (log) => {
+      if (!log || !log.usage) return '-';
+      const usage = log.usage;
+      return `${usage.total_tokens} (${usage.prompt_tokens}/${usage.completion_tokens}; cached=${usage.cached_tokens || 0}; reasoning=${usage.reasoning_tokens || 0}; source=${usage.source || 'upstream'})`;
+    };
+    const renderModelTokenRow = (item) => {
+      const hasUsage = Number(item.usage_reported_count || 0) > 0;
+      const token = (value) => hasUsage ? formatTokenCount(value) : '-';
+      return `<tr>
+        <td>${escapeHTML(item.provider || '-')}</td>
+        <td>${escapeHTML(formatModelRoute(item))}</td>
+        <td>${formatTokenCount(item.request_count)}</td>
+        <td>${formatUsageCoverage(item.usage_reported_count, item.request_count)}</td>
+        <td>${token(item.prompt_tokens)}</td>
+        <td>${token(item.completion_tokens)}</td>
+        <td>${token(item.total_tokens)}</td>
+        <td>${token(item.cached_tokens)}</td>
+        <td>${token(item.reasoning_tokens)}</td>
+      </tr>`;
+    };
     const formatToolDiagnostics = (log) => {
       const parts = [];
       if (log.request_id) parts.push(t('logs.toolDiagnostics.requestId') + ' ' + log.request_id);
@@ -758,6 +859,7 @@
         `${t('logs.diagnostic.provider')}: ${log.provider || '-'} / ${formatModelRoute(log)}`,
         `${t('logs.diagnostic.status')}: ${log.status_code ?? '-'} success=${log.is_success === true}`,
         `${t('logs.diagnostic.elapsed')}: ${formatLatency(log.elapsed_ms)}`,
+        `${t('logs.diagnostic.usage')}: ${plainTokenUsage(log)}`,
         `${t('logs.diagnostic.errorCode')}: ${log.error_code || '-'}`,
         `${t('logs.diagnostic.errorReason')}: ${log.error_reason || '-'}`,
         `${t('logs.diagnostic.errorAction')}: ${log.error_action || '-'}`,
@@ -784,6 +886,7 @@
             <td class="col-path" title="${path}">${path}</td>
             <td class="col-provider" title="${provider}">${provider}</td>
             <td class="col-model" title="${model}">${model}</td>
+            <td class="col-tokens">${formatTokenUsage(log)}</td>
             <td class="col-tools">${formatToolDiagnostics(log)}</td>
             <td class="col-error">${formatLogError(log)}</td>
             <td class="col-status"><span class="${statusClass(log.status_code)}">${escapeHTML(log.status_code ?? '-')}</span></td>
@@ -799,6 +902,40 @@
       return key && label !== key ? `${label} (${key})` : label;
     };
     const isBuiltInUseAI = (provider) => providerKey(provider).toLowerCase() === 'useai';
+    // 兼容档案来自后端 provider 能力表，是只读说明，不是用户可编辑配置。
+    // 列表页只展示最关键的 path / reasoning / top_k，完整细节放在 title 中。
+    const providerCompatibilityProfile = (provider) => provider?.compatibility_profile || {};
+    const providerCompatibilityLabel = (provider) => {
+      const profile = providerCompatibilityProfile(provider);
+      if (!profile || Object.keys(profile).length === 0) return '-';
+      const apiFormat = String(profile.api_format || '').toLowerCase();
+      const formatLabel = apiFormat === 'ollama'
+        ? t('providers.profile.ollama')
+        : apiFormat === 'openai'
+          ? t('providers.profile.openai')
+          : t('providers.profile.custom');
+      const parts = [formatLabel];
+      if (profile.chat_path) parts.push(String(profile.chat_path));
+      parts.push(
+        `${t('providers.profile.reasoning')}: ${profile.supports_reasoning_effort ? t('providers.profile.on') : t('providers.profile.off')}`,
+        `${t('providers.profile.topK')}: ${profile.supports_top_k ? t('providers.profile.on') : t('providers.profile.off')}`
+      );
+      return parts.join(' · ');
+    };
+    const providerCompatibilityTitle = (provider) => {
+      const profile = providerCompatibilityProfile(provider);
+      if (!profile || Object.keys(profile).length === 0) return '';
+      const lines = [];
+      if (profile.capability) lines.push(`${t('providers.profile.capability')}: ${profile.capability}`);
+      if (profile.category) lines.push(`${t('providers.profile.category')}: ${profile.category}`);
+      if (profile.api_format) lines.push(`${t('providers.profile.apiFormat')}: ${profile.api_format}`);
+      if (profile.chat_path) lines.push(`${t('providers.profile.chatPath')}: ${profile.chat_path}`);
+      if (profile.models_path) lines.push(`${t('providers.profile.modelsPath')}: ${profile.models_path}`);
+      if (profile.output_token_param) lines.push(`${t('providers.profile.outputTokenParam')}: ${profile.output_token_param}`);
+      if (profile.default_base_url) lines.push(`${t('providers.profile.defaultBaseUrl')}: ${profile.default_base_url}`);
+      if (profile.env_prefix) lines.push(`${t('providers.profile.envPrefix')}: ${profile.env_prefix}`);
+      return lines.join('\n');
+    };
     const sortedProvidersForDisplay = (providers) => [...providers].sort((a, b) => {
       if (isBuiltInUseAI(a)) return -1;
       if (isBuiltInUseAI(b)) return 1;
@@ -932,10 +1069,23 @@
         $('successCount').textContent = stats.success_count ?? '-';
         $('failureCount').textContent = stats.failure_count ?? '-';
         $('avgLatency').textContent = stats.avg_latency_ms != null ? stats.avg_latency_ms.toFixed(0) + ' ms' : '-';
+        const hasReportedUsage = Number(stats.usage_reported_count || 0) > 0;
+        const reportedToken = (value) => hasReportedUsage ? formatTokenCount(value || 0) : '-';
+        $('promptTokens').textContent = reportedToken(stats.prompt_tokens);
+        $('completionTokens').textContent = reportedToken(stats.completion_tokens);
+        $('totalTokens').textContent = reportedToken(stats.total_tokens);
+        $('cachedTokens').textContent = reportedToken(stats.cached_tokens);
+        $('reasoningTokens').textContent = reportedToken(stats.reasoning_tokens);
+        $('usageCoverage').textContent = formatUsageCoverage(stats.usage_reported_count, stats.token_usage_requests);
+        const modelTokenTable = $('modelTokenTable');
+        const modelUsage = stats.model_usage || [];
+        modelTokenTable.innerHTML = modelUsage.length
+          ? modelUsage.map(renderModelTokenRow).join('')
+          : '<tr><td colspan="9" class="empty">' + t('table.empty.modelUsage') + '</td></tr>';
         const tbody = $('dashboardLogs');
         const logs = logsRes.logs || [];
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="10" class="empty">' + t('table.empty.logs') + '</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="11" class="empty">' + t('table.empty.logs') + '</td></tr>';
           return;
         }
         tbody.innerHTML = logs.map(renderLogRow).join('');
@@ -970,7 +1120,7 @@
         currentProviders = items;
         const tbody = $('providerTable');
         if (!items.length) {
-          tbody.innerHTML = '<tr><td colspan="8" class="empty">' + t('table.empty.providers') + '</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="9" class="empty">' + t('table.empty.providers') + '</td></tr>';
           return;
         }
         tbody.innerHTML = items.map(item => {
@@ -981,6 +1131,7 @@
             <td>${escapeHTML(item.display_name || item.name)}</td>
             <td>${escapeHTML(item.type)}</td>
             <td>${escapeHTML(item.base_url)}</td>
+            <td title="${escapeAttr(providerCompatibilityTitle(item))}">${escapeHTML(providerCompatibilityLabel(item))}</td>
             <td>${escapeHTML(modelCounts.get(key.toLowerCase()) || 0)}</td>
             <td>${escapeHTML(item.priority ?? 0)}</td>
             <td>${item.enabled ? t('table.boolean.yes') : t('table.boolean.no')}</td>
@@ -1351,7 +1502,7 @@
 
         const tbody = $('logTable');
         if (!logs.length) {
-          tbody.innerHTML = '<tr><td colspan="10" class="empty">' + t('table.empty.logs') + '</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="11" class="empty">' + t('table.empty.logs') + '</td></tr>';
           updateLatestFailureBanner([]);
           return;
         }

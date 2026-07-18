@@ -17,6 +17,7 @@ type streamReasoningAccumulator struct {
 	hasToolCalls bool
 	finished     bool
 	finishReason string
+	usage        *provider.Usage
 }
 
 func newStreamReasoningAccumulator() *streamReasoningAccumulator {
@@ -42,6 +43,9 @@ func (a *streamReasoningAccumulator) consumeOpenAISSELine(line string) {
 }
 
 func (a *streamReasoningAccumulator) consumeOpenAIChunk(chunk openAIStreamChunk) {
+	if chunk.Usage != nil {
+		a.usage = provider.NormalizeUsage(chunk.Usage)
+	}
 	if strings.TrimSpace(chunk.Content) != "" {
 		a.hasContent = true
 	}
@@ -125,6 +129,39 @@ func (a *streamReasoningAccumulator) consumeOllamaChunk(chunk map[string]any) {
 		a.finished = true
 		a.finishReason, _ = chunk["done_reason"].(string)
 		a.finishReason = strings.ToLower(strings.TrimSpace(a.finishReason))
+	}
+	if prompt, promptOK := tokenCountFromMap(chunk, "prompt_eval_count"); promptOK {
+		completion, _ := tokenCountFromMap(chunk, "eval_count")
+		a.usage = provider.NormalizeUsage(&provider.Usage{
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+			TotalTokens:      prompt + completion,
+		})
+	} else if completion, completionOK := tokenCountFromMap(chunk, "eval_count"); completionOK {
+		a.usage = provider.NormalizeUsage(&provider.Usage{
+			CompletionTokens: completion,
+			TotalTokens:      completion,
+		})
+	}
+}
+
+func tokenCountFromMap(values map[string]any, key string) (int64, bool) {
+	value, ok := values[key]
+	if !ok {
+		return 0, false
+	}
+	switch count := value.(type) {
+	case int:
+		return int64(count), true
+	case int64:
+		return count, true
+	case float64:
+		if count < 0 || count != float64(int64(count)) {
+			return 0, false
+		}
+		return int64(count), true
+	default:
+		return 0, false
 	}
 }
 

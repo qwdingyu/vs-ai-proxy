@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -274,5 +275,138 @@ func TestStoreConcurrentAddLogAndStatistics(t *testing.T) {
 	}
 	if got, want := stats.SuccessCount, int64(1600); got != want {
 		t.Fatalf("SuccessCount = %d, want %d", got, want)
+	}
+}
+
+func TestTokenStatisticsDistinguishUnknownAndReportedZero(t *testing.T) {
+	s := New(10)
+	s.AddLog(RequestLog{Provider: "kimi", Model: "kimi-for-coding", Upstream: "kimi-for-coding", StatusCode: 200, IsSuccess: true})
+	s.AddLog(RequestLog{
+		Provider: "kimi", Model: "kimi-for-coding", Upstream: "kimi-for-coding", StatusCode: 200, IsSuccess: true,
+		Usage: &TokenUsage{},
+	})
+
+	stats := s.GetStatistics()
+	if stats.TokenUsageRequests != 2 || stats.UsageReportedCount != 1 {
+		t.Fatalf("usage coverage = %d/%d, want 1/2", stats.UsageReportedCount, stats.TokenUsageRequests)
+	}
+	if len(stats.ModelUsage) != 1 || stats.ModelUsage[0].RequestCount != 2 || stats.ModelUsage[0].UsageReportedCount != 1 {
+		t.Fatalf("model usage = %#v, want one model with coverage 1/2", stats.ModelUsage)
+	}
+	logs := s.GetLogs(2)
+	if logs[0].Usage == nil || logs[0].Usage.Source != "upstream" {
+		t.Fatalf("reported zero log usage = %#v, want non-nil upstream usage", logs[0].Usage)
+	}
+	if logs[1].Usage != nil {
+		t.Fatalf("unknown log usage = %#v, want nil", logs[1].Usage)
+	}
+}
+
+func TestTokenStatisticsAggregateDetailsAndSortModels(t *testing.T) {
+	s := New(10)
+	s.AddLog(RequestLog{
+		Provider: "zhipu", Model: "glm", Upstream: "glm-5.1", StatusCode: 200, IsSuccess: true,
+		Usage: &TokenUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, CachedTokens: 40, ReasoningTokens: 7, Source: "upstream"},
+	})
+	s.AddLog(RequestLog{
+		Provider: "kimi", Model: "kimi", Upstream: "kimi-for-coding", StatusCode: 200, IsSuccess: true,
+		Usage: &TokenUsage{PromptTokens: 10, CompletionTokens: 5},
+	})
+
+	stats := s.GetStatistics()
+	if stats.PromptTokens != 110 || stats.CompletionTokens != 25 || stats.TotalTokens != 135 {
+		t.Fatalf("token totals = %#v, want prompt=110 completion=25 total=135", stats)
+	}
+	if stats.CachedTokens != 40 || stats.ReasoningTokens != 7 {
+		t.Fatalf("detail totals = cached %d reasoning %d, want 40/7", stats.CachedTokens, stats.ReasoningTokens)
+	}
+	if len(stats.ModelUsage) != 2 || stats.ModelUsage[0].Upstream != "glm-5.1" {
+		t.Fatalf("model usage order = %#v, want highest total first", stats.ModelUsage)
+	}
+}
+
+func TestVersionedSnapshotPreservesCumulativeTokensBeyondLogLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.json")
+	s := New(2)
+	for i := int64(1); i <= 3; i++ {
+		s.AddLog(RequestLog{
+			Provider: "useai", Model: "step-router-v1", Upstream: "step-router-v1", StatusCode: 200, IsSuccess: true,
+			Usage: &TokenUsage{PromptTokens: i, CompletionTokens: i, TotalTokens: i * 2},
+		})
+	}
+	if err := s.PersistToFile(path); err != nil {
+		t.Fatalf("PersistToFile() error = %v", err)
+	}
+	logData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read logs snapshot: %v", err)
+	}
+	if !bytes.HasPrefix(bytes.TrimSpace(logData), []byte("[")) {
+		t.Fatalf("logs.json must remain a bare array for old-binary rollback compatibility: %s", logData)
+	}
+	if _, err := os.Stat(statisticsSidecarPath(path)); err != nil {
+		t.Fatalf("statistics sidecar missing: %v", err)
+	}
+	loaded := New(2)
+	if err := loaded.LoadFromFile(path); err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	if got := len(loaded.GetLogs(10)); got != 2 {
+		t.Fatalf("retained logs = %d, want 2", got)
+	}
+	stats := loaded.GetStatistics()
+	if stats.TotalRequests != 3 || stats.PromptTokens != 6 || stats.TotalTokens != 12 {
+		t.Fatalf("loaded cumulative statistics = %#v, want 3 requests and 12 tokens", stats)
+	}
+}
+
+func TestLoadFromFileAcceptsLegacyBareLogArray(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.json")
+	legacy := `[{"provider":"legacy","model":"m","upstream":"m","status_code":200,"is_success":true,"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3,"source":"upstream"}}]`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy snapshot: %v", err)
+	}
+	s := New(10)
+	if err := s.LoadFromFile(path); err != nil {
+		t.Fatalf("LoadFromFile() legacy error = %v", err)
+	}
+	stats := s.GetStatistics()
+	if stats.TotalRequests != 1 || stats.TotalTokens != 3 || stats.UsageReportedCount != 1 {
+		t.Fatalf("legacy statistics = %#v, want usage rebuilt", stats)
+	}
+}
+
+func TestLoadIgnoresStaleStatisticsSidecarAfterOldBinaryWritesLogs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.json")
+	s := New(10)
+	s.AddLog(RequestLog{Provider: "zhipu", Model: "glm", StatusCode: 200, IsSuccess: true, Usage: &TokenUsage{TotalTokens: 10}})
+	if err := s.PersistToFile(path); err != nil {
+		t.Fatalf("PersistToFile() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read logs: %v", err)
+	}
+	var logs []RequestLog
+	if err := json.Unmarshal(data, &logs); err != nil {
+		t.Fatalf("unmarshal logs: %v", err)
+	}
+	logs = append(logs, RequestLog{ID: "old-binary-log", Provider: "kimi", Model: "kimi", StatusCode: 200, IsSuccess: true, Usage: &TokenUsage{TotalTokens: 4}})
+	data, err = json.Marshal(logs)
+	if err != nil {
+		t.Fatalf("marshal old-binary logs: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write old-binary logs: %v", err)
+	}
+
+	loaded := New(10)
+	if err := loaded.LoadFromFile(path); err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	stats := loaded.GetStatistics()
+	if stats.TotalRequests != 2 || stats.TotalTokens != 14 {
+		t.Fatalf("statistics = %#v, want rebuild from two current logs", stats)
 	}
 }

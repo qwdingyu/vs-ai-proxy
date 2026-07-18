@@ -23,6 +23,7 @@ type ModelProfile struct {
 	SupportsVision       *bool    `json:"supports_vision"`
 	Family               string   `json:"family"`
 	Temperature          *float64 `json:"temperature"`
+	FixedTemperature     *float64 `json:"fixed_temperature"`
 	TopP                 *float64 `json:"top_p"`
 	MaxTokens            *int     `json:"max_tokens"`
 	ReasoningEffort      string   `json:"reasoning_effort"`
@@ -30,6 +31,7 @@ type ModelProfile struct {
 	OverrideClientParams bool     `json:"override_client_params"`
 	SupportsReasoning    *bool    `json:"supports_reasoning"`
 	MatchPriority        int      `json:"match_priority"`
+	ExactMatch           bool     `json:"exact_match"`
 	Enabled              bool     `json:"enabled"`
 }
 
@@ -179,7 +181,7 @@ func (c *ModelCatalog) Profile(model, provider string) (ModelProfile, bool) {
 		if !entry.Enabled || !entry.Configured || !strings.EqualFold(entry.Provider, provider) {
 			continue
 		}
-		score := ProfileNameMatchScore(model, entry.Model)
+		score := modelProfileMatchScore(model, entry.Profile)
 		if score < 0 {
 			continue
 		}
@@ -248,7 +250,7 @@ func (c *ModelCatalog) ProfileFromSelections(model string, providers ...string) 
 			if strings.TrimSpace(profile.Provider) == "" {
 				profile.Provider = sel.Provider
 			}
-			if score := ProfileNameMatchScore(model, profile.Model); betterProfileMatch(profile, score, profile.MatchPriority, bestScore, best) {
+			if score := modelProfileMatchScore(model, profile); betterProfileMatch(profile, score, profile.MatchPriority, bestScore, best) {
 				bestScore = score
 				best = profile
 			}
@@ -290,7 +292,7 @@ func (c *ModelCatalog) builtInProfileLocked(model string) (ModelProfile, bool) {
 			if strings.TrimSpace(profile.Provider) == "" {
 				profile.Provider = selection.Provider
 			}
-			if score := ProfileNameMatchScore(model, profile.Model); score >= 0 {
+			if score := modelProfileMatchScore(model, profile); score >= 0 {
 				candidates = append(candidates, candidate{
 					profile: profile,
 					score:   score,
@@ -304,7 +306,7 @@ func (c *ModelCatalog) builtInProfileLocked(model string) (ModelProfile, bool) {
 		if !profile.Enabled || !profileHasMetadata(profile) {
 			continue
 		}
-		if score := ProfileNameMatchScore(model, profile.Model); score >= 0 {
+		if score := modelProfileMatchScore(model, profile); score >= 0 {
 			candidates = append(candidates, candidate{
 				profile: profile,
 				score:   score,
@@ -379,6 +381,9 @@ func MergeModelProfiles(base, override ModelProfile) ModelProfile {
 	if override.Temperature != nil {
 		merged.Temperature = override.Temperature
 	}
+	if override.FixedTemperature != nil {
+		merged.FixedTemperature = override.FixedTemperature
+	}
 	if override.TopP != nil {
 		merged.TopP = override.TopP
 	}
@@ -399,6 +404,9 @@ func MergeModelProfiles(base, override ModelProfile) ModelProfile {
 	}
 	if override.MatchPriority != 0 {
 		merged.MatchPriority = override.MatchPriority
+	}
+	if override.ExactMatch {
+		merged.ExactMatch = true
 	}
 	merged.Enabled = override.Enabled || merged.Enabled
 	return merged
@@ -670,6 +678,25 @@ func ProfileNameMatchScore(requested, candidate string) int {
 	return best
 }
 
+func modelProfileMatchScore(requested string, profile ModelProfile) int {
+	if profile.ExactMatch && !exactProfileNameMatch(requested, profile.Model) {
+		return -1
+	}
+	return ProfileNameMatchScore(requested, profile.Model)
+}
+
+func exactProfileNameMatch(requested, candidate string) bool {
+	for _, requestedVariant := range modelNameMatchVariants(requested) {
+		for _, candidateVariant := range modelNameMatchVariants(candidate) {
+			if requestedVariant == candidateVariant ||
+				strings.EqualFold(ModelBasename(requestedVariant), ModelBasename(candidateVariant)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func modelNameMatchVariants(model string) []string {
 	clean := strings.ToLower(StripModelTag(strings.TrimSpace(model)))
 	variants := []string{}
@@ -845,6 +872,7 @@ func (p *ModelProfile) UnmarshalJSON(data []byte) error {
 		SupportsVision       *bool    `json:"supports_vision"`
 		Family               string   `json:"family"`
 		Temperature          *float64 `json:"temperature"`
+		FixedTemperature     *float64 `json:"fixed_temperature"`
 		TopP                 *float64 `json:"top_p"`
 		MaxTokens            *int     `json:"max_tokens"`
 		ReasoningEffort      string   `json:"reasoning_effort"`
@@ -859,6 +887,7 @@ func (p *ModelProfile) UnmarshalJSON(data []byte) error {
 		Provider      string        `json:"provider"`
 		Priority      *int          `json:"priority"`
 		MatchPriority *int          `json:"match_priority"`
+		ExactMatch    bool          `json:"exact_match"`
 		Enabled       *bool         `json:"enabled"`
 		Execution     *rawExecution `json:"execution"`
 		rawExecution
@@ -896,6 +925,7 @@ func (p *ModelProfile) UnmarshalJSON(data []byte) error {
 		SupportsVision:       exec.SupportsVision,
 		Family:               exec.Family,
 		Temperature:          exec.Temperature,
+		FixedTemperature:     exec.FixedTemperature,
 		TopP:                 exec.TopP,
 		MaxTokens:            exec.MaxTokens,
 		ReasoningEffort:      exec.ReasoningEffort,
@@ -903,6 +933,7 @@ func (p *ModelProfile) UnmarshalJSON(data []byte) error {
 		OverrideClientParams: exec.OverrideClientParams,
 		SupportsReasoning:    exec.SupportsReasoning,
 		MatchPriority:        priority,
+		ExactMatch:           raw.ExactMatch,
 		Enabled:              enabled,
 	}
 	return nil

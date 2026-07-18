@@ -11,27 +11,37 @@ MODEL="${MODEL:-deepseek-v4-flash}"
 PROVIDER_ID="${PROVIDER_ID:-useai}"
 DISPLAY_PROVIDER="${DISPLAY_PROVIDER:-UseAI}"
 TARGET_BYTES="${TARGET_BYTES:-1060000}"
+PAYLOAD_SHAPE="${PAYLOAD_SHAPE:-message}"
 DIRECT_TIMEOUT_SECONDS="${DIRECT_TIMEOUT_SECONDS:-90}"
 PROXY_TIMEOUT_SECONDS="${PROXY_TIMEOUT_SECONDS:-120}"
 
-WORK_DIR="$ROOT_DIR/.bin/useai-large-diagnostic"
+RESULT_DIR="$ROOT_DIR/.bin/useai-large-diagnostic"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vs-ai-proxy-diagnostic.XXXXXX")"
 PROXY_BIN="$WORK_DIR/vs-ai-proxy"
 CONFIG_PATH="$WORK_DIR/config.json"
+AUTH_HEADER_PATH="$WORK_DIR/auth-header.txt"
 REQUEST_PATH="$WORK_DIR/request.json"
+PROXY_REQUEST_PATH="$WORK_DIR/proxy-request.json"
 DIRECT_OUTPUT="$WORK_DIR/direct.out"
+DIRECT_ERROR="$WORK_DIR/direct.err"
+DIRECT_META="$WORK_DIR/direct.meta"
 PROXY_OUTPUT="$WORK_DIR/proxy.out"
+PROXY_ERROR="$WORK_DIR/proxy.err"
+PROXY_META="$WORK_DIR/proxy.meta"
 PROXY_LOG="$WORK_DIR/proxy.log"
 PID_FILE="$WORK_DIR/proxy.pid"
-RESULT_PATH="$WORK_DIR/result.json"
 STORE_PATH="$WORK_DIR/logs.json"
+REQUEST_STATS_PATH="$WORK_DIR/request-stats.json"
+RESULT_PATH="$RESULT_DIR/result.json"
 
-mkdir -p "$WORK_DIR"
-rm -f "$DIRECT_OUTPUT" "$PROXY_OUTPUT" "$PROXY_LOG" "$PID_FILE" "$RESULT_PATH" "$STORE_PATH"
+umask 077
+mkdir -p "$RESULT_DIR"
+chmod 700 "$WORK_DIR" "$RESULT_DIR"
 
 stop_proxy() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
-    pid="$(cat "$PID_FILE")"
+    pid="$(<"$PID_FILE")"
     kill "$pid" >/dev/null 2>&1 || true
     for _ in {1..40}; do
       if ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -39,11 +49,12 @@ stop_proxy() {
       fi
       sleep 0.25
     done
-    rm -f "$PID_FILE"
   fi
 }
+
 cleanup() {
   stop_proxy
+  rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
 
@@ -51,36 +62,60 @@ if [[ ! -f "$CONFIG_SOURCE" ]]; then
   echo "配置文件不存在: $CONFIG_SOURCE" >&2
   exit 1
 fi
+if [[ "$PAYLOAD_SHAPE" != "message" && "$PAYLOAD_SHAPE" != "tools" ]]; then
+  echo "PAYLOAD_SHAPE 仅支持 message 或 tools" >&2
+  exit 1
+fi
 
-python3 - "$CONFIG_SOURCE" "$CONFIG_PATH" "$PROXY_PORT" "$PROVIDER_ID" "$MODEL" "$REQUEST_PATH" "$TARGET_BYTES" "$INJECT_MODEL_BINDING" <<'PY'
+python3 - "$CONFIG_SOURCE" "$CONFIG_PATH" "$PROXY_PORT" "$PROVIDER_ID" "$MODEL" \
+  "$REQUEST_PATH" "$TARGET_BYTES" "$INJECT_MODEL_BINDING" "$PAYLOAD_SHAPE" "$REQUEST_STATS_PATH" <<'PY'
 import json
+import os
 import sys
 
-config_source, config_path, port, provider_id, model, request_path, target_bytes, inject_model_binding = sys.argv[1:]
+(
+    config_source,
+    config_path,
+    port,
+    provider_id,
+    model,
+    request_path,
+    target_bytes,
+    inject_model_binding,
+    payload_shape,
+    request_stats_path,
+) = sys.argv[1:]
 target_bytes = int(target_bytes)
 inject_model_binding = inject_model_binding.strip().lower() not in ('0', 'false', 'no', 'off')
+
 with open(config_source, encoding='utf-8') as f:
     cfg = json.load(f)
 cfg['port'] = int(port)
-# 诊断脚本默认在临时配置中把目标模型绑定到目标 provider，
-# 用于测试 vs-ai-proxy 的真实出站 JSON；不会修改用户原始 config.json。
 if inject_model_binding:
     models = cfg.setdefault('models', [])
-    exists = False
     for item in models:
-        if str(item.get('name','')).lower() == model.lower() and str(item.get('provider_id') or item.get('provider') or '').lower() == provider_id.lower():
-            exists = True
+        same_model = str(item.get('name', '')).lower() == model.lower()
+        item_provider = str(item.get('provider_id') or item.get('provider') or '').lower()
+        if same_model and item_provider == provider_id.lower():
             item['enabled'] = True
             break
-    if not exists:
-        models.append({'name': model, 'provider_id': provider_id, 'provider': provider_id, 'supports_tools': True, 'enabled': True})
+    else:
+        models.append({
+            'name': model,
+            'provider_id': provider_id,
+            'provider': provider_id,
+            'supports_tools': True,
+            'enabled': True,
+        })
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
+os.chmod(config_path, 0o600)
 
 tool_names = [
-    'adapt_plan','ask_question','clarify_requirements','code_search','create_file','detect_memories',
-    'file_search','find_symbol','get_file','edit_file','apply_patch','powershell','git','list_files',
-    'read_file','replace_in_file','run_command','search_symbols','update_plan','write_file'
+    'adapt_plan', 'ask_question', 'clarify_requirements', 'code_search', 'create_file',
+    'detect_memories', 'file_search', 'find_symbol', 'get_file', 'edit_file',
+    'apply_patch', 'powershell', 'git', 'list_files', 'read_file', 'replace_in_file',
+    'run_command', 'search_symbols', 'update_plan', 'write_file',
 ]
 tools = []
 for name in tool_names:
@@ -92,92 +127,99 @@ for name in tool_names:
             'parameters': {
                 'type': 'object',
                 'properties': {
-                    'path': {'type': 'string'},
-                    'content': {'type': 'string'},
-                    'command': {'type': 'string'},
-                    'query': {'type': 'string'},
+                    'path': {'type': 'string', 'description': 'Repository-relative file path.'},
+                    'content': {'type': 'string', 'description': 'Complete file content.'},
+                    'command': {'type': 'string', 'description': 'Command to execute.'},
+                    'query': {'type': 'string', 'description': 'Search query.'},
                 },
                 'additionalProperties': True,
             },
         },
     })
 
-base_body = {
+body = {
     'model': model,
     'messages': [
         {'role': 'system', 'content': 'You are Visual Studio Copilot coding assistant.'},
-        {'role': 'user', 'content': '请根据当前代码创建/修改文件。\n'},
+        {'role': 'user', 'content': 'Reply with one short sentence. Do not call tools.'},
     ],
     'tools': tools,
     'tool_choice': 'auto',
     'stream': True,
-    'max_tokens': 4096,
+    'max_tokens': 64,
+    'temperature': 1.0,
 }
 
-def encoded_len(body):
-    return len(json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+def encoded(value):
+    return json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
 
-line = '// large context line: abcdefghijklmnopqrstuvwxyz 0123456789\n'
-content = base_body['messages'][1]['content']
-while True:
-    base_body['messages'][1]['content'] = content
-    current = encoded_len(base_body)
-    if current >= target_bytes:
-        break
-    missing = target_bytes - current
-    content += line * max(1, missing // len(line.encode('utf-8')))
+current = len(encoded(body))
+if current > target_bytes:
+    raise SystemExit(f'TARGET_BYTES={target_bytes} is smaller than base request={current}')
+filler_bytes = target_bytes - current
+if payload_shape == 'message':
+    body['messages'][1]['content'] += 'x' * filler_bytes
+else:
+    share, remainder = divmod(filler_bytes, len(body['tools']))
+    for index, tool in enumerate(body['tools']):
+        tool['function']['description'] += 'x' * (share + (1 if index < remainder else 0))
 
-raw = json.dumps(base_body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+raw = encoded(body)
 with open(request_path, 'wb') as f:
     f.write(raw)
-print(json.dumps({'request_path': request_path, 'request_bytes': len(raw), 'model': model, 'provider_id': provider_id}, ensure_ascii=False))
+os.chmod(request_path, 0o600)
+
+stats = {
+    'payload_shape': payload_shape,
+    'request_bytes': len(raw),
+    'messages_bytes': len(encoded(body['messages'])),
+    'tools_bytes': len(encoded(body['tools'])),
+    'tool_count': len(body['tools']),
+    'model': model,
+    'provider_id': provider_id,
+}
+with open(request_stats_path, 'w', encoding='utf-8') as f:
+    json.dump(stats, f, ensure_ascii=False)
+print(json.dumps(stats, ensure_ascii=False))
 PY
 
-USEAI_CONTEXT_JSON="$(python3 - "$CONFIG_PATH" "$PROVIDER_ID" <<'PY'
+BASE_URL="$(python3 - "$CONFIG_PATH" "$PROVIDER_ID" "$AUTH_HEADER_PATH" <<'PY'
 import json
+import os
 import sys
-cfg = json.load(open(sys.argv[1], encoding='utf-8'))
-provider_id = sys.argv[2].lower()
-for p in cfg.get('providers', []):
-    key = (p.get('id') or p.get('name') or '').lower()
-    if key == provider_id or (p.get('name') or '').lower() == provider_id:
-        print(json.dumps({'base_url': p.get('base_url','').rstrip('/'), 'api_key': p.get('api_key','')}, ensure_ascii=False))
+
+config_path, provider_id, auth_header_path = sys.argv[1:]
+with open(config_path, encoding='utf-8') as f:
+    cfg = json.load(f)
+provider_id = provider_id.lower()
+for provider in cfg.get('providers', []):
+    key = (provider.get('id') or provider.get('name') or '').lower()
+    if key == provider_id or (provider.get('name') or '').lower() == provider_id:
+        api_key = provider.get('api_key', '')
+        if not api_key:
+            raise SystemExit('provider API key is empty: ' + provider_id)
+        with open(auth_header_path, 'w', encoding='utf-8') as f:
+            f.write('Authorization: Bearer ' + api_key + '\n')
+        os.chmod(auth_header_path, 0o600)
+        print(provider.get('base_url', '').rstrip('/'))
         break
 else:
     raise SystemExit('provider not found: ' + provider_id)
 PY
 )"
-BASE_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["base_url"])' "$USEAI_CONTEXT_JSON")"
-API_KEY="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["api_key"])' "$USEAI_CONTEXT_JSON")"
 
 printf '\n== 1. direct upstream: %s/chat/completions ==\n' "$BASE_URL"
-DIRECT_STATUS="000"
 set +e
-DIRECT_BODY="$(curl -sS --max-time "$DIRECT_TIMEOUT_SECONDS" -w '\n__HTTP_STATUS__:%{http_code}\n__TIME_TOTAL__:%{time_total}\n' \
+curl -sS -N --max-time "$DIRECT_TIMEOUT_SECONDS" \
+  -o "$DIRECT_OUTPUT" \
+  -w '%{http_code}\n%{time_starttransfer}\n%{time_total}\n%{size_upload}\n%{size_download}\n' \
   -H 'Content-Type: application/json' \
-  -H 'User-Agent: VS-AI-Proxy-Diagnostic/1.0' \
-  -H "Authorization: Bearer $API_KEY" \
+  -H 'User-Agent: VS-AI-Proxy-Diagnostic/2.0' \
+  -H "@$AUTH_HEADER_PATH" \
   --data-binary "@$REQUEST_PATH" \
-  "$BASE_URL/chat/completions" 2>&1)"
+  "$BASE_URL/chat/completions" >"$DIRECT_META" 2>"$DIRECT_ERROR"
 DIRECT_RC=$?
 set -e
-printf '%s\n' "$DIRECT_BODY" > "$DIRECT_OUTPUT"
-DIRECT_STATUS="$(printf '%s\n' "$DIRECT_BODY" | awk -F: '/__HTTP_STATUS__/{print $2}' | tail -1 | tr -d '\r')"
-DIRECT_TIME_TOTAL="$(printf '%s\n' "$DIRECT_BODY" | awk -F: '/__TIME_TOTAL__/{print $2}' | tail -1 | tr -d '\r')"
-printf 'direct rc=%s status=%s elapsed_ms=%s\n' "$DIRECT_RC" "${DIRECT_STATUS:-unknown}" "$(python3 - "$DIRECT_TIME_TOTAL" <<'PY'
-import sys
-try:
-    print(f"{float(sys.argv[1]) * 1000:.0f}")
-except Exception:
-    print("unknown")
-PY
-)"
-DIRECT_PREVIEW_LIMIT=800 DIRECT_PREVIEW_BODY="$DIRECT_BODY" python3 - <<'PY'
-import os
-limit = int(os.environ.get('DIRECT_PREVIEW_LIMIT', '800'))
-body = '\n'.join(line for line in os.environ.get('DIRECT_PREVIEW_BODY', '').splitlines() if not line.startswith('__HTTP_STATUS__'))
-print(body[:limit])
-PY
 
 printf '\n== 2. local proxy: build and start ==\n'
 go build -o "$PROXY_BIN" ./cmd/server
@@ -191,79 +233,114 @@ for _ in {1..80}; do
 done
 curl -sf "http://127.0.0.1:$PROXY_PORT/health" >/dev/null
 
-PROXY_REQUEST_PATH="$WORK_DIR/proxy-request.json"
 python3 - "$REQUEST_PATH" "$PROXY_REQUEST_PATH" "$DISPLAY_PROVIDER" <<'PY'
 import json
+import os
 import sys
+
 src, dst, display_provider = sys.argv[1:]
-body = json.load(open(src, encoding='utf-8'))
+with open(src, encoding='utf-8') as f:
+    body = json.load(f)
 body['model'] = f'{display_provider} - {body["model"]}'
+# Kimi only accepts 1. The proxy must govern this client value while other providers preserve it.
+body['temperature'] = 0.2
 with open(dst, 'wb') as f:
     f.write(json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+os.chmod(dst, 0o600)
 PY
 
 printf '\n== 3. proxy request: /v1/chat/completions ==\n'
-PROXY_STATUS="000"
 set +e
-PROXY_BODY="$(curl -sS --max-time "$PROXY_TIMEOUT_SECONDS" -w '\n__HTTP_STATUS__:%{http_code}\n__TIME_TOTAL__:%{time_total}\n' \
+curl -sS -N --max-time "$PROXY_TIMEOUT_SECONDS" \
+  -o "$PROXY_OUTPUT" \
+  -w '%{http_code}\n%{time_starttransfer}\n%{time_total}\n%{size_upload}\n%{size_download}\n' \
   -H 'Content-Type: application/json' \
   --data-binary "@$PROXY_REQUEST_PATH" \
-  "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" 2>&1)"
+  "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" >"$PROXY_META" 2>"$PROXY_ERROR"
 PROXY_RC=$?
 set -e
-printf '%s\n' "$PROXY_BODY" > "$PROXY_OUTPUT"
-PROXY_STATUS="$(printf '%s\n' "$PROXY_BODY" | awk -F: '/__HTTP_STATUS__/{print $2}' | tail -1 | tr -d '\r')"
-PROXY_TIME_TOTAL="$(printf '%s\n' "$PROXY_BODY" | awk -F: '/__TIME_TOTAL__/{print $2}' | tail -1 | tr -d '\r')"
-printf 'proxy rc=%s status=%s elapsed_ms=%s\n' "$PROXY_RC" "${PROXY_STATUS:-unknown}" "$(python3 - "$PROXY_TIME_TOTAL" <<'PY'
-import sys
-try:
-    print(f"{float(sys.argv[1]) * 1000:.0f}")
-except Exception:
-    print("unknown")
-PY
-)"
-PROXY_PREVIEW_LIMIT=1200 PROXY_PREVIEW_BODY="$PROXY_BODY" python3 - <<'PY'
-import os
-limit = int(os.environ.get('PROXY_PREVIEW_LIMIT', '1200'))
-body = '\n'.join(line for line in os.environ.get('PROXY_PREVIEW_BODY', '').splitlines() if not line.startswith('__HTTP_STATUS__'))
-print(body[:limit])
-PY
 
 stop_proxy
 
-printf '\n== 4. proxy logs: request_bytes vs upstream_bytes ==\n'
-python3 - "$CONFIG_PATH" "$RESULT_PATH" "$DIRECT_STATUS" "$PROXY_STATUS" "$DIRECT_RC" "$PROXY_RC" "$DIRECT_TIME_TOTAL" "$PROXY_TIME_TOTAL" <<'PY'
+python3 - "$REQUEST_STATS_PATH" "$STORE_PATH" "$RESULT_PATH" \
+  "$DIRECT_META" "$DIRECT_OUTPUT" "$DIRECT_ERROR" "$DIRECT_RC" \
+  "$PROXY_META" "$PROXY_OUTPUT" "$PROXY_ERROR" "$PROXY_RC" <<'PY'
 import json
 import os
 import sys
-config_path, result_path, direct_status, proxy_status, direct_rc, proxy_rc, direct_time_total, proxy_time_total = sys.argv[1:]
-def elapsed_ms(value):
+
+(
+    request_stats_path,
+    store_path,
+    result_path,
+    direct_meta,
+    direct_output,
+    direct_error,
+    direct_rc,
+    proxy_meta,
+    proxy_output,
+    proxy_error,
+    proxy_rc,
+) = sys.argv[1:]
+
+def milliseconds(value):
     try:
         return round(float(value) * 1000, 3)
-    except Exception:
+    except (TypeError, ValueError):
         return None
-log_path = os.path.join(os.path.dirname(config_path), 'logs.json')
+
+def curl_result(meta_path, output_path, error_path, return_code):
+    lines = []
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding='utf-8') as f:
+            lines = [line.strip() for line in f]
+    lines += [''] * (5 - len(lines))
+    raw = b''
+    if os.path.exists(output_path):
+        with open(output_path, 'rb') as f:
+            raw = f.read()
+    stderr_kind = None
+    if os.path.exists(error_path) and os.path.getsize(error_path):
+        stderr_kind = 'curl_error'
+    return {
+        'curl_rc': int(return_code),
+        'status': lines[0] or '000',
+        'ttfb_ms': milliseconds(lines[1]),
+        'total_ms': milliseconds(lines[2]),
+        'upload_bytes': int(float(lines[3])) if lines[3] else None,
+        'download_bytes': int(float(lines[4])) if lines[4] else None,
+        'sse_events': sum(1 for line in raw.splitlines() if line.startswith(b'data:')),
+        'sse_done': any(line.strip() == b'data: [DONE]' for line in raw.splitlines()),
+        'error_kind': stderr_kind,
+    }
+
+with open(request_stats_path, encoding='utf-8') as f:
+    result = json.load(f)
+result['direct'] = curl_result(direct_meta, direct_output, direct_error, direct_rc)
+result['proxy'] = curl_result(proxy_meta, proxy_output, proxy_error, proxy_rc)
+
 logs = []
-if os.path.exists(log_path):
-    with open(log_path, encoding='utf-8') as f:
+if os.path.exists(store_path):
+    with open(store_path, encoding='utf-8') as f:
         logs = json.load(f)
-chat_logs = [item for item in logs if item.get('method') == 'POST' and item.get('path') == '/v1/chat/completions']
-last = chat_logs[-1] if chat_logs else (logs[-1] if logs else {})
-result = {
-    'direct_status': direct_status,
-    'direct_rc': int(direct_rc),
-    'direct_elapsed_ms': elapsed_ms(direct_time_total),
-    'proxy_status': proxy_status,
-    'proxy_rc': int(proxy_rc),
-    'proxy_elapsed_ms': elapsed_ms(proxy_time_total),
-    'last_proxy_log': last,
-    'request_bytes': last.get('request_bytes'),
-    'upstream_bytes': last.get('upstream_bytes'),
-    'delta_bytes': (last.get('upstream_bytes') or 0) - (last.get('request_bytes') or 0),
+chat_logs = [
+    item for item in logs
+    if item.get('method') == 'POST' and item.get('path') == '/v1/chat/completions'
+]
+last = chat_logs[-1] if chat_logs else {}
+result['proxy_diagnostic'] = {
+    key: last.get(key)
+    for key in (
+        'status_code', 'elapsed_ms', 'request_bytes', 'upstream_bytes', 'stream_state',
+        'error_code', 'attempts_summary', 'request_tools',
+    )
+    if last.get(key) is not None
 }
-print(json.dumps(result, ensure_ascii=False, indent=2))
+
 with open(result_path, 'w', encoding='utf-8') as f:
     json.dump(result, f, ensure_ascii=False, indent=2)
+os.chmod(result_path, 0o600)
+print(json.dumps(result, ensure_ascii=False, indent=2))
 PY
 
-printf '\n诊断结果已保存: %s\n' "$RESULT_PATH"
+printf '\n脱敏诊断结果已保存: %s\n' "$RESULT_PATH"

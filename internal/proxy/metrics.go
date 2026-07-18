@@ -38,6 +38,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		{name: "vs_ai_proxy_requests_success_total", value: fmt.Sprintf("%d", stats.SuccessCount), help: "Successful proxied requests.", typ: "counter"},
 		{name: "vs_ai_proxy_requests_failure_total", value: fmt.Sprintf("%d", stats.FailureCount), help: "Failed proxied requests.", typ: "counter"},
 		{name: "vs_ai_proxy_request_latency_ms_average", value: fmt.Sprintf("%.3f", stats.AvgLatencyMs), help: "Average proxied request latency in milliseconds.", typ: "gauge"},
+		{name: "vs_ai_proxy_token_usage_requests_total", value: fmt.Sprintf("%d", stats.TokenUsageRequests), help: "Requests eligible for upstream token usage reporting.", typ: "counter"},
+		{name: "vs_ai_proxy_token_usage_reported_total", value: fmt.Sprintf("%d", stats.UsageReportedCount), help: "Requests with upstream-reported token usage.", typ: "counter"},
+		{name: "vs_ai_proxy_prompt_tokens_total", value: fmt.Sprintf("%d", stats.PromptTokens), help: "Upstream-reported prompt tokens.", typ: "counter"},
+		{name: "vs_ai_proxy_completion_tokens_total", value: fmt.Sprintf("%d", stats.CompletionTokens), help: "Upstream-reported completion tokens.", typ: "counter"},
+		{name: "vs_ai_proxy_tokens_total", value: fmt.Sprintf("%d", stats.TotalTokens), help: "Upstream-reported total tokens.", typ: "counter"},
+		{name: "vs_ai_proxy_cached_tokens_total", value: fmt.Sprintf("%d", stats.CachedTokens), help: "Cached prompt tokens, already included in prompt tokens.", typ: "counter"},
+		{name: "vs_ai_proxy_reasoning_tokens_total", value: fmt.Sprintf("%d", stats.ReasoningTokens), help: "Reasoning tokens, already included in completion tokens.", typ: "counter"},
 		{name: "vs_ai_proxy_providers_configured", value: fmt.Sprintf("%d", providerCount), help: "Enabled providers currently registered.", typ: "gauge"},
 		{name: "vs_ai_proxy_models_available", value: fmt.Sprintf("%d", modelCount), help: "Known models currently exposed by the proxy.", typ: "gauge"},
 	}

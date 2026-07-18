@@ -102,9 +102,46 @@ type Choice struct {
 
 // Usage 使用情况
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int64                    `json:"prompt_tokens"`
+	CompletionTokens        int64                    `json:"completion_tokens"`
+	TotalTokens             int64                    `json:"total_tokens"`
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+type PromptTokensDetails struct {
+	CachedTokens int64 `json:"cached_tokens,omitempty"`
+}
+
+type CompletionTokensDetails struct {
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
+}
+
+// NormalizeUsage returns an independent, non-negative usage snapshot.
+// A non-nil all-zero result is meaningful: the upstream explicitly reported zero usage.
+func NormalizeUsage(usage *Usage) *Usage {
+	if usage == nil || usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
+		return nil
+	}
+	normalized := *usage
+	if usage.PromptTokensDetails != nil {
+		if usage.PromptTokensDetails.CachedTokens < 0 {
+			return nil
+		}
+		details := *usage.PromptTokensDetails
+		normalized.PromptTokensDetails = &details
+	}
+	if usage.CompletionTokensDetails != nil {
+		if usage.CompletionTokensDetails.ReasoningTokens < 0 {
+			return nil
+		}
+		details := *usage.CompletionTokensDetails
+		normalized.CompletionTokensDetails = &details
+	}
+	if normalized.TotalTokens == 0 && normalized.PromptTokens+normalized.CompletionTokens > 0 {
+		normalized.TotalTokens = normalized.PromptTokens + normalized.CompletionTokens
+	}
+	return &normalized
 }
 
 // APIError API 错误
@@ -182,6 +219,22 @@ func (e *providerHTTPError) Error() string {
 	return e.Message
 }
 
+// UpstreamHTTPStatusCode and UpstreamHTTPErrorBody expose provider-neutral
+// diagnostics without exporting the concrete transport error type.
+func (e *providerHTTPError) UpstreamHTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
+}
+
+func (e *providerHTTPError) UpstreamHTTPErrorBody() []byte {
+	if e == nil {
+		return nil
+	}
+	return bytes.Clone(e.Body)
+}
+
 // NewOpenAIProvider 创建 OpenAI 提供商
 func NewOpenAIProvider(name, apiKey, baseURL string, enabled bool, timeout time.Duration) *OpenAIProvider {
 	return NewOpenAIProviderWithCapability(name, "", apiKey, baseURL, enabled, timeout)
@@ -233,6 +286,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	if err := normalizeAndValidateChatResponseTools(&chatResp); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
+	chatResp.Usage = NormalizeUsage(chatResp.Usage)
 
 	return &chatResp, nil
 }
@@ -419,6 +473,7 @@ func CollectOpenAIChatSSE(reader io.Reader, model string, maxBytes int64) (*Chat
 			},
 			FinishReason: acc.finishReason,
 		}},
+		Usage: NormalizeUsage(acc.usage),
 	}, nil
 }
 
@@ -468,6 +523,7 @@ type openAIChatSSEAccumulator struct {
 	legacyFunctionCall *openAIChatSSEToolCall
 	finishReason       string
 	explicitFinish     bool
+	usage              *Usage
 }
 
 type openAIChatSSEToolCall struct {
@@ -500,6 +556,7 @@ type openAIChatSSEMessageChunk struct {
 func (a *openAIChatSSEAccumulator) consume(payload []byte) error {
 	var root struct {
 		Error   json.RawMessage `json:"error"`
+		Usage   *Usage          `json:"usage"`
 		Choices []struct {
 			Delta        openAIChatSSEMessageChunk `json:"delta"`
 			Message      openAIChatSSEMessageChunk `json:"message"`
@@ -511,6 +568,9 @@ func (a *openAIChatSSEAccumulator) consume(payload []byte) error {
 	}
 	if message := openAIResponseErrorMessage(root.Error); message != "" {
 		return fmt.Errorf("上游 SSE 错误: %s", message)
+	}
+	if root.Usage != nil {
+		a.usage = NormalizeUsage(root.Usage)
 	}
 	if len(root.Choices) == 0 {
 		return nil
@@ -725,7 +785,7 @@ func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 	defer cancel()
 
 	req.Stream = false
-	body, err := marshalOpenAIChatCompletionsRequest(req)
+	body, err := p.marshalOpenAIChatCompletionsRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
@@ -907,7 +967,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	ctx, cancel := providerOperationContext(ctx, p.Timeout)
 
 	req.Stream = true
-	body, err := marshalOpenAIChatCompletionsRequest(req)
+	body, err := p.marshalOpenAIChatCompletionsRequest(req)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
@@ -939,11 +999,20 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 }
 
 func marshalOpenAIChatCompletionsRequest(req *ChatRequest) ([]byte, error) {
+	return marshalOpenAIChatCompletionsRequestWithOutputTokenParam(req, "max_tokens")
+}
+
+func (p *OpenAIProvider) marshalOpenAIChatCompletionsRequest(req *ChatRequest) ([]byte, error) {
+	outputTokenParam := OutputTokenParamFor(p.capabilityName())
+	return marshalOpenAIChatCompletionsRequestWithOutputTokenParam(req, outputTokenParam)
+}
+
+func marshalOpenAIChatCompletionsRequestWithOutputTokenParam(req *ChatRequest, outputTokenParam string) ([]byte, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	return normalizeOpenAIChatCompletionsRequestBody(body)
+	return normalizeOpenAIChatCompletionsRequestBody(body, outputTokenParam)
 }
 
 func OpenAIChatCompletionsRequestBytes(req *ChatRequest) (int, error) {
@@ -954,7 +1023,7 @@ func OpenAIChatCompletionsRequestBytes(req *ChatRequest) (int, error) {
 	return len(body), nil
 }
 
-func normalizeOpenAIChatCompletionsRequestBody(body []byte) ([]byte, error) {
+func normalizeOpenAIChatCompletionsRequestBody(body []byte, outputTokenParam string) ([]byte, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
@@ -963,15 +1032,23 @@ func normalizeOpenAIChatCompletionsRequestBody(body []byte) ([]byte, error) {
 	// 接收请求，最稳妥的输出 token 字段是 max_tokens。VS / Copilot 或
 	// 新式 Responses 风格客户端可能发送 max_output_tokens / max_completion_tokens；
 	// 这些别名必须在出 provider 前统一收敛，否则 strict 上游会直接 400。
-	for _, alias := range []string{"max_completion_tokens", "max_output_tokens"} {
+	//
+	// 注意：这里的“收敛目标”不能硬编码。MiMo 实测在 chat/completions 下
+	// 同时接受 max_tokens 和 max_completion_tokens，但二者预算语义不同：
+	// max_tokens=32 可能截断在 reasoning_content 阶段，max_completion_tokens=32
+	// 能正常给出 content。因此字段名必须由 provider capability 决定。
+	target := normalizeOutputTokenParam(outputTokenParam)
+	for _, alias := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
 		maxOutput, ok := raw[alias]
 		if !ok {
 			continue
 		}
-		if _, hasMaxTokens := raw["max_tokens"]; !hasMaxTokens {
-			raw["max_tokens"] = maxOutput
+		if _, hasTarget := raw[target]; !hasTarget {
+			raw[target] = maxOutput
 		}
-		delete(raw, alias)
+		if alias != target {
+			delete(raw, alias)
+		}
 	}
 	return json.Marshal(raw)
 }
@@ -1404,8 +1481,8 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 			ToolCalls        []ToolCall `json:"tool_calls"`
 		} `json:"message"`
 		DoneReason      string `json:"done_reason"`
-		PromptEvalCount int    `json:"prompt_eval_count"`
-		EvalCount       int    `json:"eval_count"`
+		PromptEvalCount *int64 `json:"prompt_eval_count"`
+		EvalCount       *int64 `json:"eval_count"`
 	}
 	if err := json.Unmarshal(respBody, &ollamaResp); err != nil {
 		return nil, err
@@ -1437,11 +1514,19 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		}},
 	}
 
-	if ollamaResp.PromptEvalCount != 0 || ollamaResp.EvalCount != 0 {
+	if ollamaResp.PromptEvalCount != nil || ollamaResp.EvalCount != nil {
+		promptTokens := int64(0)
+		completionTokens := int64(0)
+		if ollamaResp.PromptEvalCount != nil {
+			promptTokens = *ollamaResp.PromptEvalCount
+		}
+		if ollamaResp.EvalCount != nil {
+			completionTokens = *ollamaResp.EvalCount
+		}
 		chatResp.Usage = &Usage{
-			PromptTokens:     ollamaResp.PromptEvalCount,
-			CompletionTokens: ollamaResp.EvalCount,
-			TotalTokens:      ollamaResp.PromptEvalCount + ollamaResp.EvalCount,
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
 		}
 	}
 	if err := normalizeAndValidateChatResponseTools(chatResp); err != nil {

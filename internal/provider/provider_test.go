@@ -274,6 +274,42 @@ func TestOpenAIProviderConvertsMaxCompletionTokensForChatCompletions(t *testing.
 	}
 }
 
+func TestOpenAIProviderUsesCapabilityOutputTokenParamForXiaomiMiMo(t *testing.T) {
+	var captured map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	var req ChatRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"mimo-v2.5",
+		"messages":[{"role":"user","content":"只回复 OK"}],
+		"max_output_tokens":32,
+		"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}]
+	}`), &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	prov := NewOpenAIProviderWithCapability("xiaomimimo", "xiaomimimo", "sk-test", upstream.URL, true, time.Second)
+	if _, err := prov.ChatRaw(context.Background(), &req); err != nil {
+		t.Fatalf("ChatRaw returned error: %v", err)
+	}
+	if _, leaked := captured["max_output_tokens"]; leaked {
+		t.Fatalf("max_output_tokens must not be sent to xiaomimimo chat/completions: %#v", captured)
+	}
+	if _, leaked := captured["max_tokens"]; leaked {
+		t.Fatalf("max_tokens must not be sent to xiaomimimo chat/completions: %#v", captured)
+	}
+	if captured["max_completion_tokens"] != float64(32) {
+		t.Fatalf("max_completion_tokens = %#v, want 32; body=%#v", captured["max_completion_tokens"], captured)
+	}
+}
+
 func TestOpenAIProviderChatRawPreservesCommonToolMatrix(t *testing.T) {
 	var captured map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -493,6 +529,53 @@ func TestCollectOpenAIChatSSESupportsStandardMultilineEvents(t *testing.T) {
 	}
 	if got := resp.Choices[0].FinishReason; got != "stop" {
 		t.Fatalf("finish_reason = %q, want stop", got)
+	}
+}
+
+func TestCollectOpenAIChatSSEPreservesFinalUsageSnapshot(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`,
+		``,
+		`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":1}}}`,
+		``,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":5},"completion_tokens_details":{"reasoning_tokens":2}}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	resp, err := CollectOpenAIChatSSE(strings.NewReader(stream), "gpt-test", 1<<20)
+	if err != nil {
+		t.Fatalf("CollectOpenAIChatSSE returned error: %v", err)
+	}
+	if resp.Usage == nil {
+		t.Fatal("Usage = nil, want final upstream snapshot")
+	}
+	if resp.Usage.PromptTokens != 11 || resp.Usage.CompletionTokens != 3 || resp.Usage.TotalTokens != 14 {
+		t.Fatalf("Usage = %#v, want final cumulative snapshot", resp.Usage)
+	}
+	if resp.Usage.PromptTokensDetails == nil || resp.Usage.PromptTokensDetails.CachedTokens != 5 {
+		t.Fatalf("PromptTokensDetails = %#v, want cached_tokens=5", resp.Usage.PromptTokensDetails)
+	}
+	if resp.Usage.CompletionTokensDetails == nil || resp.Usage.CompletionTokensDetails.ReasoningTokens != 2 {
+		t.Fatalf("CompletionTokensDetails = %#v, want reasoning_tokens=2", resp.Usage.CompletionTokensDetails)
+	}
+}
+
+func TestNormalizeUsageDistinguishesReportedZeroFromUnknown(t *testing.T) {
+	if got := NormalizeUsage(nil); got != nil {
+		t.Fatalf("NormalizeUsage(nil) = %#v, want nil", got)
+	}
+	zero := NormalizeUsage(&Usage{})
+	if zero == nil || zero.TotalTokens != 0 {
+		t.Fatalf("reported zero = %#v, want non-nil zero usage", zero)
+	}
+	computed := NormalizeUsage(&Usage{PromptTokens: 7, CompletionTokens: 2})
+	if computed == nil || computed.TotalTokens != 9 {
+		t.Fatalf("computed total = %#v, want 9", computed)
+	}
+	if got := NormalizeUsage(&Usage{PromptTokens: -1}); got != nil {
+		t.Fatalf("negative usage = %#v, want nil", got)
 	}
 }
 
@@ -1136,6 +1219,8 @@ func TestInferCapabilityNameSupportsProviderInstances(t *testing.T) {
 	}{
 		{name: "known id", id: "openrouter", providerType: "openai", want: "openrouter"},
 		{name: "known display name", id: "team-a", providerName: "DeepSeek", providerType: "openai", want: "deepseek"},
+		{name: "zhipu id", id: "zhipu", providerType: "openai", want: "zhipu"},
+		{name: "kimi id", id: "kimi", providerType: "openai", want: "kimi"},
 		{name: "useai paid id", id: "useai-paid", baseURL: "https://api.eforge.xyz/v1", providerType: "openai", want: "useai"},
 		{name: "ollama type", id: "local", providerType: "ollama", want: "ollama"},
 		{name: "custom openai compatible", id: "sensenova", baseURL: "https://token.sensenova.cn/v1", providerType: "openai", want: ""},
@@ -1148,6 +1233,92 @@ func TestInferCapabilityNameSupportsProviderInstances(t *testing.T) {
 				t.Fatalf("capability = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestZhipuCapabilitiesDescribeVersionedAPIBase(t *testing.T) {
+	caps := MustGetCapabilities("zhipu")
+	if caps.ApiFormat != ApiFormatOpenAi || caps.Category != ProviderCategoryDirect {
+		t.Fatalf("zhipu protocol = (%q, %q), want direct OpenAI", caps.ApiFormat, caps.Category)
+	}
+	if caps.ChatPath != "chat/completions" || caps.ModelsPath != "models" {
+		t.Fatalf("zhipu paths = (%q, %q), want version-relative resources", caps.ChatPath, caps.ModelsPath)
+	}
+	if caps.DefaultBaseUrl != "https://open.bigmodel.cn/api/paas/v4" {
+		t.Fatalf("zhipu default base URL = %q", caps.DefaultBaseUrl)
+	}
+}
+
+func TestKimiCapabilitiesDescribeCodingAPIBase(t *testing.T) {
+	caps := MustGetCapabilities("kimi")
+	if caps.ApiFormat != ApiFormatOpenAi || caps.Category != ProviderCategoryDirect {
+		t.Fatalf("Kimi protocol = (%q, %q), want direct OpenAI", caps.ApiFormat, caps.Category)
+	}
+	if caps.ChatPath != "chat/completions" || caps.ModelsPath != "models" {
+		t.Fatalf("Kimi paths = (%q, %q), want base-relative resources", caps.ChatPath, caps.ModelsPath)
+	}
+	if caps.DefaultBaseUrl != "https://api.kimi.com/coding/v1" {
+		t.Fatalf("Kimi default base URL = %q", caps.DefaultBaseUrl)
+	}
+}
+
+func TestCompatibilityProfileForKnownProviders(t *testing.T) {
+	tests := []struct {
+		name       string
+		id         string
+		provider   string
+		baseURL    string
+		providerTy string
+		wantCap    string
+		wantPath   string
+		wantReason bool
+	}{
+		{name: "zhipu", id: "zhipu", providerTy: "openai", wantCap: "zhipu", wantPath: "chat/completions", wantReason: false},
+		{name: "kimi", id: "kimi", providerTy: "openai", wantCap: "kimi", wantPath: "chat/completions", wantReason: false},
+		{name: "openai", id: "openai", providerTy: "openai", wantCap: "openai", wantPath: "v1/chat/completions", wantReason: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := CompatibilityProfileFor(tt.id, tt.provider, tt.baseURL, tt.providerTy)
+			if profile.Capability != tt.wantCap {
+				t.Fatalf("capability = %q, want %q", profile.Capability, tt.wantCap)
+			}
+			if profile.ChatPath != tt.wantPath {
+				t.Fatalf("chat path = %q, want %q", profile.ChatPath, tt.wantPath)
+			}
+			if profile.SupportsReasoningEffort != tt.wantReason {
+				t.Fatalf("supports reasoning = %v, want %v", profile.SupportsReasoningEffort, tt.wantReason)
+			}
+			if profile.DefaultBaseURL == "" || profile.EnvPrefix == "" {
+				t.Fatalf("profile should include default base URL and env prefix: %#v", profile)
+			}
+		})
+	}
+}
+
+func TestCompatibilityProfileForCustomProviderUsesConfiguredBaseURL(t *testing.T) {
+	profile := CompatibilityProfileFor(
+		"sensenova",
+		"SenseNova",
+		"https://token.sensenova.cn/v1",
+		"openai",
+	)
+
+	if profile.Capability != "custom" {
+		t.Fatalf("capability = %q, want custom", profile.Capability)
+	}
+	if profile.ApiFormat != ApiFormatOpenAi {
+		t.Fatalf("api format = %q, want openai", profile.ApiFormat)
+	}
+	if profile.ChatPath != "v1/chat/completions" || profile.ModelsPath != "v1/models" {
+		t.Fatalf("paths = (%q, %q), want OpenAI-compatible defaults", profile.ChatPath, profile.ModelsPath)
+	}
+	if profile.DefaultBaseURL != "https://token.sensenova.cn/v1" {
+		t.Fatalf("default base URL = %q, want configured base URL", profile.DefaultBaseURL)
+	}
+	if profile.EnvPrefix != "" {
+		t.Fatalf("custom provider env prefix = %q, want empty", profile.EnvPrefix)
 	}
 }
 
@@ -1547,6 +1718,23 @@ func TestOllamaProviderChatInfersToolFinishWhenDoneReasonIsStop(t *testing.T) {
 	choice := resp.Choices[0]
 	if choice.FinishReason != "tool_calls" || len(choice.Message.ToolCalls) != 1 {
 		t.Fatalf("Ollama tool finish was not repaired: %#v", choice)
+	}
+}
+
+func TestOllamaProviderPreservesExplicitZeroUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop","prompt_eval_count":0,"eval_count":0}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOllamaProvider("ollama", upstream.URL, true, time.Second)
+	resp, err := prov.Chat(context.Background(), &ChatRequest{Model: "qwen3"})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if resp.Usage == nil || resp.Usage.PromptTokens != 0 || resp.Usage.CompletionTokens != 0 {
+		t.Fatalf("Usage = %#v, want explicit reported zero", resp.Usage)
 	}
 }
 

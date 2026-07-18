@@ -3,8 +3,16 @@
 /vs-ai-proxy.exe
 /server
 /dist/
+*.exe
+/.bin/platform-build-check/
+/.bin/windows-build-check/
+/.bin/logs.json
+/.bin/logs.stats.json
 
-# 本地文档与排障记录（可能包含敏感信息）
+# 本地敏感文档与排障记录
+#
+# docs/ 用作本地知识库，可能包含未脱敏排障记录、商业分析、路线图和护城河方案。
+# 开源仓库只在 README / LICENSE / SECURITY 等根目录公开文件中保留已脱敏说明。
 /docs/
 
 # 本地配置与运行时数据

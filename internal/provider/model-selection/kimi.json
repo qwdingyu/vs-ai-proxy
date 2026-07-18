@@ -1,0 +1,14 @@
+{
+  "provider": "kimi",
+  "models": [
+    {
+      "match": "kimi-for-coding",
+      "exact_match": true,
+      "priority": 1,
+      "enabled": true,
+      "execution": {
+        "fixed_temperature": 1.0
+      }
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,54 +15,88 @@ import (
 
 // RequestLog 单条请求日志
 type RequestLog struct {
-	ID                       string    `json:"id"`
-	RequestID                string    `json:"request_id,omitempty"`
-	Timestamp                time.Time `json:"timestamp"`
-	Method                   string    `json:"method"`
-	Path                     string    `json:"path"`
-	Provider                 string    `json:"provider,omitempty"`
-	Model                    string    `json:"model,omitempty"`
-	Upstream                 string    `json:"upstream,omitempty"`
-	RequestBytes             int64     `json:"request_bytes,omitempty"`
-	UpstreamBytes            int64     `json:"upstream_bytes,omitempty"`
-	ConfiguredTimeoutSeconds int       `json:"configured_timeout_seconds,omitempty"`
-	EffectiveTimeoutSeconds  int       `json:"effective_timeout_seconds,omitempty"`
-	StatusCode               int       `json:"status_code"`
-	ElapsedMs                float64   `json:"elapsed_ms"`
-	IsSuccess                bool      `json:"is_success"`
-	ErrorCode                string    `json:"error_code,omitempty"`
-	ErrorMessage             string    `json:"error_message,omitempty"`
-	ErrorHint                string    `json:"error_hint,omitempty"`
-	ErrorReason              string    `json:"error_reason,omitempty"`
-	ErrorAction              string    `json:"error_action,omitempty"`
-	DiagnosticSummary        string    `json:"diagnostic_summary,omitempty"`
-	AttemptsSummary          string    `json:"attempts_summary,omitempty"`
-	CancelReason             string    `json:"cancel_reason,omitempty"`
-	NetworkPeer              string    `json:"network_peer,omitempty"`
-	StreamState              string    `json:"stream_state,omitempty"`
-	RequestTools             string    `json:"request_tools,omitempty"`
-	ResponseTools            string    `json:"response_tools,omitempty"`
-	FallbackMode             string    `json:"fallback_mode,omitempty"`
-	Normalization            string    `json:"normalization,omitempty"`
+	ID                       string      `json:"id"`
+	RequestID                string      `json:"request_id,omitempty"`
+	Timestamp                time.Time   `json:"timestamp"`
+	Method                   string      `json:"method"`
+	Path                     string      `json:"path"`
+	Provider                 string      `json:"provider,omitempty"`
+	Model                    string      `json:"model,omitempty"`
+	Upstream                 string      `json:"upstream,omitempty"`
+	RequestBytes             int64       `json:"request_bytes,omitempty"`
+	UpstreamBytes            int64       `json:"upstream_bytes,omitempty"`
+	ConfiguredTimeoutSeconds int         `json:"configured_timeout_seconds,omitempty"`
+	EffectiveTimeoutSeconds  int         `json:"effective_timeout_seconds,omitempty"`
+	StatusCode               int         `json:"status_code"`
+	ElapsedMs                float64     `json:"elapsed_ms"`
+	IsSuccess                bool        `json:"is_success"`
+	ErrorCode                string      `json:"error_code,omitempty"`
+	ErrorMessage             string      `json:"error_message,omitempty"`
+	ErrorHint                string      `json:"error_hint,omitempty"`
+	ErrorReason              string      `json:"error_reason,omitempty"`
+	ErrorAction              string      `json:"error_action,omitempty"`
+	DiagnosticSummary        string      `json:"diagnostic_summary,omitempty"`
+	AttemptsSummary          string      `json:"attempts_summary,omitempty"`
+	CancelReason             string      `json:"cancel_reason,omitempty"`
+	NetworkPeer              string      `json:"network_peer,omitempty"`
+	StreamState              string      `json:"stream_state,omitempty"`
+	RequestTools             string      `json:"request_tools,omitempty"`
+	ResponseTools            string      `json:"response_tools,omitempty"`
+	FallbackMode             string      `json:"fallback_mode,omitempty"`
+	Normalization            string      `json:"normalization,omitempty"`
+	Usage                    *TokenUsage `json:"usage,omitempty"`
+}
+
+// TokenUsage is an upstream-reported usage snapshot. Nil usage means the
+// upstream did not report usage; a non-nil all-zero value means reported zero.
+type TokenUsage struct {
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	TotalTokens      int64  `json:"total_tokens"`
+	CachedTokens     int64  `json:"cached_tokens,omitempty"`
+	ReasoningTokens  int64  `json:"reasoning_tokens,omitempty"`
+	Source           string `json:"source"`
+}
+
+type ModelTokenStatistics struct {
+	Provider           string `json:"provider,omitempty"`
+	Model              string `json:"model,omitempty"`
+	Upstream           string `json:"upstream,omitempty"`
+	RequestCount       int64  `json:"request_count"`
+	UsageReportedCount int64  `json:"usage_reported_count"`
+	PromptTokens       int64  `json:"prompt_tokens"`
+	CompletionTokens   int64  `json:"completion_tokens"`
+	TotalTokens        int64  `json:"total_tokens"`
+	CachedTokens       int64  `json:"cached_tokens"`
+	ReasoningTokens    int64  `json:"reasoning_tokens"`
 }
 
 // Statistics 统计数据
 type Statistics struct {
-	TotalRequests int64     `json:"total_requests"`
-	SuccessCount  int64     `json:"success_count"`
-	FailureCount  int64     `json:"failure_count"`
-	AvgLatencyMs  float64   `json:"avg_latency_ms"`
-	LastUpdated   time.Time `json:"last_updated"`
+	TotalRequests      int64                  `json:"total_requests"`
+	SuccessCount       int64                  `json:"success_count"`
+	FailureCount       int64                  `json:"failure_count"`
+	AvgLatencyMs       float64                `json:"avg_latency_ms"`
+	TokenUsageRequests int64                  `json:"token_usage_requests"`
+	UsageReportedCount int64                  `json:"usage_reported_count"`
+	PromptTokens       int64                  `json:"prompt_tokens"`
+	CompletionTokens   int64                  `json:"completion_tokens"`
+	TotalTokens        int64                  `json:"total_tokens"`
+	CachedTokens       int64                  `json:"cached_tokens"`
+	ReasoningTokens    int64                  `json:"reasoning_tokens"`
+	ModelUsage         []ModelTokenStatistics `json:"model_usage"`
+	LastUpdated        time.Time              `json:"last_updated"`
 }
 
 // Store 内存中的日志与统计存储
 // 所有公开方法都是并发安全的；内部更新统计时约定必须在 logMu 持有锁的前提下调用 updateStatsLocked。
 type Store struct {
-	logs    []RequestLog
-	stats   Statistics
-	logMu   sync.RWMutex
-	statsMu sync.RWMutex
-	maxLogs int
+	logs       []RequestLog
+	stats      Statistics
+	modelStats map[string]*ModelTokenStatistics
+	logMu      sync.RWMutex
+	statsMu    sync.RWMutex
+	maxLogs    int
 }
 
 // New 创建 Store
@@ -70,8 +105,9 @@ func New(maxLogs int) *Store {
 		maxLogs = 1000
 	}
 	return &Store{
-		logs:    make([]RequestLog, 0, maxLogs),
-		maxLogs: maxLogs,
+		logs:       make([]RequestLog, 0, maxLogs),
+		modelStats: make(map[string]*ModelTokenStatistics),
+		maxLogs:    maxLogs,
 	}
 }
 
@@ -86,6 +122,7 @@ func (s *Store) AddLog(log RequestLog) {
 		log.RequestID = log.ID
 	}
 	log.Timestamp = time.Now()
+	log.Usage = normalizeTokenUsage(log.Usage)
 
 	s.logs = append(s.logs, log)
 	if len(s.logs) > s.maxLogs {
@@ -110,7 +147,7 @@ func (s *Store) GetLogs(n int) []RequestLog {
 	// 返回最近的 n 条，按时间倒序（最新在前）
 	result := make([]RequestLog, n)
 	for i := 0; i < n; i++ {
-		result[i] = s.logs[len(s.logs)-1-i]
+		result[i] = cloneRequestLog(s.logs[len(s.logs)-1-i])
 	}
 	return result
 }
@@ -169,7 +206,10 @@ func (s *Store) GetLogsPageFiltered(page, size int, filters LogFilters) LogPageR
 		return LogPageResult{Logs: []RequestLog{}, Total: total, Page: page, Size: size}
 	}
 
-	result := append([]RequestLog(nil), filtered[start:end]...)
+	result := make([]RequestLog, end-start)
+	for i := start; i < end; i++ {
+		result[i-start] = cloneRequestLog(filtered[i])
+	}
 	return LogPageResult{Logs: result, Total: total, Page: page, Size: size}
 }
 
@@ -180,7 +220,7 @@ func (s *Store) GetLatestFailure() (RequestLog, bool) {
 
 	for i := len(s.logs) - 1; i >= 0; i-- {
 		if !s.logs[i].IsSuccess {
-			return s.logs[i], true
+			return cloneRequestLog(s.logs[i]), true
 		}
 	}
 	return RequestLog{}, false
@@ -243,7 +283,7 @@ func matchesLogFilters(log RequestLog, filters LogFilters) bool {
 func (s *Store) GetStatistics() Statistics {
 	s.statsMu.RLock()
 	defer s.statsMu.RUnlock()
-	return s.stats
+	return s.statisticsSnapshotLocked()
 }
 
 // updateStatsLocked 更新统计（必须同时持有 logMu 与 statsMu 写锁）。
@@ -263,6 +303,80 @@ func (s *Store) updateStatsLocked(log RequestLog) {
 		s.stats.AvgLatencyMs = (s.stats.AvgLatencyMs*float64(s.stats.TotalRequests-1) + log.ElapsedMs) / float64(s.stats.TotalRequests)
 	}
 	s.stats.LastUpdated = time.Now()
+
+	if !isTokenUsageRequest(log) {
+		return
+	}
+	s.stats.TokenUsageRequests++
+	key := modelStatsKey(log.Provider, log.Model, log.Upstream)
+	modelStats := s.modelStats[key]
+	if modelStats == nil {
+		modelStats = &ModelTokenStatistics{Provider: log.Provider, Model: log.Model, Upstream: log.Upstream}
+		s.modelStats[key] = modelStats
+	}
+	modelStats.RequestCount++
+	if log.Usage == nil {
+		return
+	}
+	s.stats.UsageReportedCount++
+	s.stats.PromptTokens += log.Usage.PromptTokens
+	s.stats.CompletionTokens += log.Usage.CompletionTokens
+	s.stats.TotalTokens += log.Usage.TotalTokens
+	s.stats.CachedTokens += log.Usage.CachedTokens
+	s.stats.ReasoningTokens += log.Usage.ReasoningTokens
+	modelStats.UsageReportedCount++
+	modelStats.PromptTokens += log.Usage.PromptTokens
+	modelStats.CompletionTokens += log.Usage.CompletionTokens
+	modelStats.TotalTokens += log.Usage.TotalTokens
+	modelStats.CachedTokens += log.Usage.CachedTokens
+	modelStats.ReasoningTokens += log.Usage.ReasoningTokens
+}
+
+func isTokenUsageRequest(log RequestLog) bool {
+	return strings.TrimSpace(log.Provider) != "" || strings.TrimSpace(log.Model) != "" || strings.TrimSpace(log.Upstream) != ""
+}
+
+func modelStatsKey(provider, model, upstream string) string {
+	return provider + "\x00" + model + "\x00" + upstream
+}
+
+func normalizeTokenUsage(usage *TokenUsage) *TokenUsage {
+	if usage == nil || usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 || usage.CachedTokens < 0 || usage.ReasoningTokens < 0 {
+		return nil
+	}
+	normalized := *usage
+	if normalized.TotalTokens == 0 && normalized.PromptTokens+normalized.CompletionTokens > 0 {
+		normalized.TotalTokens = normalized.PromptTokens + normalized.CompletionTokens
+	}
+	if strings.TrimSpace(normalized.Source) == "" {
+		normalized.Source = "upstream"
+	}
+	return &normalized
+}
+
+func cloneRequestLog(log RequestLog) RequestLog {
+	if log.Usage != nil {
+		usage := *log.Usage
+		log.Usage = &usage
+	}
+	return log
+}
+
+func (s *Store) statisticsSnapshotLocked() Statistics {
+	stats := s.stats
+	stats.ModelUsage = make([]ModelTokenStatistics, 0, len(s.modelStats))
+	for _, modelStats := range s.modelStats {
+		stats.ModelUsage = append(stats.ModelUsage, *modelStats)
+	}
+	sort.Slice(stats.ModelUsage, func(i, j int) bool {
+		if stats.ModelUsage[i].TotalTokens != stats.ModelUsage[j].TotalTokens {
+			return stats.ModelUsage[i].TotalTokens > stats.ModelUsage[j].TotalTokens
+		}
+		left := modelStatsKey(stats.ModelUsage[i].Provider, stats.ModelUsage[i].Model, stats.ModelUsage[i].Upstream)
+		right := modelStatsKey(stats.ModelUsage[j].Provider, stats.ModelUsage[j].Model, stats.ModelUsage[j].Upstream)
+		return left < right
+	})
+	return stats
 }
 
 // ClearLogs 清空日志
@@ -273,17 +387,39 @@ func (s *Store) ClearLogs() {
 	s.logs = s.logs[:0]
 }
 
-// PersistToFile 持久化到文件
-// 该方法是线程安全的，仅持久化日志，不会持久化统计。
+const storeSnapshotVersion = 1
+
+type persistedStatisticsSnapshot struct {
+	Version          int        `json:"version"`
+	RetainedLogCount int        `json:"retained_log_count"`
+	LatestLogID      string     `json:"latest_log_id,omitempty"`
+	Statistics       Statistics `json:"statistics"`
+}
+
+// PersistToFile keeps the legacy log-array shape for rollback compatibility and
+// stores cumulative statistics in a versioned sidecar.
 func (s *Store) PersistToFile(path string) error {
-	// 只在锁内复制当前日志快照，避免 JSON 序列化和磁盘 IO 长时间阻塞 AddLog。
-	// logs.json 是管理页的持久化快照，不是审计级 append-only 日志；因此保存最近 maxLogs 条即可。
+	// Keep the established lock order (logs, then stats) while taking a consistent snapshot.
 	s.logMu.RLock()
-	logs := append([]RequestLog(nil), s.logs...)
+	logs := make([]RequestLog, len(s.logs))
+	for i := range s.logs {
+		logs[i] = cloneRequestLog(s.logs[i])
+	}
+	s.statsMu.RLock()
+	stats := s.statisticsSnapshotLocked()
+	s.statsMu.RUnlock()
 	s.logMu.RUnlock()
 
-	// 使用紧凑 JSON 控制 logs.json 体积。管理页通过 API 展示，不依赖文件人工阅读格式。
 	data, err := json.Marshal(logs)
+	if err != nil {
+		return err
+	}
+	statsData, err := json.Marshal(persistedStatisticsSnapshot{
+		Version:          storeSnapshotVersion,
+		RetainedLogCount: len(logs),
+		LatestLogID:      latestLogID(logs),
+		Statistics:       stats,
+	})
 	if err != nil {
 		return err
 	}
@@ -294,11 +430,14 @@ func (s *Store) PersistToFile(path string) error {
 	}
 
 	// 使用成熟的 renameio/maybe 写入快照：Unix 走原子替换，Windows 走兼容写入，避免跨平台构建失败。
-	return maybe.WriteFile(path, data, 0644)
+	if err := maybe.WriteFile(path, data, 0644); err != nil {
+		return err
+	}
+	return maybe.WriteFile(statisticsSidecarPath(path), statsData, 0644)
 }
 
-// LoadFromFile 从文件加载
-// 该方法是线程安全的，加载后会重建统计，但不会持久化 provider/models 配置。
+// LoadFromFile preserves the legacy bare log array and optionally restores the
+// versioned cumulative-statistics sidecar.
 func (s *Store) LoadFromFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -312,22 +451,76 @@ func (s *Store) LoadFromFile(path string) error {
 	if err := json.Unmarshal(data, &logs); err != nil {
 		return err
 	}
+	statisticsSnapshot, statisticsLoadErr := loadStatisticsSidecar(path)
 
 	s.logMu.Lock()
 	defer s.logMu.Unlock()
 
 	s.logs = logs
+	for i := range s.logs {
+		s.logs[i].Usage = normalizeTokenUsage(s.logs[i].Usage)
+	}
 	if len(s.logs) > s.maxLogs {
 		s.logs = s.logs[len(s.logs)-s.maxLogs:]
 	}
+	var persistedStats *Statistics
+	if statisticsSnapshot != nil && statisticsSnapshot.matchesLogs(s.logs) {
+		persistedStats = &statisticsSnapshot.Statistics
+	}
 
-	// 重建统计
 	s.statsMu.Lock()
-	s.stats = Statistics{LastUpdated: time.Now()}
-	for _, log := range s.logs {
-		s.updateStatsLocked(log)
+	s.modelStats = make(map[string]*ModelTokenStatistics)
+	if persistedStats != nil && persistedStats.TotalRequests >= int64(len(s.logs)) {
+		s.stats = *persistedStats
+		for i := range persistedStats.ModelUsage {
+			modelStats := persistedStats.ModelUsage[i]
+			s.modelStats[modelStatsKey(modelStats.Provider, modelStats.Model, modelStats.Upstream)] = &modelStats
+		}
+		s.stats.ModelUsage = nil
+	} else {
+		s.stats = Statistics{LastUpdated: time.Now()}
+		for _, log := range s.logs {
+			s.updateStatsLocked(log)
+		}
 	}
 	s.statsMu.Unlock()
 
-	return nil
+	return statisticsLoadErr
+}
+
+func statisticsSidecarPath(path string) string {
+	ext := filepath.Ext(path)
+	if ext == "" {
+		return path + ".stats"
+	}
+	return strings.TrimSuffix(path, ext) + ".stats" + ext
+}
+
+func latestLogID(logs []RequestLog) string {
+	if len(logs) == 0 {
+		return ""
+	}
+	return logs[len(logs)-1].ID
+}
+
+func (s *persistedStatisticsSnapshot) matchesLogs(logs []RequestLog) bool {
+	return s != nil && s.RetainedLogCount == len(logs) && s.LatestLogID == latestLogID(logs)
+}
+
+func loadStatisticsSidecar(path string) (*persistedStatisticsSnapshot, error) {
+	data, err := os.ReadFile(statisticsSidecarPath(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var snapshot persistedStatisticsSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return nil, fmt.Errorf("load statistics sidecar: %w", err)
+	}
+	if snapshot.Version != storeSnapshotVersion {
+		return nil, fmt.Errorf("unsupported statistics snapshot version %d", snapshot.Version)
+	}
+	return &snapshot, nil
 }

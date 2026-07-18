@@ -96,7 +96,7 @@ func TestApplyExecutionDefaultsDoesNotInventCopilotOutputLimit(t *testing.T) {
 	}
 }
 
-func TestApplyExecutionDefaultsRetainsPlainChatDefaults(t *testing.T) {
+func TestApplyExecutionDefaultsDoesNotInventSamplingDefaults(t *testing.T) {
 	server := &Server{
 		config:         &config.AppConfig{},
 		reasoningCache: newReasoningCache(),
@@ -108,8 +108,8 @@ func TestApplyExecutionDefaultsRetainsPlainChatDefaults(t *testing.T) {
 	if req.MaxTokens == nil || *req.MaxTokens != 4096 {
 		t.Fatalf("plain chat max_tokens = %v, want 4096", req.MaxTokens)
 	}
-	if req.Temperature == nil || *req.Temperature != 0.7 {
-		t.Fatalf("plain chat temperature = %v, want 0.7", req.Temperature)
+	if req.Temperature != nil {
+		t.Fatalf("plain chat temperature = %v, want provider default", *req.Temperature)
 	}
 }
 
@@ -139,8 +139,8 @@ func TestApplyExecutionDefaultsTreatsEmptyLegacyFunctionsAsPlainChat(t *testing.
 			if req.MaxTokens == nil || *req.MaxTokens != 4096 {
 				t.Fatalf("plain legacy chat max_tokens = %v, want 4096", req.MaxTokens)
 			}
-			if req.Temperature == nil || *req.Temperature != 0.7 {
-				t.Fatalf("plain legacy chat temperature = %v, want 0.7", req.Temperature)
+			if req.Temperature != nil {
+				t.Fatalf("plain legacy chat temperature = %v, want provider default", *req.Temperature)
 			}
 		})
 	}
@@ -265,6 +265,21 @@ func TestApplyProfileDefaultsOverrideClientParams(t *testing.T) {
 	}
 	if req.ReasoningEffort != "high" {
 		t.Fatalf("reasoning_effort = %q, want high", req.ReasoningEffort)
+	}
+}
+
+func TestApplyProfileDefaultsEnforcesFixedTemperature(t *testing.T) {
+	server := &Server{}
+	clientTemperature := 0.2
+	fixedTemperature := 1.0
+	req := &provider.ChatRequest{Model: "kimi-for-coding", Temperature: &clientTemperature}
+
+	server.applyProfileDefaults(req, provider.ModelProfile{
+		FixedTemperature: &fixedTemperature,
+	}, &stubProvider{name: "kimi"})
+
+	if req.Temperature == nil || *req.Temperature != fixedTemperature {
+		t.Fatalf("temperature = %v, want fixed %v", req.Temperature, fixedTemperature)
 	}
 }
 
@@ -395,13 +410,77 @@ func TestInjectCachedReasoningRetainsLegacyFunctionCallHistory(t *testing.T) {
 func TestTransformRequestDoesNotInjectCachedReasoningForUseAIGateway(t *testing.T) {
 	server := &Server{config: &config.AppConfig{}, reasoningCache: newReasoningCache()}
 	server.reasoningCache.Set("assistant:0", "cached reasoning")
-	req := &provider.ChatRequest{Model: "deepseek-v4-flash", Messages: []provider.Message{{Role: "assistant"}}}
+	req := &provider.ChatRequest{Model: "deepseek-v4-flash", Messages: []provider.Message{{Role: "assistant", Content: "visible answer"}}}
 	prov := provider.NewOpenAIProviderWithCapability("useai", "useai", "sk-test", "https://api.eforge.xyz/v1", true, 0)
 
 	server.transformRequest(server.config, req, "UseAI - deepseek-v4-flash", prov)
 
-	if req.Messages[0].Reasoning != "" {
-		t.Fatalf("useai gateway must not receive cached reasoning_content, got %q", req.Messages[0].Reasoning)
+	if len(req.Messages) != 1 || req.Messages[0].Content != "visible answer" || req.Messages[0].Reasoning != "" {
+		t.Fatalf("useai gateway changed visible history or injected reasoning: %#v", req.Messages)
+	}
+}
+
+func TestShouldDropAssistantPlaceholderPreservesMeaningfulMessages(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  provider.Message
+		drop bool
+	}{
+		{name: "empty assistant", msg: provider.Message{Role: "assistant"}, drop: true},
+		{name: "whitespace assistant", msg: provider.Message{Role: "assistant", Content: "  \n"}, drop: true},
+		{name: "ordinary content", msg: provider.Message{Role: "assistant", Content: "answer"}},
+		{name: "tool calls", msg: provider.Message{Role: "assistant", ToolCalls: []provider.ToolCall{{ID: "call-1"}}}},
+		{name: "legacy function call", msg: provider.Message{Role: "assistant", FunctionCall: &provider.FunctionCall{Name: "read_file"}}},
+		{name: "reasoning", msg: provider.Message{Role: "assistant", Reasoning: "thinking"}},
+		{name: "refusal", msg: provider.Message{Role: "assistant", Refusal: "cannot comply"}},
+		{name: "structured content", msg: provider.Message{Role: "assistant", ContentRaw: json.RawMessage(`[{"type":"text","text":"answer"}]`)}},
+		{name: "provider extension", msg: provider.Message{Role: "assistant", Extra: map[string]json.RawMessage{"provider_state": json.RawMessage(`{"id":1}`)}}},
+		{name: "empty user", msg: provider.Message{Role: "user"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldDropAssistantPlaceholder(tt.msg); got != tt.drop {
+				t.Fatalf("shouldDropAssistantPlaceholder() = %v, want %v; message=%#v", got, tt.drop, tt.msg)
+			}
+		})
+	}
+}
+
+func TestDropEmptyAssistantPlaceholdersTreatsNullContentAsEmpty(t *testing.T) {
+	var req provider.ChatRequest
+	if err := json.Unmarshal([]byte(`{"model":"test","messages":[{"role":"assistant","content":null}]}`), &req); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+
+	dropEmptyAssistantPlaceholders(&req, false)
+
+	if len(req.Messages) != 0 {
+		t.Fatalf("messages = %#v, want null assistant placeholder removed", req.Messages)
+	}
+}
+
+func TestTransformRequestDropsSemanticallyEmptyAssistantPlaceholderForKimi(t *testing.T) {
+	server := &Server{config: &config.AppConfig{}, reasoningCache: newReasoningCache()}
+	req := &provider.ChatRequest{
+		Model: "kimi-for-coding",
+		Messages: []provider.Message{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: ""},
+			{Role: "assistant", Reasoning: "partial reasoning without a completed answer"},
+			{Role: "user", Content: "continue"},
+		},
+	}
+	prov := provider.NewOpenAIProviderWithCapability("kimi", "kimi", "test-key", "https://api.kimi.com/coding/v1", true, 0)
+
+	server.transformRequest(server.config, req, "kimi - kimi-for-coding", prov)
+
+	if len(req.Messages) != 2 {
+		t.Fatalf("messages = %#v, want empty assistant placeholder removed", req.Messages)
+	}
+	if req.Messages[0].Role != "user" || req.Messages[0].Content != "first" ||
+		req.Messages[1].Role != "user" || req.Messages[1].Content != "continue" {
+		t.Fatalf("meaningful history changed: %#v", req.Messages)
 	}
 }
 

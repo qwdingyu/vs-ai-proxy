@@ -38,6 +38,54 @@ func TestIndexHTMLHasNoDuplicateIDsAndScriptReferencesExist(t *testing.T) {
 	}
 }
 
+func TestDashboardTokenUsageIsWiredWithoutTreatingUnknownAsZero(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	for _, marker := range []string{
+		`id="promptTokens"`,
+		`id="completionTokens"`,
+		`id="totalTokens"`,
+		`id="usageCoverage"`,
+		`id="cachedTokens"`,
+		`id="reasoningTokens"`,
+		`id="modelTokenTable"`,
+		`if (!log || !log.usage) return '-'`,
+		`formatUsageCoverage(stats.usage_reported_count, stats.token_usage_requests)`,
+		`const modelUsage = stats.model_usage || []`,
+		`<td class="col-tokens">${formatTokenUsage(log)}</td>`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("token usage UI missing %q", marker)
+		}
+	}
+	if strings.Contains(html, "cached_tokens + reasoning_tokens") {
+		t.Fatal("cached/reasoning token subsets must not be added to total")
+	}
+}
+
+func TestDashboardTokenUsageExplainsCoverageAndSubsets(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	for _, marker := range []string{
+		`data-i18n="dashboard.tokens.note"`,
+		`Token 明细覆盖`,
+		`未返回 usage 的请求为未知，不按 0 计算`,
+		`缓存命中的输入`,
+		`推理输出子项`,
+		`已包含在总 Token 中，不重复相加`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("token usage explanation missing %q", marker)
+		}
+	}
+}
+
 func TestLogsFilterInputsAreWiredToQueryPayload(t *testing.T) {
 	data, err := fs.ReadFile(MustSubFS(), "index.html")
 	if err != nil {
@@ -190,11 +238,15 @@ func TestProviderListShowsBoundModelCount(t *testing.T) {
 	html := string(data)
 	checks := []string{
 		`data-i18n="table.header.model"`,
+		`data-i18n="providers.form.compatibilityProfile"`,
+		"const providerCompatibilityProfile = (provider) => provider?.compatibility_profile || {};",
+		"const providerCompatibilityLabel = (provider) => {",
 		"const countModelsByProvider = (models) =>",
 		"const modelCounts = countModelsByProvider(modelRes.models || [])",
+		"<td title=\"${escapeAttr(providerCompatibilityTitle(item))}\">${escapeHTML(providerCompatibilityLabel(item))}</td>",
 		"<td>${escapeHTML(modelCounts.get(key.toLowerCase()) || 0)}</td>",
-		`<tr><td colspan="8" class="empty" data-i18n="table.loading">加载中...</td></tr>`,
-		`colspan="8"`,
+		`<tr><td colspan="9" class="empty" data-i18n="table.loading">加载中...</td></tr>`,
+		`colspan="9"`,
 	}
 	for _, check := range checks {
 		if !strings.Contains(html, check) {
@@ -222,10 +274,10 @@ func TestLogRowsCanCopyDiagnosticSummary(t *testing.T) {
 	html := string(data)
 	checks := []string{
 		`data-i18n="table.header.action"`,
-		`<tr><td colspan="10" class="empty" data-i18n="table.loading">加载中...</td></tr>`,
-		`<tr><td colspan="10" class="empty" data-i18n="table.empty.logs">暂无日志</td></tr>`,
+		`<tr><td colspan="11" class="empty" data-i18n="table.loading">加载中...</td></tr>`,
+		`<tr><td colspan="11" class="empty" data-i18n="table.empty.logs">暂无日志</td></tr>`,
 		`.logs-table .col-action { width: 86px; }`,
-		`tbody.innerHTML = '<tr><td colspan="10" class="empty">' + t('table.empty.logs') + '</td></tr>';`,
+		`tbody.innerHTML = '<tr><td colspan="11" class="empty">' + t('table.empty.logs') + '</td></tr>';`,
 		`data-action="copy-log-diagnostic"`,
 		"formatLogDiagnosticCopyText",
 		"currentLogRows = logs",

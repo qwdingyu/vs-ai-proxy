@@ -292,6 +292,158 @@ func TestProxyForwardsRequestIDToOpenAIUpstream(t *testing.T) {
 	}
 }
 
+func TestKimiCodingStreamAppliesDeclaredTemperaturePolicy(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/coding/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"kimi-for-coding"}]}`))
+		case "/coding/v1/chat/completions":
+			upstreamCalls++
+			var req provider.ChatRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode upstream request: %v", err)
+			}
+			if req.Temperature == nil || *req.Temperature != 1 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}`))
+				return
+			}
+			if !req.Stream || len(req.Tools) != 1 {
+				t.Fatalf("Copilot stream/tool contract was not preserved: %#v", req)
+			}
+			for _, message := range req.Messages {
+				if shouldDropAssistantPlaceholder(message) {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":{"message":"role 'assistant' must not be empty","type":"invalid_request_error"}}`))
+					return
+				}
+			}
+			if len(req.Messages) != 2 {
+				t.Fatalf("upstream messages = %#v, want empty assistant removed and meaningful history retained", req.Messages)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	prov := provider.NewOpenAIProvider("kimi", "test-key", upstream.URL+"/coding/v1", true, time.Second)
+	server := newOpenServer(prov)
+	server.config.Models = []config.ModelConfig{{
+		Name:                 "kimi-for-coding",
+		ProviderID:           "kimi",
+		Provider:             "kimi",
+		OverrideClientParams: false,
+		Enabled:              true,
+	}}
+	server.catalog = provider.NewModelCatalog(server.registry, "", time.Minute)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	body := `{
+		"model":"kimi-for-coding@kimi",
+		"messages":[
+			{"role":"user","content":"previous request"},
+			{"role":"assistant","content":""},
+			{"role":"assistant","content":"","reasoning_content":"partial reasoning"},
+			{"role":"user","content":"read a.txt"}
+		],
+		"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}],
+		"temperature":0.2,
+		"stream":true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", upstreamCalls)
+	}
+	if !strings.Contains(rec.Body.String(), `"content":"ok"`) {
+		t.Fatalf("stream content missing: %s", rec.Body.String())
+	}
+}
+
+func TestOpenAIUpstreamErrorsProduceClearUserDiagnostics(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantCode   string
+		wantReason string
+		wantAction string
+	}{
+		{
+			name:       "billing quota exhausted",
+			status:     http.StatusForbidden,
+			body:       `{"error":{"message":"You've reached your usage limit for this billing cycle","type":"access_terminated_error"}}`,
+			wantCode:   "upstream_quota_exhausted",
+			wantReason: "上游额度已用完",
+			wantAction: "等待额度刷新，或充值/升级套餐。",
+		},
+		{
+			name:       "empty assistant history",
+			status:     http.StatusBadRequest,
+			body:       `{"error":{"message":"the message at position 39 with role 'assistant' must not be empty","type":"invalid_request_error"}}`,
+			wantCode:   "upstream_message_error",
+			wantReason: "会话消息无效",
+			wantAction: "新建会话后重试。",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chatCalls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/models":
+					_, _ = w.Write([]byte(`{"data":[{"id":"test-model"}]}`))
+				case "/v1/chat/completions":
+					chatCalls++
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tt.status)
+					_, _ = w.Write([]byte(tt.body))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer upstream.Close()
+
+			prov := provider.NewOpenAIProviderWithCapability("test", "openai", "test-key", upstream.URL, true, time.Second)
+			server := newOpenServer(prov)
+			inner := withMux(server, func(mux *http.ServeMux) {
+				mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+			})
+			handler := server.loggingMiddleware(inner)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+				`{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), tt.wantCode) {
+				t.Fatalf("status/body = %d/%s, want 502/%s", rec.Code, rec.Body.String(), tt.wantCode)
+			}
+			if chatCalls != 1 {
+				t.Fatalf("upstream calls = %d, want 1", chatCalls)
+			}
+			logs := server.store.GetLogs(1)
+			if len(logs) != 1 || logs[0].ErrorReason != tt.wantReason || logs[0].ErrorAction != tt.wantAction {
+				t.Fatalf("diagnostic log = %#v, want reason=%q action=%q", logs, tt.wantReason, tt.wantAction)
+			}
+		})
+	}
+}
+
 // -----------------------------------------------------------------------------
 // 1. 模型 catalog：/v1/models 与 /api/tags
 // -----------------------------------------------------------------------------
@@ -785,6 +937,64 @@ func TestOpenAIStreamFallsBackToNonStreamWhenStreamUpstreamFails(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-Proxy-Fallback-Mode"); got != "stream-to-nonstream" {
 		t.Fatalf("fallback header = %q, want stream-to-nonstream", got)
+	}
+}
+
+func TestStreamToNonStreamFallbackRecordsFinalUsageOnce(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
+	prov.streamErr = errors.New(`API 错误 503: {"error":{"message":"temporarily unavailable"}}`)
+	prov.typedChatResp = &provider.ChatResponse{
+		Model:   "gpt-5.5",
+		Choices: []provider.Choice{{Message: provider.Message{Role: "assistant", Content: "fallback"}, FinishReason: "stop"}},
+		Usage:   &provider.Usage{PromptTokens: 30, CompletionTokens: 5, TotalTokens: 35},
+	}
+	server := newOpenServer(prov)
+	inner := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	handler := server.loggingMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logs := server.store.GetLogs(10)
+	if rec.Code != http.StatusOK || len(logs) != 1 || logs[0].Usage == nil || logs[0].Usage.TotalTokens != 35 {
+		t.Fatalf("status=%d logs=%#v, want one request log with 35 tokens", rec.Code, logs)
+	}
+	stats := server.store.GetStatistics()
+	if stats.UsageReportedCount != 1 || stats.TotalTokens != 35 {
+		t.Fatalf("statistics = %#v, want usage counted once", stats)
+	}
+}
+
+func TestNonStreamToStreamFallbackRecordsFinalUsageOnce(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"fallback"},"finish_reason":null}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":18,"completion_tokens":4,"total_tokens":22}}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, stream)
+	prov.rawErr = errors.New(`API 错误 503: {"error":{"message":"temporarily unavailable"}}`)
+	server := newOpenServer(prov)
+	inner := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	handler := server.loggingMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logs := server.store.GetLogs(10)
+	if rec.Code != http.StatusOK || len(logs) != 1 || logs[0].Usage == nil || logs[0].Usage.TotalTokens != 22 {
+		t.Fatalf("status=%d logs=%#v, want one request log with 22 tokens", rec.Code, logs)
+	}
+	stats := server.store.GetStatistics()
+	if stats.UsageReportedCount != 1 || stats.TotalTokens != 22 {
+		t.Fatalf("statistics = %#v, want usage counted once", stats)
 	}
 }
 
@@ -1525,6 +1735,71 @@ func TestChatCompletionsPreservesOpenAIRawResponseFields(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsRecordsRawOpenAIUsage(t *testing.T) {
+	prov := newFakeProvider("openai", true, []string{"gpt-test"}, nil, "")
+	prov.rawBody = []byte(`{
+		"id":"chatcmpl-usage","object":"chat.completion","model":"gpt-test",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":21,"completion_tokens":6,"total_tokens":27,"prompt_tokens_details":{"cached_tokens":8},"completion_tokens_details":{"reasoning_tokens":3}}
+	}`)
+	server := newOpenServer(prov)
+	inner := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	handler := server.loggingMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	logs := server.store.GetLogs(1)
+	if len(logs) != 1 || logs[0].Usage == nil {
+		t.Fatalf("logs = %#v, want usage", logs)
+	}
+	usage := logs[0].Usage
+	if usage.TotalTokens != 27 || usage.CachedTokens != 8 || usage.ReasoningTokens != 3 {
+		t.Fatalf("usage = %#v, want total=27 cached=8 reasoning=3", usage)
+	}
+}
+
+func TestChatCompletionsRecordsFinalOpenAIStreamUsage(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`,
+		``,
+		`data: {"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":4,"total_tokens":17,"prompt_tokens_details":{"cached_tokens":6},"completion_tokens_details":{"reasoning_tokens":2}}}`,
+		``,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	prov := newFakeProvider("openai", true, []string{"gpt-test"}, nil, stream)
+	server := newOpenServer(prov)
+	inner := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	handler := server.loggingMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	logs := server.store.GetLogs(1)
+	if len(logs) != 1 || logs[0].Usage == nil {
+		t.Fatalf("logs = %#v, want usage", logs)
+	}
+	usage := logs[0].Usage
+	if usage.PromptTokens != 13 || usage.CompletionTokens != 4 || usage.TotalTokens != 17 || usage.CachedTokens != 6 || usage.ReasoningTokens != 2 {
+		t.Fatalf("usage = %#v, want full final stream usage", usage)
+	}
+}
+
 func TestOllamaChatReturnsDiagnosticHeaders(t *testing.T) {
 	prov := newFakeProvider("deepseek", true, []string{"deepseek-chat"}, &fakeChatResponse{Model: "deepseek-chat", Content: "pong"}, "")
 	server := newOpenServer(prov)
@@ -1746,7 +2021,7 @@ func TestStreamingMixedUpstreamStatusWritesStructuredLogDiagnostics(t *testing.T
 	if logEntry.StatusCode != http.StatusBadGateway || logEntry.ErrorCode != "upstream_server_error" {
 		t.Fatalf("status/error = %d/%q, want 502/upstream_server_error; log=%#v", logEntry.StatusCode, logEntry.ErrorCode, logEntry)
 	}
-	if !strings.Contains(logEntry.ErrorReason, "上游服务异常") || !strings.Contains(logEntry.ErrorAction, "渠道健康") {
+	if logEntry.ErrorReason != "上游服务暂不可用" || logEntry.ErrorAction != "稍后重试，或切换模型。" {
 		t.Fatalf("operator diagnostics missing: %#v", logEntry)
 	}
 	if !strings.Contains(logEntry.DiagnosticSummary, "5xx") || !strings.Contains(logEntry.AttemptsSummary, "primary/shared") {
@@ -2515,13 +2790,18 @@ func TestMergeProviderModelsKeepsConfiguredModelsAfterDiscovery(t *testing.T) {
 
 func TestChatCompletionsNormalizesTokenBudgetAliasesBeforeUpstream(t *testing.T) {
 	tests := []struct {
-		name      string
-		stream    bool
-		fieldName string
-		fieldWant float64
+		name          string
+		providerID    string
+		providerName  string
+		modelName     string
+		stream        bool
+		fieldName     string
+		fieldWant     float64
+		wantTokenName string
 	}{
-		{name: "stream max_output_tokens", stream: true, fieldName: "max_output_tokens", fieldWant: 8192},
-		{name: "nonstream max_completion_tokens", stream: false, fieldName: "max_completion_tokens", fieldWant: 6144},
+		{name: "stream max_output_tokens", providerID: "useai2", providerName: "UseAI2", modelName: "gpt-5.5", stream: true, fieldName: "max_output_tokens", fieldWant: 8192, wantTokenName: "max_tokens"},
+		{name: "nonstream max_completion_tokens", providerID: "useai2", providerName: "UseAI2", modelName: "gpt-5.5", stream: false, fieldName: "max_completion_tokens", fieldWant: 6144, wantTokenName: "max_tokens"},
+		{name: "xiaomimimo keeps max_completion_tokens dialect", providerID: "xiaomimimo", providerName: "xiaomimimo", modelName: "mimo-v2.5", stream: false, fieldName: "max_output_tokens", fieldWant: 32, wantTokenName: "max_completion_tokens"},
 	}
 
 	for _, tt := range tests {
@@ -2531,7 +2811,7 @@ func TestChatCompletionsNormalizesTokenBudgetAliasesBeforeUpstream(t *testing.T)
 				switch r.URL.Path {
 				case "/v1/models":
 					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.5"}]}`))
+					_, _ = w.Write([]byte(fmt.Sprintf(`{"data":[{"id":%q}]}`, tt.modelName)))
 				case "/v1/chat/completions":
 					if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 						t.Fatalf("decode upstream request: %v", err)
@@ -2556,16 +2836,16 @@ func TestChatCompletionsNormalizesTokenBudgetAliasesBeforeUpstream(t *testing.T)
 
 			cfg := &config.AppConfig{
 				Port:         8080,
-				DefaultModel: "gpt-5.5",
+				DefaultModel: tt.modelName,
 				Providers: []config.ProviderConfig{{
-					ID:      "useai2",
-					Name:    "UseAI2",
+					ID:      tt.providerID,
+					Name:    tt.providerName,
 					Type:    "openai",
 					BaseURL: upstream.URL + "/v1",
 					APIKey:  "sk-test",
 					Enabled: true,
 				}},
-				Models: []config.ModelConfig{{Name: "gpt-5.5", ProviderID: "useai2", Enabled: true}},
+				Models: []config.ModelConfig{{Name: tt.modelName, ProviderID: tt.providerID, Enabled: true}},
 			}
 			server := &Server{config: cfg, logger: log.New(nil, log.LevelError, false), store: store.New(10)}
 			server.registry = server.buildRegistry(cfg)
@@ -2574,13 +2854,13 @@ func TestChatCompletionsNormalizesTokenBudgetAliasesBeforeUpstream(t *testing.T)
 			})
 
 			body := fmt.Sprintf(`{
-				"model":"gpt-5.5",
+				"model":%q,
 				"stream":%t,
 				%q:%0.f,
 				"messages":[{"role":"user","content":"create a file"}],
 				"tools":[{"type":"function","function":{"name":"create_file","parameters":{"type":"object"}}}],
 				"tool_choice":"auto"
-			}`, tt.stream, tt.fieldName, tt.fieldWant)
+			}`, tt.modelName, tt.stream, tt.fieldName, tt.fieldWant)
 			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
@@ -2590,13 +2870,15 @@ func TestChatCompletionsNormalizesTokenBudgetAliasesBeforeUpstream(t *testing.T)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			if _, leaked := captured["max_output_tokens"]; leaked {
-				t.Fatalf("max_output_tokens leaked to upstream: %#v", captured)
+			for _, field := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+				if field == tt.wantTokenName {
+					continue
+				}
+				if _, leaked := captured[field]; leaked {
+					t.Fatalf("%s leaked to upstream: %#v", field, captured)
+				}
 			}
-			if _, leaked := captured["max_completion_tokens"]; leaked {
-				t.Fatalf("max_completion_tokens leaked to upstream: %#v", captured)
-			}
-			if captured["max_tokens"] != tt.fieldWant || captured["stream"] != tt.stream {
+			if captured[tt.wantTokenName] != tt.fieldWant || captured["stream"] != tt.stream {
 				t.Fatalf("upstream request not normalized: %#v", captured)
 			}
 			if tools, _ := captured["tools"].([]any); len(tools) != 1 {

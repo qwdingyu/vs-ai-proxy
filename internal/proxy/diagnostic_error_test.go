@@ -9,6 +9,15 @@ import (
 	"testing"
 )
 
+type testUpstreamHTTPError struct {
+	status int
+	body   string
+}
+
+func (e testUpstreamHTTPError) Error() string                 { return "upstream request failed" }
+func (e testUpstreamHTTPError) UpstreamHTTPStatusCode() int   { return e.status }
+func (e testUpstreamHTTPError) UpstreamHTTPErrorBody() []byte { return []byte(e.body) }
+
 func TestSanitizeDiagnosticMessageRedactsSecretsAndTruncates(t *testing.T) {
 	message := "request failed: Bearer secret-token-value-123456 api_key:secret-api-key-123456 sk-testsecret1234567890 " +
 		strings.Repeat("x", maxDiagnosticMessageBytes+20)
@@ -41,16 +50,81 @@ func TestClassifyProxyErrorDistinguishesNetworkAndUpstreamStatus(t *testing.T) {
 		`openai stream error: API 错误 413: payload too large; context canceled`:     "upstream_payload_too_large",
 		`openai stream error: API 错误 429`:                                          "upstream_rate_limit",
 		`openai stream error: API 错误 503`:                                          "upstream_server_error",
-		`openai stream error: context canceled`:                                    "client_gone",
-		`client_gone`:                                                              "client_gone",
-		`context deadline exceeded`:                                                "timeout",
-		`解析响应失败: invalid character`:                                                "proxy_parse_error",
+		`openai stream error: API 错误 403: {"error":{"message":"You've reached your usage limit for this billing cycle","type":"access_terminated_error"}}`:           "upstream_quota_exhausted",
+		`openai stream error: API 错误 400: {"error":{"message":"the message at position 39 with role 'assistant' must not be empty","type":"invalid_request_error"}}`: "upstream_message_error",
+		`openai stream error: context canceled`: "client_gone",
+		`client_gone`:                           "client_gone",
+		`context deadline exceeded`:             "timeout",
+		`解析响应失败: invalid character`:             "proxy_parse_error",
 	}
 
 	for message, want := range tests {
 		if got := classifyProxyError(message); got != want {
 			t.Fatalf("%q classified as %q, want %q", message, got, want)
 		}
+	}
+}
+
+func TestNewAttemptDiagnosticUsesStructuredUpstreamErrorDetails(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "billing quota in 403 body",
+			err: testUpstreamHTTPError{
+				status: http.StatusForbidden,
+				body:   `{"error":{"message":"You've reached your usage limit for this billing cycle","type":"access_terminated_error"}}`,
+			},
+			want: "upstream_quota_exhausted",
+		},
+		{
+			name: "empty assistant history message",
+			err: testUpstreamHTTPError{
+				status: http.StatusBadRequest,
+				body:   `{"error":{"message":"the message at position 39 with role 'assistant' must not be empty","type":"invalid_request_error"}}`,
+			},
+			want: "upstream_message_error",
+		},
+		{
+			name: "ordinary forbidden remains auth",
+			err:  testUpstreamHTTPError{status: http.StatusForbidden, body: `{"error":{"message":"forbidden"}}`},
+			want: "upstream_auth_error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attempt := newAttemptDiagnostic("test", "model", 10, tt.err)
+			if attempt.Category != tt.want {
+				t.Fatalf("category = %q, want %q", attempt.Category, tt.want)
+			}
+		})
+	}
+}
+
+func TestUserFacingDiagnosticCopyIsConcise(t *testing.T) {
+	tests := []struct {
+		code       string
+		wantReason string
+		wantAction string
+	}{
+		{code: "upstream_quota_exhausted", wantReason: "上游额度已用完", wantAction: "等待额度刷新，或充值/升级套餐。"},
+		{code: "upstream_message_error", wantReason: "会话消息无效", wantAction: "新建会话后重试。"},
+		{code: "client_gone", wantReason: "客户端已取消", wantAction: "重新发送；若反复出现，请新建会话。"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			diag := summarizeLogDiagnostic(tt.code, http.StatusBadGateway, 100, 0, 0, "", "", "", "")
+			if diag.Reason != tt.wantReason || diag.Action != tt.wantAction {
+				t.Fatalf("diagnostic = %#v, want reason=%q action=%q", diag, tt.wantReason, tt.wantAction)
+			}
+			if len([]rune(diag.Reason+diag.Action)) > 40 {
+				t.Fatalf("user-facing copy is too long: %#v", diag)
+			}
+		})
 	}
 }
 
@@ -103,7 +177,7 @@ func TestNewAttemptDiagnosticKeepsElapsedMsForSlowCandidates(t *testing.T) {
 	}
 }
 
-func TestNetworkErrorHintMentionsPeerWhenPresent(t *testing.T) {
+func TestNetworkErrorHintKeepsPeerInStructuredAttempt(t *testing.T) {
 	diag := allCandidatesFailedDiagnostic("UseAI - step-router-v1", "step-router-v1", 1, []attemptDiagnostic{{
 		Provider:  "useai",
 		Upstream:  "step-router-v1",
@@ -113,8 +187,11 @@ func TestNetworkErrorHintMentionsPeerWhenPresent(t *testing.T) {
 		Peer:      "104.21.57.81:443",
 	}})
 
-	if !strings.Contains(diag.Details.Hint, "104.21.57.81:443") || !strings.Contains(diag.Details.Hint, "Cloudflare/CDN") {
-		t.Fatalf("hint should explain network peer/CDN: %q", diag.Details.Hint)
+	if diag.Details.Hint != "检查网络和上游地址后重试。" {
+		t.Fatalf("hint = %q, want concise recovery", diag.Details.Hint)
+	}
+	if len(diag.Details.Attempts) != 1 || diag.Details.Attempts[0].Peer != "104.21.57.81:443" {
+		t.Fatalf("structured peer missing: %#v", diag.Details.Attempts)
 	}
 }
 
@@ -166,7 +243,9 @@ func TestNewAttemptDiagnosticClassifiesWrappedContextCanceledAsClientGone(t *tes
 
 func TestDiagnosticHintCoversSpecificUpstreamCategories(t *testing.T) {
 	for _, category := range []string{
+		"upstream_quota_exhausted",
 		"upstream_auth_error",
+		"upstream_message_error",
 		"upstream_payload_too_large",
 		"upstream_rate_limit",
 		"upstream_request_error",
@@ -178,7 +257,7 @@ func TestDiagnosticHintCoversSpecificUpstreamCategories(t *testing.T) {
 	}
 }
 
-func TestPayloadTooLargeHintMentionsProviderSpecificLimit(t *testing.T) {
+func TestPayloadTooLargeHintIsConcise(t *testing.T) {
 	diag := allCandidatesFailedDiagnostic("UseAI - deepseek-v4-flash", "deepseek-v4-flash", 1, []attemptDiagnostic{{
 		Provider: "useai",
 		Upstream: "deepseek-v4-flash",
@@ -189,15 +268,12 @@ func TestPayloadTooLargeHintMentionsProviderSpecificLimit(t *testing.T) {
 	if diag.Message != "当前提供商请求失败" {
 		t.Fatalf("single-candidate message = %q, want 当前提供商请求失败", diag.Message)
 	}
-	if !strings.Contains(diag.Details.Hint, "不是代理或 nginx 全局限制") {
-		t.Fatalf("hint should avoid global nginx misdiagnosis: %q", diag.Details.Hint)
-	}
-	if !strings.Contains(diag.Details.Hint, "useai/deepseek-v4-flash") {
-		t.Fatalf("hint should identify provider/model: %q", diag.Details.Hint)
+	if diag.Details.Hint != "减少会话历史、文件或附件后重试。" {
+		t.Fatalf("hint = %q, want concise recovery", diag.Details.Hint)
 	}
 }
 
-func TestPayloadTooLargeHintUsesMatchingAttemptProvider(t *testing.T) {
+func TestPayloadTooLargeKeepsProvidersInStructuredAttempts(t *testing.T) {
 	diag := allCandidatesFailedDiagnostic("shared", "shared", 2, []attemptDiagnostic{
 		{Provider: "useai", Upstream: "shared", Category: "upstream_payload_too_large", Message: "API 错误 413"},
 		{Provider: "backup", Upstream: "shared", Category: "network_error", Message: "use of closed network connection"},
@@ -206,11 +282,8 @@ func TestPayloadTooLargeHintUsesMatchingAttemptProvider(t *testing.T) {
 	if diag.Code != "upstream_payload_too_large" {
 		t.Fatalf("code = %q, want upstream_payload_too_large", diag.Code)
 	}
-	if !strings.Contains(diag.Details.Hint, "useai/shared") {
-		t.Fatalf("hint should point to payload provider, got %q", diag.Details.Hint)
-	}
-	if strings.Contains(diag.Details.Hint, "backup/shared") {
-		t.Fatalf("hint should not point to later non-payload provider: %q", diag.Details.Hint)
+	if len(diag.Details.Attempts) != 2 || diag.Details.Attempts[0].Provider != "useai" || diag.Details.Attempts[1].Provider != "backup" {
+		t.Fatalf("structured attempts lost provider details: %#v", diag.Details.Attempts)
 	}
 }
 
@@ -226,7 +299,7 @@ func TestAllCandidatesFailedDiagnosticUsesMostActionableCategory(t *testing.T) {
 	if diag.Code != "upstream_payload_too_large" {
 		t.Fatalf("code = %q, want upstream_payload_too_large", diag.Code)
 	}
-	if !strings.Contains(diag.Details.Hint, "请求体或上下文过大") {
+	if !strings.Contains(diag.Details.Hint, "减少会话历史") {
 		t.Fatalf("hint = %q, want payload guidance", diag.Details.Hint)
 	}
 }
@@ -288,8 +361,8 @@ func TestSummarizeLogDiagnosticGivesOperatorReadyReasonAndAction(t *testing.T) {
 			elapsedMs:  99_995,
 			bytes:      634_054,
 			upstream:   642_181,
-			wantReason: "客户端等待上限",
-			wantAction: "首 token",
+			wantReason: "客户端等待超时",
+			wantAction: "减少会话内容",
 			wantInSum:  "上游体 627.1 KB",
 		},
 		{
@@ -297,17 +370,17 @@ func TestSummarizeLogDiagnosticGivesOperatorReadyReasonAndAction(t *testing.T) {
 			statusCode: 502,
 			elapsedMs:  4_985,
 			bytes:      1_132_802,
-			wantReason: "上游拒绝大请求",
-			wantAction: "减少历史上下文",
-			wantInSum:  "413",
+			wantReason: "请求内容过大",
+			wantAction: "减少会话历史",
+			wantInSum:  "上游拒绝大请求",
 		},
 		{
 			code:       "network_error",
 			statusCode: 502,
 			elapsedMs:  13_227,
 			peer:       "104.21.57.81:443",
-			wantReason: "网络/CDN/连接异常",
-			wantAction: "Cloudflare/WAF",
+			wantReason: "无法连接上游",
+			wantAction: "检查网络",
 			wantInSum:  "104.21.57.81:443",
 		},
 		{
@@ -316,17 +389,17 @@ func TestSummarizeLogDiagnosticGivesOperatorReadyReasonAndAction(t *testing.T) {
 			elapsedMs:  22_510,
 			bytes:      634_054,
 			upstream:   642_181,
-			wantReason: "网络/CDN/连接异常",
-			wantAction: "新建 session 后恢复",
-			wantInSum:  "大上下文",
+			wantReason: "无法连接上游",
+			wantAction: "检查网络",
+			wantInSum:  "请求体 619.2 KB",
 		},
 		{
 			code:       "upstream_request_error",
 			statusCode: 502,
 			elapsedMs:  11228,
-			wantReason: "上游拒绝参数/模型",
-			wantAction: "不兼容参数治理",
-			wantInSum:  "400/404",
+			wantReason: "上游不接受本次请求",
+			wantAction: "模型名",
+			wantInSum:  "上游拒绝请求",
 		},
 	}
 
@@ -353,18 +426,6 @@ func TestSummarizeLogDiagnosticLeavesSuccessfulRequestsEmpty(t *testing.T) {
 	}
 }
 
-func TestSessionPressureDiagnosticNoteClassifiesLargeContexts(t *testing.T) {
-	if got := sessionPressureDiagnosticNote(128*1024, 96*1024); got != "" {
-		t.Fatalf("small request note = %q, want empty", got)
-	}
-	if got := sessionPressureDiagnosticNote(640*1024, 512*1024); !strings.Contains(got, "大上下文") || !strings.Contains(got, "新建 session 后恢复") {
-		t.Fatalf("large request note = %q, want large-context hint", got)
-	}
-	if got := sessionPressureDiagnosticNote(2*1024*1024, 256*1024); !strings.Contains(got, "超大上下文") {
-		t.Fatalf("extra large request note = %q, want extra-large-context hint", got)
-	}
-}
-
 func TestSummarizeLogDiagnosticDoesNotAttachContextPressureToUnrelatedErrors(t *testing.T) {
 	for _, code := range []string{"upstream_auth_error", "upstream_request_error", "upstream_rate_limit"} {
 		t.Run(code, func(t *testing.T) {
@@ -376,7 +437,7 @@ func TestSummarizeLogDiagnosticDoesNotAttachContextPressureToUnrelatedErrors(t *
 	}
 }
 
-func TestSummarizeLogDiagnosticExplainsInterruptedToolCalls(t *testing.T) {
+func TestSummarizeLogDiagnosticDoesNotAddToolJargon(t *testing.T) {
 	diag := summarizeLogDiagnostic(
 		"client_gone",
 		499,
@@ -389,14 +450,17 @@ func TestSummarizeLogDiagnosticExplainsInterruptedToolCalls(t *testing.T) {
 		"",
 	)
 
-	for _, want := range []string{"声明了工具", "响应未完整返回工具调用", "不是工具未注册"} {
-		if !strings.Contains(diag.Action, want) || !strings.Contains(diag.Summary, want) {
-			t.Fatalf("diagnostic = %#v, want contains %q", diag, want)
+	if diag.Action != "重新发送；若反复出现，请新建会话。" {
+		t.Fatalf("action = %q, want concise recovery", diag.Action)
+	}
+	for _, unwanted := range []string{"工具", "499/context canceled", "provider", "channel"} {
+		if strings.Contains(diag.Action, unwanted) || strings.Contains(diag.Summary, unwanted) {
+			t.Fatalf("diagnostic = %#v, contains jargon %q", diag, unwanted)
 		}
 	}
 }
 
-func TestSummarizeLogDiagnosticExplainsInterruptedToolCallsOnTimeout(t *testing.T) {
+func TestSummarizeLogDiagnosticKeepsTimeoutActionConcise(t *testing.T) {
 	diag := summarizeLogDiagnostic(
 		"timeout",
 		http.StatusBadGateway,
@@ -409,15 +473,7 @@ func TestSummarizeLogDiagnosticExplainsInterruptedToolCallsOnTimeout(t *testing.
 		"",
 	)
 
-	for _, want := range []string{"声明了工具", "响应未完整返回工具调用", "不是工具未注册"} {
-		if !strings.Contains(diag.Action, want) || !strings.Contains(diag.Summary, want) {
-			t.Fatalf("timeout diagnostic = %#v, want contains %q", diag, want)
-		}
-	}
-	if strings.Contains(diag.Action, "499/context canceled") || strings.Contains(diag.Summary, "499/context canceled") {
-		t.Fatalf("timeout diagnostic must not claim a 499 cancellation: %#v", diag)
-	}
-	if !strings.Contains(diag.Action, "超时预算") || !strings.Contains(diag.Summary, "超时预算") {
-		t.Fatalf("timeout diagnostic must describe the timeout state: %#v", diag)
+	if diag.Reason != "上游响应超时" || diag.Action != "减少会话内容，或切换响应更快的模型。" {
+		t.Fatalf("timeout diagnostic = %#v, want concise recovery", diag)
 	}
 }

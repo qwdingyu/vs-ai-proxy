@@ -167,9 +167,8 @@ func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
 	for _, want := range []string{
 		"request_id=req-log-1",
 		"error_code=upstream_server_error",
-		`reason="上游服务异常"`,
-		`action="检查 new-api/sub2api 渠道健康、上游状态页和网关重试/轮换策略。"`,
-		`summary="上游返回 5xx`,
+		`reason="上游服务暂不可用"`,
+		`action="稍后重试，或切换模型。"`,
 		`attempts="useai/gpt-5.5 13s upstream_server_error"`,
 	} {
 		if !strings.Contains(out, want) {
@@ -178,13 +177,47 @@ func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
 	}
 }
 
-func TestConsoleDiagnosticSuffixIncludesContextPressure(t *testing.T) {
+func TestProviderAttemptWarningUsesShortUserFacingReason(t *testing.T) {
+	var buf strings.Builder
+	server := &Server{logger: log.New(&buf, log.LevelWarn, false)}
+	server.logProviderAttemptFailure("kimi-for-coding", "kimi", attemptDiagnostic{
+		Category: "upstream_quota_exhausted",
+		Message:  `API 错误 403: {"error":{"message":"long upstream error"}}`,
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "模型 kimi-for-coding（kimi）失败: 上游额度已用完") {
+		t.Fatalf("warning = %q, want concise reason", out)
+	}
+	if strings.Contains(out, "API 错误") || strings.Contains(out, "long upstream error") {
+		t.Fatalf("warning leaked technical upstream body: %q", out)
+	}
+}
+
+func TestProviderAttemptDebugLogKeepsSanitizedUpstreamEvidence(t *testing.T) {
+	var buf strings.Builder
+	server := &Server{logger: log.New(&buf, log.LevelDebug, false)}
+	server.logProviderAttemptFailure("test-model", "test", attemptDiagnostic{
+		Category: "upstream_auth_error",
+		Message:  "API 错误 403: Bearer secret-token-value-123456 denied",
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "[DEBUG]") || !strings.Contains(out, "API 错误 403") {
+		t.Fatalf("debug evidence missing: %q", out)
+	}
+	if strings.Contains(out, "secret-token-value") || !strings.Contains(out, "<redacted>") {
+		t.Fatalf("debug evidence was not sanitized: %q", out)
+	}
+}
+
+func TestConsoleDiagnosticSuffixKeepsTechnicalFieldsCompact(t *testing.T) {
 	diag := summarizeLogDiagnostic("network_error", http.StatusBadGateway, 22_510, 634_054, 642_181, "104.21.57.81:443", "upstream_connecting", "", "")
 	suffix := consoleDiagnosticSuffix(diag, "useai/step-router-v1 23s network_error", 634_054, 642_181)
 
 	for _, want := range []string{
-		`reason="网络/CDN/连接异常"`,
-		"旧 session",
+		`reason="无法连接上游"`,
+		`action="检查网络和上游地址后重试。"`,
 		`attempts="useai/step-router-v1 23s network_error"`,
 		`request_bytes="619.2 KB"`,
 		`upstream_bytes="627.1 KB"`,
@@ -193,9 +226,12 @@ func TestConsoleDiagnosticSuffixIncludesContextPressure(t *testing.T) {
 			t.Fatalf("suffix = %q, want contains %q", suffix, want)
 		}
 	}
+	if strings.Contains(suffix, "summary=") || strings.Contains(suffix, "旧 session") {
+		t.Fatalf("suffix contains redundant explanation: %q", suffix)
+	}
 }
 
-func TestLoggingMiddlewareWritesContextPressureHintToServerLog(t *testing.T) {
+func TestLoggingMiddlewareKeepsLargeRequestErrorConcise(t *testing.T) {
 	var buf strings.Builder
 	st := store.New(10)
 	server := &Server{store: st, logger: log.New(&buf, log.LevelInfo, false)}
@@ -221,14 +257,11 @@ func TestLoggingMiddlewareWritesContextPressureHintToServerLog(t *testing.T) {
 	for _, want := range []string{
 		"request_id=req-pressure-console",
 		"error_code=network_error",
-		`reason="网络/CDN/连接异常"`,
-		"旧 session",
-		"大上下文",
+		`reason="无法连接上游"`,
+		`action="检查网络和上游地址后重试。"`,
 		`request_bytes="619.2 KB"`,
 		`upstream_bytes="627.1 KB"`,
 		`attempts="useai/step-router-v1 23s network_error"`,
-		"104.21.57.81:443",
-		"upstream_connecting",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("server log = %q, want contains %q", out, want)
@@ -239,8 +272,58 @@ func TestLoggingMiddlewareWritesContextPressureHintToServerLog(t *testing.T) {
 	if len(logs) != 1 {
 		t.Fatalf("logs len = %d, want 1", len(logs))
 	}
-	if !strings.Contains(logs[0].DiagnosticSummary, "旧 session") || !strings.Contains(logs[0].ErrorAction, "大上下文") {
-		t.Fatalf("web/store diagnostics missing context pressure hint: %#v", logs[0])
+	if strings.Contains(logs[0].ErrorAction, "session") || strings.Contains(logs[0].ErrorAction, "上下文") {
+		t.Fatalf("web/store action should stay concise: %#v", logs[0])
+	}
+}
+
+func TestLoggingMiddlewareCapturesReportedUsageThroughStreamWriter(t *testing.T) {
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setResponseLogFields(w, "kimi", "kimi-for-coding", "kimi-for-coding")
+		streamWriter := &streamAttemptWriter{ResponseWriter: w}
+		setResponseUsage(streamWriter, &provider.Usage{
+			PromptTokens: 12, CompletionTokens: 4, TotalTokens: 16,
+			PromptTokensDetails:     &provider.PromptTokensDetails{CachedTokens: 5},
+			CompletionTokensDetails: &provider.CompletionTokensDetails{ReasoningTokens: 2},
+		})
+		streamWriter.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logs := st.GetLogs(1)
+	if len(logs) != 1 || logs[0].Usage == nil {
+		t.Fatalf("logs = %#v, want one log with usage", logs)
+	}
+	usage := logs[0].Usage
+	if usage.PromptTokens != 12 || usage.CompletionTokens != 4 || usage.TotalTokens != 16 || usage.CachedTokens != 5 || usage.ReasoningTokens != 2 {
+		t.Fatalf("usage = %#v, want full upstream details", usage)
+	}
+}
+
+func TestStreamAccumulatorUsesLastUsageSnapshot(t *testing.T) {
+	acc := newStreamReasoningAccumulator()
+	acc.consumeOpenAISSELine(`data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`)
+	acc.consumeOpenAISSELine(`data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":1}}}`)
+	if acc.usage == nil || acc.usage.TotalTokens != 10 {
+		t.Fatalf("usage = %#v, want final snapshot total=10", acc.usage)
+	}
+	if acc.usage.PromptTokensDetails == nil || acc.usage.PromptTokensDetails.CachedTokens != 3 {
+		t.Fatalf("usage details = %#v, want cached=3", acc.usage)
+	}
+}
+
+func TestStreamAccumulatorCapturesOllamaTerminalUsage(t *testing.T) {
+	acc := newStreamReasoningAccumulator()
+	acc.consumeOllamaChunk(map[string]any{
+		"done": true, "done_reason": "stop", "prompt_eval_count": float64(9), "eval_count": float64(3),
+	})
+	if acc.usage == nil || acc.usage.PromptTokens != 9 || acc.usage.CompletionTokens != 3 || acc.usage.TotalTokens != 12 {
+		t.Fatalf("usage = %#v, want Ollama terminal usage 9/3/12", acc.usage)
 	}
 }
 
@@ -261,8 +344,8 @@ func TestLoggingMiddlewareWritesDiagnosticsWhenErrorCodeHeaderMissing(t *testing
 	for _, want := range []string{
 		"request_id=req-missing-code",
 		"error_code=provider_error",
-		`reason="未分类请求失败"`,
-		`summary="请求失败，需结合错误正文排查`,
+		`reason="请求失败"`,
+		`action="检查上游配置后重试。"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("server log = %q, want contains %q", out, want)
@@ -272,7 +355,7 @@ func TestLoggingMiddlewareWritesDiagnosticsWhenErrorCodeHeaderMissing(t *testing
 	if len(logs) != 1 {
 		t.Fatalf("logs len = %d, want 1", len(logs))
 	}
-	if logs[0].ErrorCode != "provider_error" || logs[0].ErrorReason != "未分类请求失败" {
+	if logs[0].ErrorCode != "provider_error" || logs[0].ErrorReason != "请求失败" {
 		t.Fatalf("store fallback diagnostics missing: %#v", logs[0])
 	}
 }
@@ -313,11 +396,11 @@ func TestLoggingMiddlewareClassifiesHTTPErrorWithoutProxyHeaders(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	out := buf.String()
-	if !strings.Contains(out, "error_code=upstream_request_error") || !strings.Contains(out, `reason="上游拒绝参数/模型"`) {
+	if !strings.Contains(out, "error_code=upstream_request_error") || !strings.Contains(out, `reason="上游不接受本次请求"`) {
 		t.Fatalf("server log = %q, want request-error diagnostics", out)
 	}
 	logs := st.GetLogs(1)
-	if len(logs) != 1 || logs[0].ErrorCode != "upstream_request_error" || logs[0].ErrorReason != "上游拒绝参数/模型" {
+	if len(logs) != 1 || logs[0].ErrorCode != "upstream_request_error" || logs[0].ErrorReason != "上游不接受本次请求" {
 		t.Fatalf("store diagnostics = %#v, want upstream_request_error", logs)
 	}
 }
@@ -400,10 +483,10 @@ func TestLoggingMiddlewareStoresStructuredDiagnostics(t *testing.T) {
 	if entry.AttemptsSummary != "useai/gpt-5.5 13s upstream_server_error" {
 		t.Fatalf("attempts summary = %q", entry.AttemptsSummary)
 	}
-	if entry.ErrorReason != "上游服务异常" {
-		t.Fatalf("error reason = %q, want 上游服务异常", entry.ErrorReason)
+	if entry.ErrorReason != "上游服务暂不可用" {
+		t.Fatalf("error reason = %q, want 上游服务暂不可用", entry.ErrorReason)
 	}
-	if !strings.Contains(entry.ErrorAction, "渠道") || !strings.Contains(entry.DiagnosticSummary, "5xx") {
+	if entry.ErrorAction != "稍后重试，或切换模型。" || !strings.Contains(entry.DiagnosticSummary, "5xx") {
 		t.Fatalf("diagnostic fields missing useful guidance: %#v", entry)
 	}
 }
@@ -452,11 +535,11 @@ func TestEnrichClientGoneDiagnosticsNearClientDeadline(t *testing.T) {
 	if code != "client_deadline_reached" {
 		t.Fatalf("code = %q, want client_deadline_reached", code)
 	}
-	if !strings.Contains(message, "接近等待上限") {
-		t.Fatalf("message should explain client deadline: %q", message)
+	if message != "客户端等待超时。" {
+		t.Fatalf("message = %q, want concise deadline", message)
 	}
-	if !strings.Contains(hint, "20-30 秒") || !strings.Contains(hint, "1050.6 KB") {
-		t.Fatalf("hint should include upstream timeout guidance and request size: %q", hint)
+	if hint != "减少会话内容，或切换响应更快的模型。" {
+		t.Fatalf("hint = %q, want concise recovery", hint)
 	}
 }
 

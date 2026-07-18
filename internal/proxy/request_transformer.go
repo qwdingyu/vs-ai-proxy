@@ -19,9 +19,11 @@ func (s *Server) transformRequest(
 		return
 	}
 
-	if shouldInjectCachedReasoning(prov) {
+	preserveReasoningOnly := shouldInjectCachedReasoning(prov)
+	if preserveReasoningOnly {
 		s.injectCachedReasoning(req)
 	}
+	dropEmptyAssistantPlaceholders(req, preserveReasoningOnly)
 	s.applyExecutionDefaults(cfg, req, requestedModel, prov)
 }
 
@@ -42,15 +44,13 @@ func (s *Server) injectCachedReasoning(req *provider.ChatRequest) {
 	}
 
 	assistantIndex := 0
-	trimmed := make([]provider.Message, 0, len(req.Messages))
-
-	for _, msg := range req.Messages {
+	for i := range req.Messages {
+		msg := &req.Messages[i]
 		if msg.Role != "assistant" {
-			trimmed = append(trimmed, msg)
 			continue
 		}
 
-		key := reasoningCacheKeyForMessage(msg)
+		key := reasoningCacheKeyForMessage(*msg)
 		if key == "" {
 			key = assistantKey(assistantIndex)
 			assistantIndex++
@@ -61,15 +61,25 @@ func (s *Server) injectCachedReasoning(req *provider.ChatRequest) {
 				msg.Reasoning = reasoning
 			}
 		}
+	}
+}
 
-		if shouldDropAssistantPlaceholder(msg) {
-			continue
-		}
-
-		trimmed = append(trimmed, msg)
+func dropEmptyAssistantPlaceholders(req *provider.ChatRequest, preserveReasoningOnly bool) {
+	if req == nil || len(req.Messages) == 0 {
+		return
 	}
 
-	req.Messages = trimmed
+	messages := make([]provider.Message, 0, len(req.Messages))
+	for _, msg := range req.Messages {
+		candidate := msg
+		if !preserveReasoningOnly {
+			candidate.Reasoning = ""
+		}
+		if !shouldDropAssistantPlaceholder(candidate) {
+			messages = append(messages, msg)
+		}
+	}
+	req.Messages = messages
 }
 
 func shouldDropAssistantPlaceholder(msg provider.Message) bool {
@@ -170,9 +180,8 @@ func (s *Server) applyExecutionDefaults(
 }
 
 func (s *Server) applyGlobalDefaults(req *provider.ChatRequest) {
-	if req.Temperature == nil {
-		req.Temperature = float64Ptr(0.7)
-	}
+	// Sampling parameters are model-specific. Leave them unset unless the
+	// client or a declarative model profile supplies a compatible value.
 	if req.MaxTokens == nil {
 		req.MaxTokens = intPtr(4096)
 	}
@@ -236,6 +245,10 @@ func (s *Server) applyProfileDefaults(
 		if strings.TrimSpace(req.ReasoningEffort) == "" && strings.TrimSpace(profile.ReasoningEffort) != "" && caps.SupportsReasoningEffort {
 			req.ReasoningEffort = profile.ReasoningEffort
 		}
+	}
+	if profile.FixedTemperature != nil {
+		fixedTemperature := *profile.FixedTemperature
+		req.Temperature = &fixedTemperature
 	}
 	outputLimit := 0
 	if profile.ContextLength != nil && *profile.ContextLength > 0 {

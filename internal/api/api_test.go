@@ -383,6 +383,30 @@ func TestDiagnosticsSummaryEndpointReturnsCopyableSummary(t *testing.T) {
 	}
 }
 
+func TestStatisticsEndpointExposesTokenCoverageAndModelUsage(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	apiSrv.store.AddLog(store.RequestLog{
+		Provider: "zhipu", Model: "glm", Upstream: "glm-5.1", StatusCode: 200, IsSuccess: true,
+		Usage: &store.TokenUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, CachedTokens: 4, ReasoningTokens: 2, Source: "upstream"},
+	})
+
+	rec := httptest.NewRecorder()
+	apiSrv.engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/statistics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/statistics status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var stats store.Statistics
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("unmarshal statistics: %v", err)
+	}
+	if stats.TokenUsageRequests != 1 || stats.UsageReportedCount != 1 || stats.TotalTokens != 25 {
+		t.Fatalf("token statistics = %#v, want coverage 1/1 and total 25", stats)
+	}
+	if len(stats.ModelUsage) != 1 || stats.ModelUsage[0].Provider != "zhipu" || stats.ModelUsage[0].Upstream != "glm-5.1" {
+		t.Fatalf("model usage = %#v, want zhipu/glm-5.1", stats.ModelUsage)
+	}
+}
+
 func TestDiagnosticsSummaryUsesLatestFailureAcrossRetainedLogs(t *testing.T) {
 	apiSrv, _ := newAPITestHarnessWithStoreMax(t, 100)
 	apiSrv.store.AddLog(store.RequestLog{
@@ -1010,6 +1034,11 @@ func TestProviderEndpointsCRUDAndHotUpdate(t *testing.T) {
 	apiSrv.engine.ServeHTTP(listRec, listReq)
 	if !bytes.Contains(listRec.Body.Bytes(), []byte(`"id":"openai-paid"`)) {
 		t.Fatalf("provider list missing openai-paid: %s", listRec.Body.String())
+	}
+	if !bytes.Contains(listRec.Body.Bytes(), []byte(`"compatibility_profile"`)) ||
+		!bytes.Contains(listRec.Body.Bytes(), []byte(`"api_format":"openai"`)) ||
+		!bytes.Contains(listRec.Body.Bytes(), []byte(`"output_token_param":"max_tokens"`)) {
+		t.Fatalf("provider list should expose compatibility profile: %s", listRec.Body.String())
 	}
 
 	updBody := config.ProviderConfig{
@@ -1737,6 +1766,71 @@ func TestManagementTestEndpoints(t *testing.T) {
 	}
 	if !bytes.Contains(chatRec.Body.Bytes(), []byte(`"provider_id":"openai"`)) || !bytes.Contains(chatRec.Body.Bytes(), []byte(`"model":"model-a"`)) {
 		t.Fatalf("test chat should include request context: %s", chatRec.Body.String())
+	}
+}
+
+func TestManagementTestEndpointsUseZhipuVersionedAPIBaseURL(t *testing.T) {
+	seen := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Path]++
+		switch r.URL.Path {
+		case "/api/paas/v4/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"glm-4.7"}]}`))
+		case "/api/paas/v4/chat/completions":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode chat request: %v", err)
+			}
+			if body["stream"] == true {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"))
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"non-stream unavailable"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	payload := config.ProviderConfig{
+		ID:      "zhipu",
+		Name:    "zhipu",
+		Type:    "openai",
+		APIKey:  "test-key",
+		BaseURL: upstream.URL + "/api/paas/v4/",
+		Enabled: true,
+	}
+
+	connRec := httptest.NewRecorder()
+	connReq := httptest.NewRequest(http.MethodPost, "/api/test/connection", mustJSONBody(t, map[string]any{
+		"provider": payload,
+	}))
+	apiSrv.engine.ServeHTTP(connRec, connReq)
+	if connRec.Code != http.StatusOK || !bytes.Contains(connRec.Body.Bytes(), []byte(`"success":true`)) {
+		t.Fatalf("zhipu connection test failed: status=%d body=%s", connRec.Code, connRec.Body.String())
+	}
+
+	chatRec := httptest.NewRecorder()
+	chatReq := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": payload,
+		"message":  "hello",
+		"model":    "glm-4.7",
+	}))
+	apiSrv.engine.ServeHTTP(chatRec, chatReq)
+	if chatRec.Code != http.StatusOK || !bytes.Contains(chatRec.Body.Bytes(), []byte(`"success":true`)) {
+		t.Fatalf("zhipu chat test failed: status=%d body=%s", chatRec.Code, chatRec.Body.String())
+	}
+	if !bytes.Contains(chatRec.Body.Bytes(), []byte(`"fallback_mode":"stream"`)) || !bytes.Contains(chatRec.Body.Bytes(), []byte(`"content":"ok"`)) {
+		t.Fatalf("zhipu stream fallback details missing: %s", chatRec.Body.String())
+	}
+	if seen["/api/paas/v4/models"] != 1 || seen["/api/paas/v4/chat/completions"] != 2 {
+		t.Fatalf("unexpected zhipu endpoint calls: %#v", seen)
+	}
+	if seen["/api/paas/v4/v1/models"] != 0 || seen["/api/paas/v4/v1/chat/completions"] != 0 {
+		t.Fatalf("v1 must not be inserted after the zhipu v4 API root: %#v", seen)
 	}
 }
 
