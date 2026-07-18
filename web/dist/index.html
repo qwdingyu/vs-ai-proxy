@@ -86,6 +86,17 @@
     .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
     .token-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .token-period-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .token-period-card { background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; min-width: 0; }
+    .token-period-card .value { font-size: 22px; }
+    .token-period-meta { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .token-trend { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 16px; }
+    .token-trend-row { display: grid; grid-template-columns: 92px minmax(120px, 1fr) 118px 108px; gap: 10px; align-items: center; min-height: 30px; color: var(--muted); font-size: 12px; }
+    .token-trend-date { color: var(--text); font-variant-numeric: tabular-nums; }
+    .token-trend-bar { height: 8px; border-radius: 999px; background: rgba(48,54,61,0.62); overflow: hidden; }
+    .token-trend-fill { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: linear-gradient(90deg, #58a6ff, #3fb950); }
+    .token-trend-value { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+    .token-trend-coverage { text-align: right; font-variant-numeric: tabular-nums; }
     .table-scroll { overflow-x: auto; }
     .token-table { min-width: 920px; }
     .hero-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.8fr); gap: 14px; align-items: stretch; margin-bottom: 16px; }
@@ -121,7 +132,7 @@
     .faq-list details { background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 10px; }
     .faq-list summary { cursor: pointer; font-weight: 700; }
     .faq-list p { color: var(--muted); line-height: 1.7; }
-    @media (max-width: 900px) { .header { align-items: flex-start; flex-direction: column; } .nav { flex-wrap: wrap; } .stats, .grid-2, .grid-3, .hero-grid, .contact-card, .guide-steps, .community-card { grid-template-columns: 1fr; } .qrcode-frame { justify-self: start; width: 170px; } }
+    @media (max-width: 900px) { .header { align-items: flex-start; flex-direction: column; } .nav { flex-wrap: wrap; } .stats, .grid-2, .grid-3, .hero-grid, .contact-card, .guide-steps, .community-card, .token-period-grid { grid-template-columns: 1fr; } .token-trend-row { grid-template-columns: 78px minmax(90px, 1fr) 88px; } .token-trend-coverage { display: none; } .qrcode-frame { justify-self: start; width: 170px; } }
   </style>
   <script src="/admin/i18n/index.js"></script>
   <script src="/admin/i18n/zh.js"></script>
@@ -203,8 +214,41 @@
           </div>
         </div>
 
-        <h2 data-i18n="dashboard.tokens.title">累计 Token 用量</h2>
+        <h2 data-i18n="dashboard.tokens.periodTitle">Token 用量趋势</h2>
         <div class="hint token-usage-note" data-i18n="dashboard.tokens.note">Token 只统计上游返回 usage 的请求；未返回 usage 的请求为未知，不按 0 计算。缓存命中的输入和推理输出子项已包含在总 Token 中，不重复相加。</div>
+        <div class="token-period-grid">
+          <div class="token-period-card">
+            <div class="label" data-i18n="dashboard.tokens.today">今日</div>
+            <div class="value" id="todayTokens">-</div>
+            <div class="token-period-meta">
+              <span id="todayCoverage">-</span>
+              <span id="todayTokenSplit">-</span>
+            </div>
+          </div>
+          <div class="token-period-card">
+            <div class="label" data-i18n="dashboard.tokens.thisWeek">本周</div>
+            <div class="value" id="weekTokens">-</div>
+            <div class="token-period-meta">
+              <span id="weekCoverage">-</span>
+              <span id="weekTokenSplit">-</span>
+            </div>
+          </div>
+          <div class="token-period-card">
+            <div class="label" data-i18n="dashboard.tokens.thisMonth">本月</div>
+            <div class="value" id="monthTokens">-</div>
+            <div class="token-period-meta">
+              <span id="monthCoverage">-</span>
+              <span id="monthTokenSplit">-</span>
+            </div>
+          </div>
+        </div>
+
+        <h3 data-i18n="dashboard.tokens.dailyTrend">最近 14 天</h3>
+        <div class="token-trend" id="dailyTokenTrend">
+          <div class="empty" data-i18n="table.empty.modelUsage">暂无 Token 明细</div>
+        </div>
+
+        <h2 data-i18n="dashboard.tokens.cumulativeTitle">累计口径</h2>
         <div class="stats token-stats">
           <div class="stat">
             <div class="label" data-i18n="dashboard.tokens.prompt">输入 Token</div>
@@ -803,6 +847,57 @@
       if (total <= 0) return '-';
       return `${formatTokenCount(known)} / ${formatTokenCount(total)} (${(known * 100 / total).toFixed(0)}%)`;
     };
+    // 周期 key 必须与后端 store 使用同一种本地日历口径：
+    // day=YYYY-MM-DD，month=YYYY-MM，week=ISO week。该代理默认本机运行，
+    // 因此前端浏览器与服务进程通常处于同一时区；远程访问时应以服务端 period key 为准。
+    const pad2 = (value) => String(value).padStart(2, '0');
+    const formatLocalDateKey = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+    const formatLocalMonthKey = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+    const formatLocalISOWeekKey = (date) => {
+      const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+      const day = (d.getDay() + 6) % 7;
+      d.setDate(d.getDate() - day + 3);
+      const isoYear = d.getFullYear();
+      const firstThursday = new Date(isoYear, 0, 4);
+      const firstDay = (firstThursday.getDay() + 6) % 7;
+      firstThursday.setDate(firstThursday.getDate() - firstDay + 3);
+      const week = 1 + Math.round((d - firstThursday) / 604800000);
+      return `${isoYear}-W${pad2(week)}`;
+    };
+    const findPeriodByKey = (items, key) => (items || []).find((item) => item && item.key === key) || null;
+    const hasReportedPeriodUsage = (period) => Number(period?.usage_reported_count || 0) > 0;
+    // 没有上游 usage 的周期显示 "-"，不显示 0。0 只能表示“上游明确上报了零值”。
+    const formatPeriodTokens = (period) => hasReportedPeriodUsage(period) ? formatTokenCount(period.total_tokens || 0) : '-';
+    const formatPeriodSplit = (period) => {
+      if (!hasReportedPeriodUsage(period)) return '-';
+      return t('dashboard.tokens.inputOutput', formatTokenCount(period.prompt_tokens || 0), formatTokenCount(period.completion_tokens || 0));
+    };
+    const renderPeriodSummary = (period, tokenID, coverageID, splitID) => {
+      $(tokenID).textContent = formatPeriodTokens(period);
+      $(coverageID).textContent = period ? t('dashboard.tokens.periodCoverage', formatUsageCoverage(period.usage_reported_count, period.request_count)) : t('dashboard.tokens.periodCoverage', '-');
+      $(splitID).textContent = period ? formatPeriodSplit(period) : '-';
+    };
+    const renderDailyTokenTrend = (daily) => {
+      // 后端已按 key 倒序返回；这里只截取最近 14 个周期，不在前端重新聚合日志。
+      const items = (daily || []).slice(0, 14);
+      const container = $('dailyTokenTrend');
+      if (!items.length) {
+        container.innerHTML = '<div class="empty">' + t('table.empty.modelUsage') + '</div>';
+        return;
+      }
+      const maxTokens = Math.max(...items.map((item) => Number(item.total_tokens || 0)), 1);
+      container.innerHTML = items.map((item) => {
+        const percent = hasReportedPeriodUsage(item) ? Math.max(2, Math.round(Number(item.total_tokens || 0) * 100 / maxTokens)) : 0;
+        const total = formatPeriodTokens(item);
+        const requestCount = t('dashboard.tokens.requestCount', formatTokenCount(item.request_count || 0));
+        return `<div class="token-trend-row">
+          <div class="token-trend-date">${escapeHTML(item.label || item.key || '-')}</div>
+          <div class="token-trend-bar" title="${escapeAttr(total + ' · ' + requestCount)}"><span class="token-trend-fill" style="width:${percent}%"></span></div>
+          <div class="token-trend-value">${total} · ${escapeHTML(requestCount)}</div>
+          <div class="token-trend-coverage">${escapeHTML(formatUsageCoverage(item.usage_reported_count, item.request_count))}</div>
+        </div>`;
+      }).join('');
+    };
     const formatTokenUsage = (log) => {
       if (!log || !log.usage) return '-';
       const usage = log.usage;
@@ -1071,6 +1166,12 @@
         $('avgLatency').textContent = stats.avg_latency_ms != null ? stats.avg_latency_ms.toFixed(0) + ' ms' : '-';
         const hasReportedUsage = Number(stats.usage_reported_count || 0) > 0;
         const reportedToken = (value) => hasReportedUsage ? formatTokenCount(value || 0) : '-';
+        const periods = stats.period_usage || {};
+        const today = new Date();
+        renderPeriodSummary(findPeriodByKey(periods.daily, formatLocalDateKey(today)), 'todayTokens', 'todayCoverage', 'todayTokenSplit');
+        renderPeriodSummary(findPeriodByKey(periods.weekly, formatLocalISOWeekKey(today)), 'weekTokens', 'weekCoverage', 'weekTokenSplit');
+        renderPeriodSummary(findPeriodByKey(periods.monthly, formatLocalMonthKey(today)), 'monthTokens', 'monthCoverage', 'monthTokenSplit');
+        renderDailyTokenTrend(periods.daily || []);
         $('promptTokens').textContent = reportedToken(stats.prompt_tokens);
         $('completionTokens').textContent = reportedToken(stats.completion_tokens);
         $('totalTokens').textContent = reportedToken(stats.total_tokens);

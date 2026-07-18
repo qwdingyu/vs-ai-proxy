@@ -51,6 +51,8 @@ const (
 // 负责组装配置、日志、存储、代理服务与 API 服务，
 // 并监听系统退出信号完成优雅停止。
 func main() {
+	configureConsoleWindow()
+
 	version = resolveBuildVersion(version)
 
 	if handled, exitCode := handleCommandLine(os.Args[1:], os.Stdout, os.Stderr); handled {

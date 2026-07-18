@@ -71,6 +71,33 @@ type ModelTokenStatistics struct {
 	ReasoningTokens    int64  `json:"reasoning_tokens"`
 }
 
+// TokenPeriodStatistics 是首页日/周/月用量的周期桶。
+// 这里的 RequestCount 是“有 provider/model/upstream 归属的请求数”，
+// UsageReportedCount 才是“上游明确返回 usage 的请求数”。这两个字段必须分开，
+// 否则 UI 会把未返回 usage 的请求误读为 0 Token，破坏成本统计可信度。
+type TokenPeriodStatistics struct {
+	Key                string                 `json:"key"`
+	Label              string                 `json:"label"`
+	StartDate          string                 `json:"start_date"`
+	EndDate            string                 `json:"end_date"`
+	RequestCount       int64                  `json:"request_count"`
+	UsageReportedCount int64                  `json:"usage_reported_count"`
+	PromptTokens       int64                  `json:"prompt_tokens"`
+	CompletionTokens   int64                  `json:"completion_tokens"`
+	TotalTokens        int64                  `json:"total_tokens"`
+	CachedTokens       int64                  `json:"cached_tokens"`
+	ReasoningTokens    int64                  `json:"reasoning_tokens"`
+	ModelUsage         []ModelTokenStatistics `json:"model_usage,omitempty"`
+}
+
+// TokenPeriodUsage 同时维护自然日、ISO 周和自然月。
+// 前端只读这些已聚合桶，不在浏览器端重新扫描日志，避免不同页面产生不同事实源。
+type TokenPeriodUsage struct {
+	Daily   []TokenPeriodStatistics `json:"daily"`
+	Weekly  []TokenPeriodStatistics `json:"weekly"`
+	Monthly []TokenPeriodStatistics `json:"monthly"`
+}
+
 // Statistics 统计数据
 type Statistics struct {
 	TotalRequests      int64                  `json:"total_requests"`
@@ -85,6 +112,7 @@ type Statistics struct {
 	CachedTokens       int64                  `json:"cached_tokens"`
 	ReasoningTokens    int64                  `json:"reasoning_tokens"`
 	ModelUsage         []ModelTokenStatistics `json:"model_usage"`
+	PeriodUsage        TokenPeriodUsage       `json:"period_usage"`
 	LastUpdated        time.Time              `json:"last_updated"`
 }
 
@@ -121,7 +149,10 @@ func (s *Store) AddLog(log RequestLog) {
 	if log.RequestID == "" {
 		log.RequestID = log.ID
 	}
-	log.Timestamp = time.Now()
+	// 测试、导入和旧日志重建会传入历史 Timestamp；只有实时请求才补当前时间。
+	if log.Timestamp.IsZero() {
+		log.Timestamp = time.Now()
+	}
 	log.Usage = normalizeTokenUsage(log.Usage)
 
 	s.logs = append(s.logs, log)
@@ -315,6 +346,9 @@ func (s *Store) updateStatsLocked(log RequestLog) {
 		s.modelStats[key] = modelStats
 	}
 	modelStats.RequestCount++
+	// 周期统计必须在 usage nil 判断之前更新：unknown usage 要进入覆盖率分母，
+	// 但不能贡献任何 token 数值。
+	updatePeriodUsage(&s.stats.PeriodUsage, log)
 	if log.Usage == nil {
 		return
 	}
@@ -338,6 +372,132 @@ func isTokenUsageRequest(log RequestLog) bool {
 
 func modelStatsKey(provider, model, upstream string) string {
 	return provider + "\x00" + model + "\x00" + upstream
+}
+
+type tokenPeriod struct {
+	key       string
+	label     string
+	startDate string
+	endDate   string
+}
+
+func updatePeriodUsage(periods *TokenPeriodUsage, log RequestLog) {
+	if periods == nil {
+		return
+	}
+	timestamp := log.Timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	local := timestamp.Local()
+	updateTokenPeriod(&periods.Daily, dayPeriod(local), log)
+	updateTokenPeriod(&periods.Weekly, weekPeriod(local), log)
+	updateTokenPeriod(&periods.Monthly, monthPeriod(local), log)
+}
+
+// updateTokenPeriod 只累加单个周期桶。RequestCount 无条件累加；
+// token 字段只在上游 usage 非 nil 时累加，用覆盖率表达数据完整性。
+func updateTokenPeriod(periods *[]TokenPeriodStatistics, period tokenPeriod, log RequestLog) {
+	if periods == nil || period.key == "" {
+		return
+	}
+	index := -1
+	for i := range *periods {
+		if (*periods)[i].Key == period.key {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		*periods = append(*periods, TokenPeriodStatistics{
+			Key:       period.key,
+			Label:     period.label,
+			StartDate: period.startDate,
+			EndDate:   period.endDate,
+		})
+		index = len(*periods) - 1
+	}
+
+	stat := &(*periods)[index]
+	stat.RequestCount++
+	updateModelTokenStats(&stat.ModelUsage, log)
+	if log.Usage == nil {
+		return
+	}
+	stat.UsageReportedCount++
+	stat.PromptTokens += log.Usage.PromptTokens
+	stat.CompletionTokens += log.Usage.CompletionTokens
+	stat.TotalTokens += log.Usage.TotalTokens
+	stat.CachedTokens += log.Usage.CachedTokens
+	stat.ReasoningTokens += log.Usage.ReasoningTokens
+}
+
+// updateModelTokenStats 复用累计模型统计结构，但作用域限定在单个周期桶内。
+// 它不能写 s.modelStats，避免周期统计污染全局累计排名。
+func updateModelTokenStats(modelUsage *[]ModelTokenStatistics, log RequestLog) {
+	if modelUsage == nil {
+		return
+	}
+	key := modelStatsKey(log.Provider, log.Model, log.Upstream)
+	index := -1
+	for i := range *modelUsage {
+		if modelStatsKey((*modelUsage)[i].Provider, (*modelUsage)[i].Model, (*modelUsage)[i].Upstream) == key {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		*modelUsage = append(*modelUsage, ModelTokenStatistics{Provider: log.Provider, Model: log.Model, Upstream: log.Upstream})
+		index = len(*modelUsage) - 1
+	}
+	stat := &(*modelUsage)[index]
+	stat.RequestCount++
+	if log.Usage == nil {
+		return
+	}
+	stat.UsageReportedCount++
+	stat.PromptTokens += log.Usage.PromptTokens
+	stat.CompletionTokens += log.Usage.CompletionTokens
+	stat.TotalTokens += log.Usage.TotalTokens
+	stat.CachedTokens += log.Usage.CachedTokens
+	stat.ReasoningTokens += log.Usage.ReasoningTokens
+}
+
+func dayPeriod(t time.Time) tokenPeriod {
+	start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	key := start.Format("2006-01-02")
+	return tokenPeriod{key: key, label: key, startDate: key, endDate: key}
+}
+
+// weekPeriod 使用 ISO 周：周一为起点，跨年周归属 ISO week-year。
+// 这与常见账单/报表的“本周”口径一致，避免周日作为起点造成中英文环境差异。
+func weekPeriod(t time.Time) tokenPeriod {
+	weekday := int(t.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()).AddDate(0, 0, -(weekday - 1))
+	end := start.AddDate(0, 0, 6)
+	year, week := start.ISOWeek()
+	key := fmt.Sprintf("%04d-W%02d", year, week)
+	return tokenPeriod{
+		key:       key,
+		label:     key,
+		startDate: start.Format("2006-01-02"),
+		endDate:   end.Format("2006-01-02"),
+	}
+}
+
+func monthPeriod(t time.Time) tokenPeriod {
+	start := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
+	end := start.AddDate(0, 1, -1)
+	key := start.Format("2006-01")
+	return tokenPeriod{
+		key:       key,
+		label:     key,
+		startDate: start.Format("2006-01-02"),
+		endDate:   end.Format("2006-01-02"),
+	}
 }
 
 func normalizeTokenUsage(usage *TokenUsage) *TokenUsage {
@@ -368,15 +528,42 @@ func (s *Store) statisticsSnapshotLocked() Statistics {
 	for _, modelStats := range s.modelStats {
 		stats.ModelUsage = append(stats.ModelUsage, *modelStats)
 	}
-	sort.Slice(stats.ModelUsage, func(i, j int) bool {
-		if stats.ModelUsage[i].TotalTokens != stats.ModelUsage[j].TotalTokens {
-			return stats.ModelUsage[i].TotalTokens > stats.ModelUsage[j].TotalTokens
+	sortModelUsage(stats.ModelUsage)
+	// PeriodUsage 内含 slice，必须深拷贝后再排序，避免读快照时改动 Store 内部顺序。
+	stats.PeriodUsage = clonePeriodUsage(s.stats.PeriodUsage)
+	return stats
+}
+
+func clonePeriodUsage(periods TokenPeriodUsage) TokenPeriodUsage {
+	return TokenPeriodUsage{
+		Daily:   clonePeriodStats(periods.Daily),
+		Weekly:  clonePeriodStats(periods.Weekly),
+		Monthly: clonePeriodStats(periods.Monthly),
+	}
+}
+
+func clonePeriodStats(periods []TokenPeriodStatistics) []TokenPeriodStatistics {
+	out := make([]TokenPeriodStatistics, len(periods))
+	for i := range periods {
+		out[i] = periods[i]
+		out[i].ModelUsage = append([]ModelTokenStatistics(nil), periods[i].ModelUsage...)
+		sortModelUsage(out[i].ModelUsage)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Key > out[j].Key
+	})
+	return out
+}
+
+func sortModelUsage(modelUsage []ModelTokenStatistics) {
+	sort.Slice(modelUsage, func(i, j int) bool {
+		if modelUsage[i].TotalTokens != modelUsage[j].TotalTokens {
+			return modelUsage[i].TotalTokens > modelUsage[j].TotalTokens
 		}
-		left := modelStatsKey(stats.ModelUsage[i].Provider, stats.ModelUsage[i].Model, stats.ModelUsage[i].Upstream)
-		right := modelStatsKey(stats.ModelUsage[j].Provider, stats.ModelUsage[j].Model, stats.ModelUsage[j].Upstream)
+		left := modelStatsKey(modelUsage[i].Provider, modelUsage[i].Model, modelUsage[i].Upstream)
+		right := modelStatsKey(modelUsage[j].Provider, modelUsage[j].Model, modelUsage[j].Upstream)
 		return left < right
 	})
-	return stats
 }
 
 // ClearLogs 清空日志
@@ -477,6 +664,12 @@ func (s *Store) LoadFromFile(path string) error {
 			s.modelStats[modelStatsKey(modelStats.Provider, modelStats.Model, modelStats.Upstream)] = &modelStats
 		}
 		s.stats.ModelUsage = nil
+		if isPeriodUsageEmpty(s.stats.PeriodUsage) {
+			// v0.2.56 之前的 sidecar 只有累计字段，没有 period_usage。
+			// 升级时保留 sidecar 的累计统计，同时用当前保留日志回填趋势；
+			// 超出日志保留上限的历史周期无法反推，不能伪造。
+			s.stats.PeriodUsage = rebuildPeriodUsageFromLogs(s.logs)
+		}
 	} else {
 		s.stats = Statistics{LastUpdated: time.Now()}
 		for _, log := range s.logs {
@@ -496,6 +689,20 @@ func statisticsSidecarPath(path string) string {
 	return strings.TrimSuffix(path, ext) + ".stats" + ext
 }
 
+func isPeriodUsageEmpty(periods TokenPeriodUsage) bool {
+	return len(periods.Daily) == 0 && len(periods.Weekly) == 0 && len(periods.Monthly) == 0
+}
+
+func rebuildPeriodUsageFromLogs(logs []RequestLog) TokenPeriodUsage {
+	var periods TokenPeriodUsage
+	for _, log := range logs {
+		if isTokenUsageRequest(log) {
+			updatePeriodUsage(&periods, log)
+		}
+	}
+	return periods
+}
+
 func latestLogID(logs []RequestLog) string {
 	if len(logs) == 0 {
 		return ""
@@ -504,7 +711,10 @@ func latestLogID(logs []RequestLog) string {
 }
 
 func (s *persistedStatisticsSnapshot) matchesLogs(logs []RequestLog) bool {
-	return s != nil && s.RetainedLogCount == len(logs) && s.LatestLogID == latestLogID(logs)
+	// maxLogs 变小时，LoadFromFile 会先截断旧 logs.json 的保留日志。
+	// 只要 sidecar 记录的最新日志仍与当前最新日志一致，且 sidecar 覆盖的日志数不少于当前保留数，
+	// 累计统计仍然可信；不能因为本地保留窗口缩小就丢弃累计 token。
+	return s != nil && s.RetainedLogCount >= len(logs) && s.LatestLogID == latestLogID(logs)
 }
 
 func loadStatisticsSidecar(path string) (*persistedStatisticsSnapshot, error) {

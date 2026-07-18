@@ -153,6 +153,7 @@ func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
 	st := store.New(10)
 	server := &Server{store: st, logger: log.New(&buf, log.LevelInfo, false)}
 	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setResponseLogFields(w, "useai", "gpt-5.5", "gpt-5.5")
 		w.Header().Set("X-Proxy-Error-Code", "upstream_server_error")
 		w.Header().Set("X-Proxy-Attempts-Summary", "useai/gpt-5.5 13s upstream_server_error")
 		w.WriteHeader(http.StatusBadGateway)
@@ -166,6 +167,9 @@ func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"request_id=req-log-1",
+		"provider=useai",
+		"requested_model=gpt-5.5",
+		"upstream=gpt-5.5",
 		"error_code=upstream_server_error",
 		`reason="上游服务暂不可用"`,
 		`action="稍后重试，或切换模型。"`,
@@ -177,16 +181,44 @@ func TestLoggingMiddlewareWritesRequestIDAndErrorCodeToServerLog(t *testing.T) {
 	}
 }
 
+func TestLoggingMiddlewareWritesProviderModelToSuccessfulServerLog(t *testing.T) {
+	var buf strings.Builder
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(&buf, log.LevelInfo, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setResponseLogFields(w, "xiaomimimo", "mimo-v2.5", "mimo-v2.5")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"mimo-v2.5"}`))
+	req.Header.Set("X-Request-ID", "req-mimo-ok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	out := buf.String()
+	for _, want := range []string{
+		"POST /v1/chat/completions - 200",
+		"request_id=req-mimo-ok",
+		"provider=xiaomimimo",
+		"requested_model=mimo-v2.5",
+		"upstream=mimo-v2.5",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("server log = %q, want contains %q", out, want)
+		}
+	}
+}
+
 func TestProviderAttemptWarningUsesShortUserFacingReason(t *testing.T) {
 	var buf strings.Builder
 	server := &Server{logger: log.New(&buf, log.LevelWarn, false)}
-	server.logProviderAttemptFailure("kimi-for-coding", "kimi", attemptDiagnostic{
+	server.logProviderAttemptFailure("req-kimi", "kimi-for-coding", "kimi-for-coding", "kimi", attemptDiagnostic{
 		Category: "upstream_quota_exhausted",
 		Message:  `API 错误 403: {"error":{"message":"long upstream error"}}`,
 	})
 
 	out := buf.String()
-	if !strings.Contains(out, "模型 kimi-for-coding（kimi）失败: 上游额度已用完") {
+	if !strings.Contains(out, "模型 kimi-for-coding（kimi）失败: request_id=req-kimi provider=kimi requested_model=kimi-for-coding upstream=kimi-for-coding reason=上游额度已用完") {
 		t.Fatalf("warning = %q, want concise reason", out)
 	}
 	if strings.Contains(out, "API 错误") || strings.Contains(out, "long upstream error") {
@@ -197,17 +229,34 @@ func TestProviderAttemptWarningUsesShortUserFacingReason(t *testing.T) {
 func TestProviderAttemptDebugLogKeepsSanitizedUpstreamEvidence(t *testing.T) {
 	var buf strings.Builder
 	server := &Server{logger: log.New(&buf, log.LevelDebug, false)}
-	server.logProviderAttemptFailure("test-model", "test", attemptDiagnostic{
+	server.logProviderAttemptFailure("req-debug", "requested-model", "test-model", "test", attemptDiagnostic{
 		Category: "upstream_auth_error",
 		Message:  "API 错误 403: Bearer secret-token-value-123456 denied",
 	})
 
 	out := buf.String()
-	if !strings.Contains(out, "[DEBUG]") || !strings.Contains(out, "API 错误 403") {
+	if !strings.Contains(out, "[DEBUG]") || !strings.Contains(out, "request_id=req-debug") || !strings.Contains(out, "requested_model=requested-model") || !strings.Contains(out, "upstream=test-model") || !strings.Contains(out, "API 错误 403") {
 		t.Fatalf("debug evidence missing: %q", out)
 	}
 	if strings.Contains(out, "secret-token-value") || !strings.Contains(out, "<redacted>") {
 		t.Fatalf("debug evidence was not sanitized: %q", out)
+	}
+}
+
+func TestConsoleRouteSuffixQuotesNonCompactModelNames(t *testing.T) {
+	suffix := consoleRouteSuffix("useai", "UseAI - step-router-v1", "模型 step-router-v1")
+
+	for _, want := range []string{
+		"provider=useai",
+		`requested_model="UseAI - step-router-v1"`,
+		`upstream="模型 step-router-v1"`,
+	} {
+		if !strings.Contains(suffix, want) {
+			t.Fatalf("route suffix = %q, want contains %q", suffix, want)
+		}
+	}
+	if strings.Contains(suffix, "\n") || strings.Contains(suffix, "\r") {
+		t.Fatalf("route suffix must stay single-line: %q", suffix)
 	}
 }
 

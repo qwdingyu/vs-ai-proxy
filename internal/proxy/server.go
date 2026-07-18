@@ -432,10 +432,13 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			Usage:                    ww.usage,
 		})
 
+		// 成功日志也必须带 provider/requested_model/upstream。排查并发请求或候选 fallback 时，
+		// 只看相邻时间戳会把不同请求串在一起，request_id + 路由字段才是可信关联键。
+		contextSuffix := consoleRouteSuffix(provider, model, upstream)
 		if logErrorCode != "" {
-			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s error_code=%s%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID, logErrorCode, consoleDiagnosticSuffix(diagSummary, attemptsSummary, r.ContentLength, ww.upstreamBytes))
+			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s%s error_code=%s%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID, contextSuffix, logErrorCode, consoleDiagnosticSuffix(diagSummary, attemptsSummary, r.ContentLength, ww.upstreamBytes))
 		} else {
-			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID)
+			s.logger.Info("%s %s - %d (%.0f ms) request_id=%s%s", r.Method, r.URL.Path, ww.statusCode, elapsed, requestID, contextSuffix)
 		}
 	})
 }
@@ -481,6 +484,50 @@ func consoleDiagnosticSuffix(diag logDiagnosticSummary, attemptsSummary string, 
 		return ""
 	}
 	return " " + strings.Join(parts, " ")
+}
+
+func consoleRouteSuffix(providerName, requestedModel, upstreamModel string) string {
+	parts := []string{}
+	if strings.TrimSpace(providerName) != "" {
+		parts = append(parts, compactLogField("provider", providerName))
+	}
+	if strings.TrimSpace(requestedModel) != "" {
+		parts = append(parts, compactLogField("requested_model", requestedModel))
+	}
+	if strings.TrimSpace(upstreamModel) != "" {
+		parts = append(parts, compactLogField("upstream", upstreamModel))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
+}
+
+// compactLogField 让常见 ASCII 模型名保持 provider=xxx 的紧凑形态，
+// 含空格、中文或其它特殊字符时转为带引号字段，避免控制台日志被拆列或跨行。
+// 这里传入的只有 provider / requested model / upstream model，不能用于 API key 等敏感值。
+func compactLogField(key, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return false
+		case r >= 'A' && r <= 'Z':
+			return false
+		case r >= '0' && r <= '9':
+			return false
+		case r == '-' || r == '_' || r == '.' || r == ':' || r == '/' || r == '@':
+			return false
+		default:
+			return true
+		}
+	}) < 0 {
+		return key + "=" + value
+	}
+	return key + "=" + quoteLogValue(value)
 }
 
 func quoteLogValue(value string) string {
@@ -817,7 +864,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 				attempts = append(attempts, attempt)
-				s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+				s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 				if isClientGoneError(err) {
 					return
 				}
@@ -875,7 +922,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 					attempts = append(attempts, attempt)
-					s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+					s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 					registry.RecordCandidateFailure(prov.Name(), err)
 					if shouldStopCandidateFallback(attempt.Category) {
 						break
@@ -893,7 +940,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						lastErr = fmt.Errorf("解析响应失败: 非流式 SSE 聚合失败: %w", convErr)
 						attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
 						attempts = append(attempts, attempt)
-						s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+						s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 						registry.RecordCandidateFailure(prov.Name(), lastErr)
 						if shouldStopCandidateFallback(attempt.Category) {
 							break
@@ -916,7 +963,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						validationErr,
 					)
 					attempts = append(attempts, attempt)
-					s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+					s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 					registry.RecordCandidateFailure(prov.Name(), validationErr)
 					if shouldStopCandidateFallback(attempt.Category) {
 						break
@@ -967,7 +1014,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 			attempts = append(attempts, attempt)
-			s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+			s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 			registry.RecordCandidateFailure(prov.Name(), err)
 			if shouldStopCandidateFallback(attempt.Category) {
 				break
@@ -980,7 +1027,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = fmt.Errorf("解析响应失败: typed provider 响应契约无效: %w", validationErr)
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
 			attempts = append(attempts, attempt)
-			s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+			s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 			registry.RecordCandidateFailure(prov.Name(), lastErr)
 			if shouldStopCandidateFallback(attempt.Category) {
 				break
@@ -1155,7 +1202,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 				attempts = append(attempts, attempt)
-				s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+				s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 				if streamWriter.HasWritten() {
 					// 已经写出部分 Ollama 响应后发生协议/网络错误，不能切换候选，
 					// 但仍必须记录 provider 失败，避免健康排序把半截响应当成功。
@@ -1181,7 +1228,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 					attempts = append(attempts, attempt)
-					s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+					s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 					registry.RecordCandidateFailure(prov.Name(), err)
 					if shouldStopCandidateFallback(attempt.Category) {
 						break
@@ -1221,7 +1268,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 					lastErr = protocolErr
 					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, protocolErr)
 					attempts = append(attempts, attempt)
-					s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+					s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 					registry.RecordCandidateFailure(prov.Name(), protocolErr)
 					if shouldStopCandidateFallback(attempt.Category) {
 						break
@@ -1243,7 +1290,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 			attempts = append(attempts, attempt)
-			s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+			s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 			registry.RecordCandidateFailure(prov.Name(), err)
 			if shouldStopCandidateFallback(attempt.Category) {
 				break
@@ -1255,7 +1302,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			lastErr = fmt.Errorf("解析响应失败: typed provider 响应契约无效: %w", validationErr)
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
 			attempts = append(attempts, attempt)
-			s.logProviderAttemptFailure(modelID, prov.Name(), attempt)
+			s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
 			registry.RecordCandidateFailure(prov.Name(), lastErr)
 			if shouldStopCandidateFallback(attempt.Category) {
 				break
@@ -1955,15 +2002,22 @@ func shouldStopCandidateFallback(category string) bool {
 	}
 }
 
-func (s *Server) logProviderAttemptFailure(modelID, providerName string, attempt attemptDiagnostic) {
+func (s *Server) logProviderAttemptFailureForRequest(ctx context.Context, requestedModel, modelID, providerName string, attempt attemptDiagnostic) {
+	s.logProviderAttemptFailure(requestIDFromContext(ctx), requestedModel, modelID, providerName, attempt)
+}
+
+// logProviderAttemptFailure 记录单个候选 provider 的失败。
+// 这不是最终客户端请求日志：同一个 request_id 可能先有多个 WARN attempt，
+// 最后仍由 loggingMiddleware 写一条 200/4xx/5xx 的最终请求日志。
+func (s *Server) logProviderAttemptFailure(requestID, requestedModel, modelID, providerName string, attempt attemptDiagnostic) {
 	if s == nil || s.logger == nil {
 		return
 	}
 	if strings.TrimSpace(attempt.Message) != "" {
-		s.logger.Debug("模型 %s（%s）上游原始错误: %s", modelID, providerName, diagnosticHeaderValue(attempt.Message))
+		s.logger.Debug("模型 %s（%s）上游原始错误: request_id=%s%s %s", modelID, providerName, strings.TrimSpace(requestID), consoleRouteSuffix(providerName, requestedModel, modelID), diagnosticHeaderValue(attempt.Message))
 	}
 	reason := userFacingDiagnosticFor(attempt.Category).Reason
-	s.logger.Warn("模型 %s（%s）失败: %s", modelID, providerName, reason)
+	s.logger.Warn("模型 %s（%s）失败: request_id=%s%s reason=%s", modelID, providerName, strings.TrimSpace(requestID), consoleRouteSuffix(providerName, requestedModel, modelID), reason)
 }
 
 func isClientGoneError(err error) bool {

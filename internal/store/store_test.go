@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestPersistAndLoadRoundTrip(t *testing.T) {
@@ -325,12 +326,86 @@ func TestTokenStatisticsAggregateDetailsAndSortModels(t *testing.T) {
 	}
 }
 
+func TestTokenStatisticsAggregateDailyWeeklyMonthlyUsage(t *testing.T) {
+	s := New(10)
+	dayOne := time.Date(2026, 7, 18, 9, 0, 0, 0, time.Local)
+	dayTwo := time.Date(2026, 7, 19, 10, 0, 0, 0, time.Local)
+
+	s.AddLog(RequestLog{
+		Timestamp: dayOne, Provider: "xiaomimimo", Model: "mimo-v2.5", Upstream: "mimo-v2.5", StatusCode: 200, IsSuccess: true,
+		Usage: &TokenUsage{PromptTokens: 100, CompletionTokens: 30, TotalTokens: 130, CachedTokens: 20, ReasoningTokens: 9},
+	})
+	s.AddLog(RequestLog{
+		Timestamp: dayOne, Provider: "xiaomimimo", Model: "mimo-v2.5", Upstream: "mimo-v2.5", StatusCode: 200, IsSuccess: true,
+	})
+	s.AddLog(RequestLog{
+		Timestamp: dayTwo, Provider: "useai", Model: "step-router-v1", Upstream: "step-router-v1", StatusCode: 200, IsSuccess: true,
+		Usage: &TokenUsage{PromptTokens: 40, CompletionTokens: 10, TotalTokens: 50},
+	})
+
+	stats := s.GetStatistics()
+	if got, want := len(stats.PeriodUsage.Daily), 2; got != want {
+		t.Fatalf("daily periods = %d, want %d: %#v", got, want, stats.PeriodUsage.Daily)
+	}
+	latestDay := stats.PeriodUsage.Daily[0]
+	if latestDay.Key != "2026-07-19" || latestDay.TotalTokens != 50 || latestDay.RequestCount != 1 || latestDay.UsageReportedCount != 1 {
+		t.Fatalf("latest daily period = %#v, want 2026-07-19 with 50 tokens and 1/1 coverage", latestDay)
+	}
+	previousDay := stats.PeriodUsage.Daily[1]
+	if previousDay.Key != "2026-07-18" || previousDay.TotalTokens != 130 || previousDay.RequestCount != 2 || previousDay.UsageReportedCount != 1 {
+		t.Fatalf("previous daily period = %#v, want 2026-07-18 with 130 tokens and 1/2 coverage", previousDay)
+	}
+	if len(previousDay.ModelUsage) != 1 || previousDay.ModelUsage[0].RequestCount != 2 || previousDay.ModelUsage[0].UsageReportedCount != 1 {
+		t.Fatalf("daily model usage = %#v, want model coverage 1/2", previousDay.ModelUsage)
+	}
+	if got, want := len(stats.PeriodUsage.Weekly), 1; got != want {
+		t.Fatalf("weekly periods = %d, want %d", got, want)
+	}
+	if stats.PeriodUsage.Weekly[0].RequestCount != 3 || stats.PeriodUsage.Weekly[0].UsageReportedCount != 2 || stats.PeriodUsage.Weekly[0].TotalTokens != 180 {
+		t.Fatalf("weekly period = %#v, want 3 requests, 2 reported, 180 tokens", stats.PeriodUsage.Weekly[0])
+	}
+	if got, want := len(stats.PeriodUsage.Monthly), 1; got != want {
+		t.Fatalf("monthly periods = %d, want %d", got, want)
+	}
+	if stats.PeriodUsage.Monthly[0].Key != "2026-07" || stats.PeriodUsage.Monthly[0].TotalTokens != 180 {
+		t.Fatalf("monthly period = %#v, want 2026-07 and 180 tokens", stats.PeriodUsage.Monthly[0])
+	}
+}
+
+func TestTokenStatisticsUsesISOWeekAcrossYearBoundary(t *testing.T) {
+	s := New(10)
+	weekEnd := time.Date(2026, 12, 31, 23, 0, 0, 0, time.Local)
+	nextYearSameISOWeek := time.Date(2027, 1, 1, 9, 0, 0, 0, time.Local)
+
+	s.AddLog(RequestLog{
+		Timestamp: weekEnd, Provider: "useai", Model: "step-router-v1", Upstream: "step-router-v1", StatusCode: 200, IsSuccess: true,
+		Usage: &TokenUsage{TotalTokens: 10},
+	})
+	s.AddLog(RequestLog{
+		Timestamp: nextYearSameISOWeek, Provider: "useai", Model: "step-router-v1", Upstream: "step-router-v1", StatusCode: 200, IsSuccess: true,
+		Usage: &TokenUsage{TotalTokens: 15},
+	})
+
+	stats := s.GetStatistics()
+	if got, want := len(stats.PeriodUsage.Weekly), 1; got != want {
+		t.Fatalf("weekly periods = %d, want %d: %#v", got, want, stats.PeriodUsage.Weekly)
+	}
+	week := stats.PeriodUsage.Weekly[0]
+	if week.Key != "2026-W53" || week.StartDate != "2026-12-28" || week.EndDate != "2027-01-03" || week.TotalTokens != 25 {
+		t.Fatalf("ISO week period = %#v, want 2026-W53 spanning 2026-12-28..2027-01-03 with 25 tokens", week)
+	}
+	if got, want := len(stats.PeriodUsage.Monthly), 2; got != want {
+		t.Fatalf("monthly periods = %d, want %d: %#v", got, want, stats.PeriodUsage.Monthly)
+	}
+}
+
 func TestVersionedSnapshotPreservesCumulativeTokensBeyondLogLimit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs.json")
 	s := New(2)
+	day := time.Date(2026, 7, 18, 9, 0, 0, 0, time.Local)
 	for i := int64(1); i <= 3; i++ {
 		s.AddLog(RequestLog{
-			Provider: "useai", Model: "step-router-v1", Upstream: "step-router-v1", StatusCode: 200, IsSuccess: true,
+			Timestamp: day, Provider: "useai", Model: "step-router-v1", Upstream: "step-router-v1", StatusCode: 200, IsSuccess: true,
 			Usage: &TokenUsage{PromptTokens: i, CompletionTokens: i, TotalTokens: i * 2},
 		})
 	}
@@ -357,6 +432,36 @@ func TestVersionedSnapshotPreservesCumulativeTokensBeyondLogLimit(t *testing.T) 
 	stats := loaded.GetStatistics()
 	if stats.TotalRequests != 3 || stats.PromptTokens != 6 || stats.TotalTokens != 12 {
 		t.Fatalf("loaded cumulative statistics = %#v, want 3 requests and 12 tokens", stats)
+	}
+	if got, want := len(stats.PeriodUsage.Daily), 1; got != want {
+		t.Fatalf("loaded period usage = %#v, want persisted daily period", stats.PeriodUsage)
+	}
+}
+
+func TestVersionedSnapshotSurvivesSmallerMaxLogsOnLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.json")
+	s := New(5)
+	day := time.Date(2026, 7, 18, 9, 0, 0, 0, time.Local)
+	for i := int64(1); i <= 4; i++ {
+		s.AddLog(RequestLog{
+			Timestamp: day, Provider: "useai", Model: "step-router-v1", Upstream: "step-router-v1", StatusCode: 200, IsSuccess: true,
+			Usage: &TokenUsage{TotalTokens: i},
+		})
+	}
+	if err := s.PersistToFile(path); err != nil {
+		t.Fatalf("PersistToFile() error = %v", err)
+	}
+
+	loaded := New(2)
+	if err := loaded.LoadFromFile(path); err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	stats := loaded.GetStatistics()
+	if stats.TotalRequests != 4 || stats.TotalTokens != 10 {
+		t.Fatalf("loaded cumulative statistics = %#v, want sidecar totals despite smaller maxLogs", stats)
+	}
+	if got := len(loaded.GetLogs(10)); got != 2 {
+		t.Fatalf("retained logs = %d, want 2 after smaller maxLogs", got)
 	}
 }
 
@@ -408,5 +513,63 @@ func TestLoadIgnoresStaleStatisticsSidecarAfterOldBinaryWritesLogs(t *testing.T)
 	stats := loaded.GetStatistics()
 	if stats.TotalRequests != 2 || stats.TotalTokens != 14 {
 		t.Fatalf("statistics = %#v, want rebuild from two current logs", stats)
+	}
+}
+
+func TestLoadBackfillsPeriodUsageFromRetainedLogsWhenSidecarPredatesPeriods(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.json")
+	day := time.Date(2026, 7, 18, 9, 0, 0, 0, time.Local)
+	logs := []RequestLog{
+		{ID: "log-1", Timestamp: day, Provider: "xiaomimimo", Model: "mimo-v2.5", Upstream: "mimo-v2.5", StatusCode: 200, IsSuccess: true, Usage: &TokenUsage{TotalTokens: 10}},
+		{ID: "log-2", Timestamp: day, Provider: "xiaomimimo", Model: "mimo-v2.5", Upstream: "mimo-v2.5", StatusCode: 200, IsSuccess: true},
+	}
+	data, err := json.Marshal(logs)
+	if err != nil {
+		t.Fatalf("marshal logs: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write logs: %v", err)
+	}
+	sidecar := persistedStatisticsSnapshot{
+		Version:          storeSnapshotVersion,
+		RetainedLogCount: len(logs),
+		LatestLogID:      latestLogID(logs),
+		Statistics: Statistics{
+			TotalRequests:      99,
+			TokenUsageRequests: 99,
+			UsageReportedCount: 98,
+			TotalTokens:        1234,
+			ModelUsage: []ModelTokenStatistics{{
+				Provider:           "xiaomimimo",
+				Model:              "mimo-v2.5",
+				Upstream:           "mimo-v2.5",
+				RequestCount:       99,
+				UsageReportedCount: 98,
+				TotalTokens:        1234,
+			}},
+		},
+	}
+	sidecarData, err := json.Marshal(sidecar)
+	if err != nil {
+		t.Fatalf("marshal sidecar: %v", err)
+	}
+	if err := os.WriteFile(statisticsSidecarPath(path), sidecarData, 0o600); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	loaded := New(10)
+	if err := loaded.LoadFromFile(path); err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	stats := loaded.GetStatistics()
+	if stats.TotalRequests != 99 || stats.TotalTokens != 1234 {
+		t.Fatalf("cumulative statistics = %#v, want preserved sidecar totals", stats)
+	}
+	if got, want := len(stats.PeriodUsage.Daily), 1; got != want {
+		t.Fatalf("daily periods = %d, want %d: %#v", got, want, stats.PeriodUsage.Daily)
+	}
+	period := stats.PeriodUsage.Daily[0]
+	if period.Key != "2026-07-18" || period.RequestCount != 2 || period.UsageReportedCount != 1 || period.TotalTokens != 10 {
+		t.Fatalf("backfilled period = %#v, want retained-log coverage 1/2 and 10 tokens", period)
 	}
 }
