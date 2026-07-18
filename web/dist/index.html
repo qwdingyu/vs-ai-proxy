@@ -89,6 +89,7 @@
     .token-period-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
     .token-period-card { background: #0f1115; border: 1px solid var(--border); border-radius: 8px; padding: 12px; min-width: 0; }
     .token-period-card .value { font-size: 22px; }
+    .token-period-range { margin-top: 4px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
     .token-period-meta { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.45; }
     .token-trend { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 16px; }
     .token-trend-row { display: grid; grid-template-columns: 92px minmax(120px, 1fr) 118px 108px; gap: 10px; align-items: center; min-height: 30px; color: var(--muted); font-size: 12px; }
@@ -214,31 +215,37 @@
           </div>
         </div>
 
-        <h2 data-i18n="dashboard.tokens.periodTitle">Token 用量趋势</h2>
-        <div class="hint token-usage-note" data-i18n="dashboard.tokens.note">Token 只统计上游返回 usage 的请求；未返回 usage 的请求为未知，不按 0 计算。缓存命中的输入和推理输出子项已包含在总 Token 中，不重复相加。</div>
+        <h2 data-i18n="dashboard.tokens.periodTitle">模型用量</h2>
+        <div class="hint token-usage-note" data-i18n="dashboard.tokens.note">只统计服务商返回的用量；未返回的不估算、不按 0 计算。缓存命中的输入、模型内部思考用量是明细，已包含在总 Token 中，不重复相加。</div>
         <div class="token-period-grid">
           <div class="token-period-card">
             <div class="label" data-i18n="dashboard.tokens.today">今日</div>
+            <div class="token-period-range" id="todayRange">-</div>
             <div class="value" id="todayTokens">-</div>
             <div class="token-period-meta">
               <span id="todayCoverage">-</span>
               <span id="todayTokenSplit">-</span>
+              <span id="todayMissingUsage">-</span>
             </div>
           </div>
           <div class="token-period-card">
             <div class="label" data-i18n="dashboard.tokens.thisWeek">本周</div>
+            <div class="token-period-range" id="weekRange">-</div>
             <div class="value" id="weekTokens">-</div>
             <div class="token-period-meta">
               <span id="weekCoverage">-</span>
               <span id="weekTokenSplit">-</span>
+              <span id="weekMissingUsage">-</span>
             </div>
           </div>
           <div class="token-period-card">
             <div class="label" data-i18n="dashboard.tokens.thisMonth">本月</div>
+            <div class="token-period-range" id="monthRange">-</div>
             <div class="value" id="monthTokens">-</div>
             <div class="token-period-meta">
               <span id="monthCoverage">-</span>
               <span id="monthTokenSplit">-</span>
+              <span id="monthMissingUsage">-</span>
             </div>
           </div>
         </div>
@@ -263,7 +270,7 @@
             <div class="value" id="totalTokens">-</div>
           </div>
           <div class="stat">
-            <div class="label" data-i18n="dashboard.tokens.coverage">Token 明细覆盖</div>
+            <div class="label" data-i18n="dashboard.tokens.coverage">有用量数据</div>
             <div class="value" id="usageCoverage">-</div>
           </div>
           <div class="stat">
@@ -271,12 +278,12 @@
             <div class="value" id="cachedTokens">-</div>
           </div>
           <div class="stat">
-            <div class="label" data-i18n="dashboard.tokens.reasoning">推理输出子项</div>
+            <div class="label" data-i18n="dashboard.tokens.reasoning">模型内部思考用量</div>
             <div class="value" id="reasoningTokens">-</div>
           </div>
         </div>
 
-        <h3 data-i18n="dashboard.tokens.models">模型用量</h3>
+        <h3 data-i18n="dashboard.tokens.models">按模型查看</h3>
         <div class="table-scroll">
           <table class="table token-table">
             <thead>
@@ -284,12 +291,12 @@
                 <th data-i18n="table.header.provider">提供商</th>
                 <th data-i18n="table.header.model">模型</th>
                 <th data-i18n="dashboard.tokens.requests">请求</th>
-                <th data-i18n="dashboard.tokens.reported">Token 明细覆盖</th>
+                <th data-i18n="dashboard.tokens.reported">有用量数据</th>
                 <th data-i18n="dashboard.tokens.prompt">输入 Token</th>
                 <th data-i18n="dashboard.tokens.completion">输出 Token</th>
                 <th data-i18n="dashboard.tokens.total">总 Token</th>
                 <th data-i18n="dashboard.tokens.cached">缓存命中的输入</th>
-                <th data-i18n="dashboard.tokens.reasoning">推理输出子项</th>
+                <th data-i18n="dashboard.tokens.reasoning">模型内部思考用量</th>
               </tr>
             </thead>
             <tbody id="modelTokenTable">
@@ -845,14 +852,29 @@
       const total = Number(eligible || 0);
       const known = Number(reported || 0);
       if (total <= 0) return '-';
-      return `${formatTokenCount(known)} / ${formatTokenCount(total)} (${(known * 100 / total).toFixed(0)}%)`;
+      return t('dashboard.tokens.coverageCount', formatTokenCount(known), formatTokenCount(total), (known * 100 / total).toFixed(0));
     };
-    // 周期 key 必须与后端 store 使用同一种本地日历口径：
-    // day=YYYY-MM-DD，month=YYYY-MM，week=ISO week。该代理默认本机运行，
-    // 因此前端浏览器与服务进程通常处于同一时区；远程访问时应以服务端 period key 为准。
+    // 周期 key 以服务端返回的 current_periods 为准。浏览器本地日期只用于兼容
+    // 旧版本接口，避免远程访问管理页时因为两端时区不同选错“今日/本周/本月”。
     const pad2 = (value) => String(value).padStart(2, '0');
     const formatLocalDateKey = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
     const formatLocalMonthKey = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+    const formatLocalDateRange = (start, end) => {
+      const left = formatLocalDateKey(start);
+      const right = formatLocalDateKey(end);
+      return left === right ? left : t('dashboard.tokens.dateRange', left, right);
+    };
+    const currentDayRange = (date) => formatLocalDateRange(date, date);
+    const currentWeekRange = (date) => {
+      const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+      const day = (start.getDay() + 6) % 7;
+      start.setDate(start.getDate() - day);
+      return formatLocalDateRange(start, date);
+    };
+    const currentMonthRange = (date) => {
+      const start = new Date(date.getFullYear(), date.getMonth(), 1);
+      return formatLocalDateRange(start, date);
+    };
     const formatLocalISOWeekKey = (date) => {
       const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
       const day = (d.getDay() + 6) % 7;
@@ -864,6 +886,14 @@
       const week = 1 + Math.round((d - firstThursday) / 604800000);
       return `${isoYear}-W${pad2(week)}`;
     };
+    const currentPeriodKey = (currentPeriods, name, fallbackKey) => currentPeriods?.[name]?.key || fallbackKey;
+    const currentPeriodRange = (currentPeriods, name, fallbackRange) => {
+      const period = currentPeriods?.[name] || {};
+      if (period.start_date && period.end_date) {
+        return period.start_date === period.end_date ? period.start_date : t('dashboard.tokens.dateRange', period.start_date, period.end_date);
+      }
+      return fallbackRange;
+    };
     const findPeriodByKey = (items, key) => (items || []).find((item) => item && item.key === key) || null;
     const hasReportedPeriodUsage = (period) => Number(period?.usage_reported_count || 0) > 0;
     // 没有上游 usage 的周期显示 "-"，不显示 0。0 只能表示“上游明确上报了零值”。
@@ -872,10 +902,26 @@
       if (!hasReportedPeriodUsage(period)) return '-';
       return t('dashboard.tokens.inputOutput', formatTokenCount(period.prompt_tokens || 0), formatTokenCount(period.completion_tokens || 0));
     };
-    const renderPeriodSummary = (period, tokenID, coverageID, splitID) => {
+    const formatPeriodRange = (period, displayRange) => {
+      // 首页三张卡展示的是“截至今天”的日/周/月用量；后端周期桶仍按完整自然日、
+      // ISO 周和自然月归档，避免历史统计口径漂移。
+      if (displayRange) return displayRange;
+      if (!period) return '-';
+      if (!period.start_date && !period.end_date) return '-';
+      if (!period.end_date || period.start_date === period.end_date) return period.start_date || period.end_date;
+      return t('dashboard.tokens.dateRange', period.start_date, period.end_date);
+    };
+    const formatMissingUsage = (period) => {
+      if (!period) return t('dashboard.tokens.missingUsage', '0');
+      const missing = Math.max(0, Number(period.request_count || 0) - Number(period.usage_reported_count || 0));
+      return t('dashboard.tokens.missingUsage', formatTokenCount(missing));
+    };
+    const renderPeriodSummary = (period, tokenID, coverageID, splitID, rangeID, missingID, fallbackRange) => {
       $(tokenID).textContent = formatPeriodTokens(period);
       $(coverageID).textContent = period ? t('dashboard.tokens.periodCoverage', formatUsageCoverage(period.usage_reported_count, period.request_count)) : t('dashboard.tokens.periodCoverage', '-');
       $(splitID).textContent = period ? formatPeriodSplit(period) : '-';
+      $(rangeID).textContent = formatPeriodRange(period, fallbackRange);
+      $(missingID).textContent = formatMissingUsage(period);
     };
     const renderDailyTokenTrend = (daily) => {
       // 后端已按 key 倒序返回；这里只截取最近 14 个周期，不在前端重新聚合日志。
@@ -1167,10 +1213,23 @@
         const hasReportedUsage = Number(stats.usage_reported_count || 0) > 0;
         const reportedToken = (value) => hasReportedUsage ? formatTokenCount(value || 0) : '-';
         const periods = stats.period_usage || {};
+        const currentPeriods = stats.current_periods || {};
         const today = new Date();
-        renderPeriodSummary(findPeriodByKey(periods.daily, formatLocalDateKey(today)), 'todayTokens', 'todayCoverage', 'todayTokenSplit');
-        renderPeriodSummary(findPeriodByKey(periods.weekly, formatLocalISOWeekKey(today)), 'weekTokens', 'weekCoverage', 'weekTokenSplit');
-        renderPeriodSummary(findPeriodByKey(periods.monthly, formatLocalMonthKey(today)), 'monthTokens', 'monthCoverage', 'monthTokenSplit');
+        renderPeriodSummary(
+          findPeriodByKey(periods.daily, currentPeriodKey(currentPeriods, 'daily', formatLocalDateKey(today))),
+          'todayTokens', 'todayCoverage', 'todayTokenSplit', 'todayRange', 'todayMissingUsage',
+          currentPeriodRange(currentPeriods, 'daily', currentDayRange(today))
+        );
+        renderPeriodSummary(
+          findPeriodByKey(periods.weekly, currentPeriodKey(currentPeriods, 'weekly', formatLocalISOWeekKey(today))),
+          'weekTokens', 'weekCoverage', 'weekTokenSplit', 'weekRange', 'weekMissingUsage',
+          currentPeriodRange(currentPeriods, 'weekly', currentWeekRange(today))
+        );
+        renderPeriodSummary(
+          findPeriodByKey(periods.monthly, currentPeriodKey(currentPeriods, 'monthly', formatLocalMonthKey(today))),
+          'monthTokens', 'monthCoverage', 'monthTokenSplit', 'monthRange', 'monthMissingUsage',
+          currentPeriodRange(currentPeriods, 'monthly', currentMonthRange(today))
+        );
         renderDailyTokenTrend(periods.daily || []);
         $('promptTokens').textContent = reportedToken(stats.prompt_tokens);
         $('completionTokens').textContent = reportedToken(stats.completion_tokens);

@@ -348,12 +348,12 @@ func TestTokenStatisticsAggregateDailyWeeklyMonthlyUsage(t *testing.T) {
 		t.Fatalf("daily periods = %d, want %d: %#v", got, want, stats.PeriodUsage.Daily)
 	}
 	latestDay := stats.PeriodUsage.Daily[0]
-	if latestDay.Key != "2026-07-19" || latestDay.TotalTokens != 50 || latestDay.RequestCount != 1 || latestDay.UsageReportedCount != 1 {
-		t.Fatalf("latest daily period = %#v, want 2026-07-19 with 50 tokens and 1/1 coverage", latestDay)
+	if latestDay.Key != "2026-07-19" || latestDay.StartDate != "2026-07-19" || latestDay.EndDate != "2026-07-19" || latestDay.TotalTokens != 50 || latestDay.RequestCount != 1 || latestDay.UsageReportedCount != 1 {
+		t.Fatalf("latest daily period = %#v, want 2026-07-19 with date range, 50 tokens and 1/1 coverage", latestDay)
 	}
 	previousDay := stats.PeriodUsage.Daily[1]
-	if previousDay.Key != "2026-07-18" || previousDay.TotalTokens != 130 || previousDay.RequestCount != 2 || previousDay.UsageReportedCount != 1 {
-		t.Fatalf("previous daily period = %#v, want 2026-07-18 with 130 tokens and 1/2 coverage", previousDay)
+	if previousDay.Key != "2026-07-18" || previousDay.StartDate != "2026-07-18" || previousDay.EndDate != "2026-07-18" || previousDay.TotalTokens != 130 || previousDay.RequestCount != 2 || previousDay.UsageReportedCount != 1 {
+		t.Fatalf("previous daily period = %#v, want 2026-07-18 with date range, 130 tokens and 1/2 coverage", previousDay)
 	}
 	if len(previousDay.ModelUsage) != 1 || previousDay.ModelUsage[0].RequestCount != 2 || previousDay.ModelUsage[0].UsageReportedCount != 1 {
 		t.Fatalf("daily model usage = %#v, want model coverage 1/2", previousDay.ModelUsage)
@@ -367,8 +367,25 @@ func TestTokenStatisticsAggregateDailyWeeklyMonthlyUsage(t *testing.T) {
 	if got, want := len(stats.PeriodUsage.Monthly), 1; got != want {
 		t.Fatalf("monthly periods = %d, want %d", got, want)
 	}
-	if stats.PeriodUsage.Monthly[0].Key != "2026-07" || stats.PeriodUsage.Monthly[0].TotalTokens != 180 {
-		t.Fatalf("monthly period = %#v, want 2026-07 and 180 tokens", stats.PeriodUsage.Monthly[0])
+	if stats.PeriodUsage.Monthly[0].Key != "2026-07" || stats.PeriodUsage.Monthly[0].StartDate != "2026-07-01" || stats.PeriodUsage.Monthly[0].EndDate != "2026-07-31" || stats.PeriodUsage.Monthly[0].TotalTokens != 180 {
+		t.Fatalf("monthly period = %#v, want 2026-07 date range and 180 tokens", stats.PeriodUsage.Monthly[0])
+	}
+}
+
+func TestCurrentTokenPeriodsUseServerCalendarAndEndToday(t *testing.T) {
+	loc := time.FixedZone("server-zone", 8*60*60)
+	now := time.Date(2026, 7, 18, 16, 30, 0, 0, loc)
+
+	periods := currentTokenPeriods(now)
+
+	if periods.Daily != (CurrentTokenPeriod{Key: "2026-07-18", StartDate: "2026-07-18", EndDate: "2026-07-18"}) {
+		t.Fatalf("daily current period = %#v, want 2026-07-18 only", periods.Daily)
+	}
+	if periods.Weekly != (CurrentTokenPeriod{Key: "2026-W29", StartDate: "2026-07-13", EndDate: "2026-07-18"}) {
+		t.Fatalf("weekly current period = %#v, want ISO week start through today", periods.Weekly)
+	}
+	if periods.Monthly != (CurrentTokenPeriod{Key: "2026-07", StartDate: "2026-07-01", EndDate: "2026-07-18"}) {
+		t.Fatalf("monthly current period = %#v, want month start through today", periods.Monthly)
 	}
 }
 

@@ -98,6 +98,22 @@ type TokenPeriodUsage struct {
 	Monthly []TokenPeriodStatistics `json:"monthly"`
 }
 
+// CurrentTokenPeriod 标识服务端当前所在周期。前端用它查找“今日/本周/本月”
+// 对应的已聚合桶，避免远程浏览器时区与服务进程时区不一致时选错周期。
+type CurrentTokenPeriod struct {
+	Key       string `json:"key"`
+	StartDate string `json:"start_date"`
+	EndDate   string `json:"end_date"`
+}
+
+// CurrentTokenPeriods 是首页三张周期卡片使用的服务端当前周期集合。
+// 注意：这里的周/月 EndDate 表示“截至今天”的展示范围，不改变历史周期桶的归档结束日。
+type CurrentTokenPeriods struct {
+	Daily   CurrentTokenPeriod `json:"daily"`
+	Weekly  CurrentTokenPeriod `json:"weekly"`
+	Monthly CurrentTokenPeriod `json:"monthly"`
+}
+
 // Statistics 统计数据
 type Statistics struct {
 	TotalRequests      int64                  `json:"total_requests"`
@@ -113,6 +129,7 @@ type Statistics struct {
 	ReasoningTokens    int64                  `json:"reasoning_tokens"`
 	ModelUsage         []ModelTokenStatistics `json:"model_usage"`
 	PeriodUsage        TokenPeriodUsage       `json:"period_usage"`
+	CurrentPeriods     CurrentTokenPeriods    `json:"current_periods"`
 	LastUpdated        time.Time              `json:"last_updated"`
 }
 
@@ -500,6 +517,30 @@ func monthPeriod(t time.Time) tokenPeriod {
 	}
 }
 
+func currentTokenPeriods(now time.Time) CurrentTokenPeriods {
+	local := now.Local()
+	today := dayPeriod(local)
+	week := weekPeriod(local)
+	month := monthPeriod(local)
+	return CurrentTokenPeriods{
+		Daily: CurrentTokenPeriod{
+			Key:       today.key,
+			StartDate: today.startDate,
+			EndDate:   today.endDate,
+		},
+		Weekly: CurrentTokenPeriod{
+			Key:       week.key,
+			StartDate: week.startDate,
+			EndDate:   today.endDate,
+		},
+		Monthly: CurrentTokenPeriod{
+			Key:       month.key,
+			StartDate: month.startDate,
+			EndDate:   today.endDate,
+		},
+	}
+}
+
 func normalizeTokenUsage(usage *TokenUsage) *TokenUsage {
 	if usage == nil || usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 || usage.CachedTokens < 0 || usage.ReasoningTokens < 0 {
 		return nil
@@ -531,6 +572,7 @@ func (s *Store) statisticsSnapshotLocked() Statistics {
 	sortModelUsage(stats.ModelUsage)
 	// PeriodUsage 内含 slice，必须深拷贝后再排序，避免读快照时改动 Store 内部顺序。
 	stats.PeriodUsage = clonePeriodUsage(s.stats.PeriodUsage)
+	stats.CurrentPeriods = currentTokenPeriods(time.Now())
 	return stats
 }
 
