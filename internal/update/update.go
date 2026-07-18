@@ -329,14 +329,46 @@ func LaunchWindowsSelfUpdate(result SelfUpdateResult, args []string) error {
 	}
 	paths := WindowsSelfUpdateDiagnosticPaths(result)
 	script := windowsSelfUpdateScript(result, args, paths.LogPath, os.Getpid(), mustGetwd())
+	if err := os.MkdirAll(filepath.Dir(paths.LogPath), 0o755); err != nil {
+		return err
+	}
 	if err := os.WriteFile(paths.ScriptPath, []byte(script), 0o600); err != nil {
 		return err
 	}
+	if err := appendWindowsSelfUpdateLog(paths.LogPath, "launcher prepared script="+paths.ScriptPath+" stage="+result.StagedBinaryPath); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(paths.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", paths.ScriptPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	cmd.Env = os.Environ()
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		_, _ = writeWindowsSelfUpdateLogLine(logFile, "launcher failed to start powershell: "+err.Error())
+		_ = logFile.Close()
+		return err
+	}
+	_, _ = writeWindowsSelfUpdateLogLine(logFile, "launcher started powershell pid="+strconv.Itoa(cmd.Process.Pid))
+	_ = logFile.Close()
+	return nil
+}
+
+func appendWindowsSelfUpdateLog(logPath, message string) error {
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = writeWindowsSelfUpdateLogLine(file, message)
+	return err
+}
+
+func writeWindowsSelfUpdateLogLine(w io.Writer, message string) (int, error) {
+	line := fmt.Sprintf("[%s] %s\n", time.Now().Format(time.RFC3339Nano), message)
+	return w.Write([]byte(line))
 }
 
 func WindowsSelfUpdateDiagnosticPaths(result SelfUpdateResult) WindowsSelfUpdatePaths {
@@ -394,6 +426,9 @@ try {
   Write-UpdateLog 'done'
 } catch {
   Write-UpdateLog "ERROR $($_.Exception.Message)"
+  Write-UpdateLog "ERROR_RECORD $($_ | Out-String)"
+  if ($_.ScriptStackTrace) { Write-UpdateLog "ERROR_STACK $($_.ScriptStackTrace)" }
+  if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) { Write-UpdateLog "ERROR_POSITION $($_.InvocationInfo.PositionMessage)" }
   if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $exe)) {
     try {
       Move-Item -LiteralPath $backup -Destination $exe -Force

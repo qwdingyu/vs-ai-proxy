@@ -542,12 +542,39 @@ func TestWindowsSelfUpdateScriptIncludesPreflightRetryRollbackAndCleanupChecks(t
 		"新版暂存文件为空",
 		"已重试 20 次",
 		"新版暂存文件仍存在",
+		"ERROR_RECORD",
+		"ERROR_STACK",
+		"ERROR_POSITION",
 		"rollback restored backup",
 		"--config",
 		`C:\cfg\config.json`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestAppendWindowsSelfUpdateLogPersistsLauncherErrors(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "vs-ai-proxy-self-update.log")
+
+	if err := appendWindowsSelfUpdateLog(logPath, "launcher prepared script=C:\\apps\\vs-ai-proxy-self-update.ps1"); err != nil {
+		t.Fatalf("appendWindowsSelfUpdateLog() error = %v", err)
+	}
+	if err := appendWindowsSelfUpdateLog(logPath, "launcher failed to start powershell: access denied"); err != nil {
+		t.Fatalf("appendWindowsSelfUpdateLog() second error = %v", err)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log) error = %v", err)
+	}
+	for _, want := range []string{
+		"launcher prepared script=",
+		"launcher failed to start powershell: access denied",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("log content = %q, want %q", string(content), want)
 		}
 	}
 }
