@@ -13,6 +13,8 @@ SIZES="${SIZES:-50000 200000 500000 800000 1060000}"
 DIRECT_TIMEOUT_SECONDS="${DIRECT_TIMEOUT_SECONDS:-120}"
 PROXY_TIMEOUT_SECONDS="${PROXY_TIMEOUT_SECONDS:-140}"
 INJECT_MODEL_BINDING="${INJECT_MODEL_BINDING:-0}"
+MODE="${MODE:-direct-proxy}"
+COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-0}"
 PROXY_PORT_START="${PROXY_PORT_START:-12346}"
 WORK_DIR="$ROOT_DIR/.bin/large-request-matrix"
 JSONL_PATH="$WORK_DIR/results.jsonl"
@@ -51,6 +53,8 @@ while IFS='|' read -r provider_id display_provider model; do
       PROXY_PORT="$port" \
       DIRECT_TIMEOUT_SECONDS="$DIRECT_TIMEOUT_SECONDS" \
       PROXY_TIMEOUT_SECONDS="$PROXY_TIMEOUT_SECONDS" \
+      MODE="$MODE" \
+      COOLDOWN_SECONDS="$COOLDOWN_SECONDS" \
       tests/useai_large_request_diagnostic.sh >"$output_copy" 2>&1
     rc=$?
     set -e
@@ -65,21 +69,28 @@ import sys
 result_path, jsonl_path, provider_id, display_provider, model, target_bytes, rc = sys.argv[1:]
 with open(result_path, encoding='utf-8') as f:
     result = json.load(f)
-last = result.get('last_proxy_log') or {}
+last = result.get('last_proxy_log') or result.get('proxy_diagnostic') or {}
+direct = result.get('direct') or {}
+proxy = result.get('proxy') or {}
+request_bytes = result.get('request_bytes') or last.get('request_bytes')
+upstream_bytes = result.get('upstream_bytes') or last.get('upstream_bytes')
+delta_bytes = None
+if request_bytes is not None and upstream_bytes is not None:
+    delta_bytes = int(upstream_bytes) - int(request_bytes)
 record = {
     'provider_id': provider_id,
     'display_provider': display_provider,
     'model': model,
     'target_bytes': int(target_bytes),
     'script_rc': int(rc),
-    'direct_status': result.get('direct_status'),
-    'direct_elapsed_ms': result.get('direct_elapsed_ms'),
-    'proxy_status': result.get('proxy_status'),
-    'proxy_elapsed_ms': result.get('proxy_elapsed_ms'),
+    'direct_status': result.get('direct_status') or direct.get('status'),
+    'direct_elapsed_ms': result.get('direct_elapsed_ms') or direct.get('total_ms'),
+    'proxy_status': result.get('proxy_status') or proxy.get('status'),
+    'proxy_elapsed_ms': result.get('proxy_elapsed_ms') or proxy.get('total_ms'),
     'error_code': last.get('error_code'),
-    'request_bytes': result.get('request_bytes'),
-    'upstream_bytes': result.get('upstream_bytes'),
-    'delta_bytes': result.get('delta_bytes'),
+    'request_bytes': request_bytes,
+    'upstream_bytes': upstream_bytes,
+    'delta_bytes': result.get('delta_bytes') if result.get('delta_bytes') is not None else delta_bytes,
     'elapsed_ms': last.get('elapsed_ms'),
     'response_tools': last.get('response_tools'),
 }

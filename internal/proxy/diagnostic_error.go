@@ -400,7 +400,7 @@ func userFacingDiagnosticFor(category string) userFacingDiagnostic {
 	case "upstream_auth_error":
 		return userFacingDiagnostic{Reason: "上游鉴权失败", Action: "检查 API Key、账号权限或余额。"}
 	case "upstream_rate_limit":
-		return userFacingDiagnostic{Reason: "请求过于频繁", Action: "稍后重试。"}
+		return userFacingDiagnostic{Reason: "请求过于频繁", Action: "同一模型短时间请求过多，请等待 15-30 秒后重试；若连续出现，建议切换模型或减少并发请求。"}
 	case "upstream_payload_too_large":
 		return userFacingDiagnostic{Reason: "请求内容过大", Action: "减少会话历史、文件或附件后重试。"}
 	case "upstream_message_error":

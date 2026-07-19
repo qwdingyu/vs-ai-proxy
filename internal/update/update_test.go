@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -345,6 +346,64 @@ func TestDownloadFetchesAndExtractsTarGzAsset(t *testing.T) {
 	}
 }
 
+func TestDownloadOverwritesExistingArchiveAndExtractedBinary(t *testing.T) {
+	archiveName := "vs-ai-proxy-v0.2.61-windows-x64.exe.zip"
+	archive := buildZip(t, "windows-x64/vs-ai-proxy.exe", []byte("new-windows-binary"))
+	sha := sha256.Sum256(archive)
+	shaHex := hex.EncodeToString(sha[:])
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/qwdingyu/vs-ai-proxy/releases/latest":
+			_, _ = fmt.Fprintf(w, `{"tag_name":"v0.2.61","html_url":"https://example.invalid/release","assets":[{"name":"%s","browser_download_url":"%s/asset"},{"name":"checksums.txt","browser_download_url":"%s/checksums"}]}`, archiveName, server.URL, server.URL)
+		case "/asset":
+			_, _ = w.Write(archive)
+		case "/checksums":
+			_, _ = fmt.Fprintf(w, "%s  %s\n", shaHex, archiveName)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	targetDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(targetDir, archiveName), []byte("old-archive"), 0o644); err != nil {
+		t.Fatalf("WriteFile(old archive) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "vs-ai-proxy.exe"), []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(old binary) error = %v", err)
+	}
+
+	result, err := Download(context.Background(), Options{
+		CurrentVersion: "v0.2.60",
+		TargetDir:      targetDir,
+		APIBaseURL:     server.URL,
+		GOOS:           "windows",
+		GOARCH:         "amd64",
+	})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if result.SHA256 != shaHex {
+		t.Fatalf("SHA256 = %q, want %q", result.SHA256, shaHex)
+	}
+	storedArchive, err := os.ReadFile(filepath.Join(targetDir, archiveName))
+	if err != nil {
+		t.Fatalf("ReadFile(archive) error = %v", err)
+	}
+	if !bytes.Equal(storedArchive, archive) {
+		t.Fatalf("archive was not replaced with the downloaded content")
+	}
+	extracted, err := os.ReadFile(filepath.Join(targetDir, "vs-ai-proxy.exe"))
+	if err != nil {
+		t.Fatalf("ReadFile(binary) error = %v", err)
+	}
+	if string(extracted) != "new-windows-binary" {
+		t.Fatalf("binary data = %q, want new-windows-binary", string(extracted))
+	}
+}
+
 func TestDownloadRejectsReleaseWithoutChecksumAsset(t *testing.T) {
 	oldWait := releaseAssetWait
 	releaseAssetWait = time.Millisecond
@@ -525,6 +584,134 @@ func TestReplaceExecutableBacksUpAndInstallsStage(t *testing.T) {
 	}
 }
 
+func TestReplaceStagedUpdateFileRollsBackExistingTargetWhenInstallFails(t *testing.T) {
+	dir := t.TempDir()
+	tmpPath := filepath.Join(dir, "vs-ai-proxy.tmp")
+	targetPath := filepath.Join(dir, "vs-ai-proxy")
+	backupPath := targetPath + ".bak"
+	if err := os.WriteFile(tmpPath, []byte("new"), 0o755); err != nil {
+		t.Fatalf("WriteFile(tmp) error = %v", err)
+	}
+	if err := os.WriteFile(targetPath, []byte("old"), 0o755); err != nil {
+		t.Fatalf("WriteFile(target) error = %v", err)
+	}
+	if err := os.WriteFile(backupPath, []byte("stale-backup"), 0o755); err != nil {
+		t.Fatalf("WriteFile(stale backup) error = %v", err)
+	}
+
+	oldRenameFile := renameFile
+	t.Cleanup(func() { renameFile = oldRenameFile })
+	renameFile = func(source, target string) error {
+		if source == tmpPath && target == targetPath {
+			return errors.New("forced target replacement failure")
+		}
+		return os.Rename(source, target)
+	}
+
+	err := replaceStagedUpdateFile(tmpPath, targetPath)
+	if err == nil || !strings.Contains(err.Error(), "已回滚旧文件") {
+		t.Fatalf("replaceStagedUpdateFile() error = %v, want rollback error", err)
+	}
+	restored, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(target) error = %v", readErr)
+	}
+	if string(restored) != "old" {
+		t.Fatalf("target content = %q, want old content restored", string(restored))
+	}
+	if _, statErr := os.Stat(backupPath); statErr != nil {
+		t.Fatalf("backup stat error = %v, want stale backup preserved untouched", statErr)
+	}
+	staleBackup, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("ReadFile(stale backup) error = %v", err)
+	}
+	if string(staleBackup) != "stale-backup" {
+		t.Fatalf("stale backup content = %q, want preserved", string(staleBackup))
+	}
+}
+
+func TestReplaceStagedUpdateFileRejectsDirectoryTarget(t *testing.T) {
+	dir := t.TempDir()
+	tmpPath := filepath.Join(dir, "vs-ai-proxy.tmp")
+	targetPath := filepath.Join(dir, "vs-ai-proxy")
+	if err := os.WriteFile(tmpPath, []byte("new"), 0o755); err != nil {
+		t.Fatalf("WriteFile(tmp) error = %v", err)
+	}
+	if err := os.Mkdir(targetPath, 0o755); err != nil {
+		t.Fatalf("Mkdir(target) error = %v", err)
+	}
+
+	err := replaceStagedUpdateFile(tmpPath, targetPath)
+	if err == nil || !strings.Contains(err.Error(), "是目录") {
+		t.Fatalf("replaceStagedUpdateFile() error = %v, want directory rejection", err)
+	}
+}
+
+func TestSelfUpdateInstallsOnCurrentPlatformWithoutExternalApply(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses delayed PowerShell replacement and is covered by script generation tests")
+	}
+	platform := platformAlias(runtime.GOOS, runtime.GOARCH)
+	if platform == "" {
+		t.Skipf("unsupported release asset platform for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	archiveName := fmt.Sprintf("vs-ai-proxy-v0.2.61-%s.tar.gz", platform)
+	archive := buildTarGz(t, platform+"/vs-ai-proxy", []byte("new-current-platform-binary"))
+	sha := sha256.Sum256(archive)
+	shaHex := hex.EncodeToString(sha[:])
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/qwdingyu/vs-ai-proxy/releases/latest":
+			_, _ = fmt.Fprintf(w, `{"tag_name":"v0.2.61","html_url":"https://example.invalid/release","assets":[{"name":"%s","browser_download_url":"%s/asset"},{"name":"checksums.txt","browser_download_url":"%s/checksums"}]}`, archiveName, server.URL, server.URL)
+		case "/asset":
+			_, _ = w.Write(archive)
+		case "/checksums":
+			_, _ = fmt.Fprintf(w, "%s  %s\n", shaHex, archiveName)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	targetDir := t.TempDir()
+	executablePath := filepath.Join(t.TempDir(), binaryName(runtime.GOOS))
+	if err := os.WriteFile(executablePath, []byte("old-current-platform-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(current executable) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, binaryName(runtime.GOOS)), []byte("stale-extracted-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(stale extracted binary) error = %v", err)
+	}
+
+	result, err := SelfUpdate(context.Background(), Options{
+		CurrentVersion: "v0.2.60",
+		TargetDir:      targetDir,
+		APIBaseURL:     server.URL,
+		GOOS:           runtime.GOOS,
+		GOARCH:         runtime.GOARCH,
+		ExecutablePath: executablePath,
+	})
+	if err != nil {
+		t.Fatalf("SelfUpdate() error = %v", err)
+	}
+	if !result.UpdateAvailable || result.NeedsExternalApply {
+		t.Fatalf("result = %#v, want installed update without external apply", result)
+	}
+	installed, err := os.ReadFile(executablePath)
+	if err != nil {
+		t.Fatalf("ReadFile(installed executable) error = %v", err)
+	}
+	backup, err := os.ReadFile(result.BackupPath)
+	if err != nil {
+		t.Fatalf("ReadFile(backup) error = %v", err)
+	}
+	if string(installed) != "new-current-platform-binary" || string(backup) != "old-current-platform-binary" {
+		t.Fatalf("installed/backup = %q/%q, want new/old", string(installed), string(backup))
+	}
+}
+
 func TestWindowsSelfUpdateScriptIncludesPreflightRetryRollbackAndCleanupChecks(t *testing.T) {
 	result := SelfUpdateResult{
 		ExecutablePath:     `C:\apps\vs-ai-proxy.exe`,
@@ -595,6 +782,25 @@ func buildTarGz(t *testing.T, name string, data []byte) []byte {
 	}
 	if err := gzipWriter.Close(); err != nil {
 		t.Fatalf("gzip Close() error = %v", err)
+	}
+	return buf.Bytes()
+}
+
+func buildZip(t *testing.T, name string, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zipWriter := zip.NewWriter(&buf)
+	header := &zip.FileHeader{Name: name, Method: zip.Deflate}
+	header.SetMode(0o755)
+	entry, err := zipWriter.CreateHeader(header)
+	if err != nil {
+		t.Fatalf("zip CreateHeader() error = %v", err)
+	}
+	if _, err := entry.Write(data); err != nil {
+		t.Fatalf("zip Write() error = %v", err)
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("zip Close() error = %v", err)
 	}
 	return buf.Bytes()
 }

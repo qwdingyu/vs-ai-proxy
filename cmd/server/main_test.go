@@ -249,7 +249,7 @@ func TestHandleCommandLineSelfUpdateFailurePrintsManualGitHubLink(t *testing.T) 
 	for _, want := range []string{
 		"自更新失败: network unavailable",
 		"GitHub 最新版本: https://github.com/qwdingyu/vs-ai-proxy/releases/latest",
-		"手动替换 exe",
+		"手动替换可执行文件",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want contains %q", stderr.String(), want)

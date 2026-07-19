@@ -401,6 +401,14 @@ func TestSummarizeLogDiagnosticGivesOperatorReadyReasonAndAction(t *testing.T) {
 			wantAction: "模型名",
 			wantInSum:  "上游拒绝请求",
 		},
+		{
+			code:       "upstream_rate_limit",
+			statusCode: 502,
+			elapsedMs:  1807,
+			wantReason: "请求过于频繁",
+			wantAction: "等待 15-30 秒",
+			wantInSum:  "上游限流",
+		},
 	}
 
 	for _, tt := range tests {

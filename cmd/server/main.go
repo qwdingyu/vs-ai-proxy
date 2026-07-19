@@ -313,7 +313,7 @@ func updateFailureMessage(reason string, opts update.Options, result update.Chec
 		lines = append(lines, "Release: "+result.ReleaseURL)
 	}
 	lines = append(lines, "GitHub 最新版本: "+update.GitHubLatestReleaseURL(opts))
-	lines = append(lines, "若当前网络无法访问 GitHub，可复制上述链接到可访问网络环境下载 Windows x64 包后手动替换 exe。")
+	lines = append(lines, "若当前网络无法访问 GitHub，可复制上述链接到可访问网络环境下载对应平台安装包后手动替换可执行文件。")
 	return strings.Join(lines, "\n")
 }
 

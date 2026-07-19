@@ -14,6 +14,8 @@ TARGET_BYTES="${TARGET_BYTES:-1060000}"
 PAYLOAD_SHAPE="${PAYLOAD_SHAPE:-message}"
 DIRECT_TIMEOUT_SECONDS="${DIRECT_TIMEOUT_SECONDS:-90}"
 PROXY_TIMEOUT_SECONDS="${PROXY_TIMEOUT_SECONDS:-120}"
+MODE="${MODE:-direct-proxy}"
+COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-0}"
 
 RESULT_DIR="$ROOT_DIR/.bin/useai-large-diagnostic"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vs-ai-proxy-diagnostic.XXXXXX")"
@@ -64,6 +66,10 @@ if [[ ! -f "$CONFIG_SOURCE" ]]; then
 fi
 if [[ "$PAYLOAD_SHAPE" != "message" && "$PAYLOAD_SHAPE" != "tools" ]]; then
   echo "PAYLOAD_SHAPE 仅支持 message 或 tools" >&2
+  exit 1
+fi
+if [[ "$MODE" != "direct-proxy" && "$MODE" != "proxy-only" && "$MODE" != "direct-only" ]]; then
+  echo "MODE 仅支持 direct-proxy、proxy-only 或 direct-only" >&2
   exit 1
 fi
 
@@ -209,6 +215,10 @@ PY
 )"
 
 printf '\n== 1. direct upstream: %s/chat/completions ==\n' "$BASE_URL"
+DIRECT_RC=0
+if [[ "$MODE" == "proxy-only" ]]; then
+  printf 'skip direct upstream because MODE=proxy-only\n'
+else
 set +e
 curl -sS -N --max-time "$DIRECT_TIMEOUT_SECONDS" \
   -o "$DIRECT_OUTPUT" \
@@ -220,10 +230,80 @@ curl -sS -N --max-time "$DIRECT_TIMEOUT_SECONDS" \
   "$BASE_URL/chat/completions" >"$DIRECT_META" 2>"$DIRECT_ERROR"
 DIRECT_RC=$?
 set -e
+fi
+
+if [[ "$MODE" == "direct-only" ]]; then
+  PROXY_RC=0
+  python3 - "$REQUEST_STATS_PATH" "$STORE_PATH" "$RESULT_PATH" \
+    "$DIRECT_META" "$DIRECT_OUTPUT" "$DIRECT_ERROR" "$DIRECT_RC" \
+    "$PROXY_META" "$PROXY_OUTPUT" "$PROXY_ERROR" "$PROXY_RC" <<'PY'
+import json
+import os
+import sys
+
+(
+    request_stats_path,
+    store_path,
+    result_path,
+    direct_meta,
+    direct_output,
+    direct_error,
+    direct_rc,
+    proxy_meta,
+    proxy_output,
+    proxy_error,
+    proxy_rc,
+) = sys.argv[1:]
+
+def milliseconds(value):
+    try:
+        return round(float(value) * 1000, 3)
+    except (TypeError, ValueError):
+        return None
+
+def curl_result(meta_path, output_path, error_path, return_code):
+    lines = []
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding='utf-8') as f:
+            lines = [line.strip() for line in f]
+    lines += [''] * (5 - len(lines))
+    raw = b''
+    if os.path.exists(output_path):
+        with open(output_path, 'rb') as f:
+            raw = f.read()
+    stderr_kind = None
+    if os.path.exists(error_path) and os.path.getsize(error_path):
+        stderr_kind = 'curl_error'
+    return {
+        'curl_rc': int(return_code),
+        'status': lines[0] or '000',
+        'ttfb_ms': milliseconds(lines[1]),
+        'total_ms': milliseconds(lines[2]),
+        'upload_bytes': int(float(lines[3])) if lines[3] else None,
+        'download_bytes': int(float(lines[4])) if lines[4] else None,
+        'sse_events': sum(1 for line in raw.splitlines() if line.startswith(b'data:')),
+        'sse_done': any(line.strip() == b'data: [DONE]' for line in raw.splitlines()),
+        'error_kind': stderr_kind,
+    }
+
+with open(request_stats_path, encoding='utf-8') as f:
+    result = json.load(f)
+result['mode'] = 'direct-only'
+result['direct'] = curl_result(direct_meta, direct_output, direct_error, direct_rc)
+result['proxy'] = {'skipped': True}
+result['proxy_diagnostic'] = {}
+with open(result_path, 'w', encoding='utf-8') as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
+os.chmod(result_path, 0o600)
+print(json.dumps(result, ensure_ascii=False, indent=2))
+PY
+  printf '\n脱敏诊断结果已保存: %s\n' "$RESULT_PATH"
+  exit 0
+fi
 
 printf '\n== 2. local proxy: build and start ==\n'
 go build -o "$PROXY_BIN" ./cmd/server
-CONFIG_PATH="$CONFIG_PATH" STORE_PATH="$STORE_PATH" "$PROXY_BIN" >"$PROXY_LOG" 2>&1 &
+VS_AI_PROXY_AUTO_UPDATE=0 CONFIG_PATH="$CONFIG_PATH" STORE_PATH="$STORE_PATH" "$PROXY_BIN" >"$PROXY_LOG" 2>&1 &
 echo $! > "$PID_FILE"
 for _ in {1..80}; do
   if curl -sf "http://127.0.0.1:$PROXY_PORT/health" >/dev/null; then
@@ -248,6 +328,11 @@ with open(dst, 'wb') as f:
     f.write(json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
 os.chmod(dst, 0o600)
 PY
+
+if [[ "$COOLDOWN_SECONDS" =~ ^[0-9]+$ && "$COOLDOWN_SECONDS" -gt 0 ]]; then
+  printf '\n== cooldown: sleep %ss before proxy request ==\n' "$COOLDOWN_SECONDS"
+  sleep "$COOLDOWN_SECONDS"
+fi
 
 printf '\n== 3. proxy request: /v1/chat/completions ==\n'
 set +e
@@ -316,7 +401,15 @@ def curl_result(meta_path, output_path, error_path, return_code):
 
 with open(request_stats_path, encoding='utf-8') as f:
     result = json.load(f)
+mode = os.environ.get('MODE', 'direct-proxy')
+result['mode'] = mode
+try:
+    result['cooldown_seconds'] = int(os.environ.get('COOLDOWN_SECONDS', '0'))
+except ValueError:
+    result['cooldown_seconds'] = 0
 result['direct'] = curl_result(direct_meta, direct_output, direct_error, direct_rc)
+if mode == 'proxy-only':
+    result['direct']['skipped'] = True
 result['proxy'] = curl_result(proxy_meta, proxy_output, proxy_error, proxy_rc)
 
 logs = []

@@ -293,6 +293,71 @@ deepseek deepseek-v4-flash 1060000 direct=200 proxy=200 code=- req=1077092 up=10
 useai    deepseek-v4-flash 1060000 direct=502 proxy=502 code=upstream_payload_too_large req=1077089 up=1077099 delta=10
 ```
 
+### 2.7 `model_release_diagnostic.sh`
+
+用途：
+
+- 新模型发布或 provider 新接入后，统一执行真实上游 direct/proxy 对照。
+- 默认覆盖小请求、中请求、真实问题请求大小，避免只用 Web 测试页小请求误判。
+- 作为 GLM、Kimi、MiMo、DeepSeek 等模型复测的固定入口，不再临时手写脚本。
+
+默认值：
+
+```text
+PROVIDER_ID=useai
+DISPLAY_PROVIDER=UseAI
+MODEL=glm-5.2
+SIZES='30000 200000 673100'
+INJECT_MODEL_BINDING=1
+MODE=direct-proxy
+COOLDOWN_SECONDS=0
+```
+
+GLM 示例：
+
+```bash
+PROVIDER_ID=useai \
+DISPLAY_PROVIDER=UseAI \
+MODEL=glm-5.2 \
+SIZES='30000 200000 673100 1060000' \
+tests/model_release_diagnostic.sh
+```
+
+频控严格模型的冷却后代理单独验证：
+
+```bash
+PROVIDER_ID=useai \
+DISPLAY_PROVIDER=UseAI \
+MODEL=glm-5.2 \
+SIZES='30000 673100' \
+MODE=proxy-only \
+COOLDOWN_SECONDS=20 \
+tests/model_release_diagnostic.sh
+```
+
+其它模型示例：
+
+```bash
+PROVIDER_ID=kimi \
+DISPLAY_PROVIDER=Kimi \
+MODEL=kimi-k2 \
+SIZES='30000 200000 673100' \
+tests/model_release_diagnostic.sh
+```
+
+重要判断：
+
+- `direct=429` 表示上游或聚合商已经限流。
+- `direct=200` 后紧接着 `proxy=upstream_rate_limit`，可能是 direct/proxy 连续两次请求触发短窗口频控；使用 `MODE=proxy-only COOLDOWN_SECONDS=20` 再确认。
+- `upstream_bytes - request_bytes` 很小，说明代理没有明显放大请求体。
+- 必须按 `request_id` 关联日志，不要把相邻时间的不同请求合并判断。
+
+完整方法论见：
+
+```text
+docs/36_GLM与新模型真实上游限流诊断方法_20260719.md
+```
+
 ## 3. 典型使用场景
 
 ### 3.1 发布前本地基础验证

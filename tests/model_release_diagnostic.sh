@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+# 通用模型发布/接入诊断入口。
+# 底层复用 large_request_matrix_diagnostic.sh 和 useai_large_request_diagnostic.sh，
+# 避免每次新模型发布时临时拼 curl/Python 导致口径漂移。
+PROVIDER_ID="${PROVIDER_ID:-useai}"
+DISPLAY_PROVIDER="${DISPLAY_PROVIDER:-UseAI}"
+MODEL="${MODEL:-glm-5.2}"
+SIZES="${SIZES:-30000 200000 673100}"
+INJECT_MODEL_BINDING="${INJECT_MODEL_BINDING:-1}"
+DIRECT_TIMEOUT_SECONDS="${DIRECT_TIMEOUT_SECONDS:-120}"
+PROXY_TIMEOUT_SECONDS="${PROXY_TIMEOUT_SECONDS:-140}"
+MODE="${MODE:-direct-proxy}"
+COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-0}"
+
+CASES="${PROVIDER_ID}|${DISPLAY_PROVIDER}|${MODEL}" \
+SIZES="$SIZES" \
+INJECT_MODEL_BINDING="$INJECT_MODEL_BINDING" \
+DIRECT_TIMEOUT_SECONDS="$DIRECT_TIMEOUT_SECONDS" \
+PROXY_TIMEOUT_SECONDS="$PROXY_TIMEOUT_SECONDS" \
+MODE="$MODE" \
+COOLDOWN_SECONDS="$COOLDOWN_SECONDS" \
+tests/large_request_matrix_diagnostic.sh

@@ -31,6 +31,8 @@ const (
 )
 
 var releaseAssetWait = 2 * time.Second
+var renameFile = os.Rename
+var removeFile = os.Remove
 
 type Options struct {
 	CurrentVersion string
@@ -668,10 +670,41 @@ func downloadFile(ctx context.Context, client *http.Client, url, path string) (s
 		return "", closeErr
 	}
 	sha := hex.EncodeToString(hash.Sum(nil))
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := replaceStagedUpdateFile(tmpPath, path); err != nil {
 		return "", err
 	}
 	return sha, nil
+}
+
+func replaceStagedUpdateFile(tmpPath, targetPath string) error {
+	originalErr := renameFile(tmpPath, targetPath)
+	if originalErr == nil {
+		return nil
+	}
+	if _, sourceErr := os.Stat(tmpPath); sourceErr != nil {
+		return originalErr
+	}
+	if _, targetErr := os.Stat(targetPath); errors.Is(targetErr, os.ErrNotExist) {
+		return originalErr
+	} else if targetErr != nil {
+		return fmt.Errorf("检查旧更新文件失败: %w；原始替换错误: %v", targetErr, originalErr)
+	}
+	if info, statErr := os.Stat(targetPath); statErr == nil && info.IsDir() {
+		return fmt.Errorf("旧更新文件是目录，无法覆盖: %s；原始替换错误: %v", targetPath, originalErr)
+	}
+
+	backupPath := fmt.Sprintf("%s.bak-%d", targetPath, time.Now().UTC().UnixNano())
+	if err := renameFile(targetPath, backupPath); err != nil {
+		return fmt.Errorf("备份旧更新文件失败: %w；原始替换错误: %v", err, originalErr)
+	}
+	if err := renameFile(tmpPath, targetPath); err != nil {
+		if restoreErr := renameFile(backupPath, targetPath); restoreErr != nil {
+			return fmt.Errorf("替换更新文件失败，且回滚失败: %v；原始替换错误: %v；回滚错误: %v", err, originalErr, restoreErr)
+		}
+		return fmt.Errorf("替换更新文件失败，已回滚旧文件: %w；原始替换错误: %v", err, originalErr)
+	}
+	_ = removeFile(backupPath)
+	return nil
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {
@@ -802,7 +835,7 @@ func extractTarGzBinary(archivePath, binaryPath string) error {
 	if err := os.WriteFile(tmpPath, entry.Data, mode); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, binaryPath); err != nil {
+	if err := replaceStagedUpdateFile(tmpPath, binaryPath); err != nil {
 		return err
 	}
 	return nil
@@ -856,7 +889,7 @@ func extractZipBinary(archivePath, binaryPath, wantName string) error {
 	if err := os.WriteFile(tmpPath, entry.Data, mode); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, binaryPath)
+	return replaceStagedUpdateFile(tmpPath, binaryPath)
 }
 
 type zipEntry struct {
