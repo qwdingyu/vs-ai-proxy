@@ -39,7 +39,7 @@
     'dashboard.supported.step.models': 'step-router-v1 / step-3.7-flash',
     'dashboard.supported.step.coverage': 'DSML tool-call conversion',
     'dashboard.supported.gpt.family': 'GPT family',
-    'dashboard.supported.gpt.models': 'gpt-5.5 verified',
+    'dashboard.supported.gpt.models': 'gpt-5.5 / gpt-5.6 and others',
     'dashboard.supported.gpt.coverage': 'GPT models exposed by upstream /models',
     'dashboard.supported.glm.family': 'GLM',
     'dashboard.supported.glm.models': 'glm-5.2 / z-ai/glm-5.2',

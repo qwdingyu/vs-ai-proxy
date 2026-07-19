@@ -39,7 +39,7 @@
     'dashboard.supported.step.models': 'step-router-v1 / step-3.7-flash',
     'dashboard.supported.step.coverage': 'DSML 工具调用转换',
     'dashboard.supported.gpt.family': 'GPT 系列',
-    'dashboard.supported.gpt.models': 'gpt-5.5,5.6等',
+    'dashboard.supported.gpt.models': 'gpt-5.5 / gpt-5.6 等',
     'dashboard.supported.gpt.coverage': '按上游 /models 返回接入 GPT 型号',
     'dashboard.supported.glm.family': 'GLM',
     'dashboard.supported.glm.models': 'glm-5.2 / z-ai/glm-5.2',

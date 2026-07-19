@@ -100,7 +100,7 @@ func TestDashboardShowsVerifiedModelCoverageWithoutClaimingEveryModelIsTested(t 
 		`data-i18n="dashboard.supported.note"`,
 		`deepseek-v4-flash`,
 		`step-router-v1 / step-3.7-flash`,
-		`gpt-5.5,5.6等`,
+		`gpt-5.5 / gpt-5.6 等`,
 		`glm-5.2 / z-ai/glm-5.2`,
 		`kimi-for-coding`,
 		`mimo-v2.5 / mimo-v2.5-pro`,

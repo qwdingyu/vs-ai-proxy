@@ -26,7 +26,7 @@ VS AI Proxy 不使用封闭的模型白名单：只要上游提供 OpenAI-compat
 | --- | --- | --- |
 | DeepSeek | `deepseek-v4-flash` | 官方接口及 OpenAI-compatible 聚合网关、流式响应和大上下文 |
 | Step | `step-router-v1`、`step-3.7-flash` | DSML 文本工具调用可转换为标准 OpenAI `tool_calls` |
-| GPT 系列 | `gpt-5.5` | GPT 系列可按上游 `/models` 返回接入；已验证流式/非流式兜底及工具调用 |
+| GPT 系列 | `gpt-5.5`、`gpt-5.6` | GPT 系列可按上游 `/models` 返回接入；已验证流式/非流式兜底及工具调用 |
 | GLM | `glm-5.2`、`z-ai/glm-5.2` | 官方短名、namespaced 模型名、限流诊断和大请求 |
 | Kimi | `kimi-for-coding` | Kimi Coding 版本路径、模型发现和多轮消息兼容 |
 | MiMo | `mimo-v2.5`、`mimo-v2.5-pro` | `max_completion_tokens` 参数方言、SSE 和标准工具调用 |
