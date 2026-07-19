@@ -104,6 +104,15 @@
     .hero-card { background: linear-gradient(135deg, rgba(88,166,255,0.18), rgba(63,185,80,0.12)); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
     .hero-card h2 { margin-top: 0; }
     .feature-list { margin: 10px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.75; }
+    .hero-model-summary { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid rgba(139,148,158,0.24); color: #c9d1d9; font-size: 13px; font-weight: 600; line-height: 1.6; }
+    .supported-models { margin: 0 0 18px; padding: 2px 0 16px; border-bottom: 1px solid var(--border); }
+    .supported-models-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+    .supported-models-header h2 { margin: 0; }
+    .supported-models-desc { margin: 0 0 10px; line-height: 1.6; }
+    .supported-models-table { min-width: 760px; margin-top: 0; }
+    .supported-models-table .model-family { width: 120px; color: var(--text); font-weight: 700; }
+    .supported-models-table .model-ids { width: 260px; color: #a5d6ff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .supported-models-note { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
     .quick-card { background: #0f1115; border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
     .community-card { display: grid; grid-template-columns: minmax(0, 1fr) 180px; gap: 18px; align-items: center; min-height: 220px; background: radial-gradient(circle at 90% 20%, rgba(88,166,255,0.14), transparent 32%), #0f1115; }
     .community-copy { min-width: 0; }
@@ -134,6 +143,18 @@
     .faq-list summary { cursor: pointer; font-weight: 700; }
     .faq-list p { color: var(--muted); line-height: 1.7; }
     @media (max-width: 900px) { .header { align-items: flex-start; flex-direction: column; } .nav { flex-wrap: wrap; } .stats, .grid-2, .grid-3, .hero-grid, .contact-card, .guide-steps, .community-card, .token-period-grid { grid-template-columns: 1fr; } .token-trend-row { grid-template-columns: 78px minmax(90px, 1fr) 88px; } .token-trend-coverage { display: none; } .qrcode-frame { justify-self: start; width: 170px; } }
+    @media (max-width: 640px) {
+      .supported-models .table-scroll { overflow: visible; }
+      .supported-models-table { min-width: 0; width: 100%; }
+      .supported-models-table thead { display: none; }
+      .supported-models-table tbody, .supported-models-table tr, .supported-models-table td { display: block; width: 100%; }
+      .supported-models-table tr { padding: 9px 0; border-bottom: 1px solid var(--border); }
+      .supported-models-table tr:last-child { border-bottom: none; }
+      .supported-models-table td { padding: 2px 0; border: 0; white-space: normal; overflow-wrap: anywhere; }
+      .supported-models-table .model-family, .supported-models-table .model-ids { width: 100%; }
+      .supported-models-table .model-ids { margin-top: 2px; }
+      .supported-models-table td:last-child { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    }
   </style>
   <script src="/admin/i18n/index.js"></script>
   <script src="/admin/i18n/zh.js"></script>
@@ -175,6 +196,7 @@
               <li data-i18n="dashboard.hero.feature2">支持多 provider、多模型、优先级路由和模型列表校验。</li>
               <li data-i18n="dashboard.hero.feature3">提供请求统计、日志排障和正式版本自动更新。</li>
             </ul>
+            <p class="hero-model-summary" data-i18n="dashboard.hero.models">已验证系列：DeepSeek · Step · GPT 系列 · GLM · Kimi · MiMo</p>
           </div>
           <div class="quick-card community-card">
             <div class="community-copy">
@@ -194,6 +216,58 @@
             </div>
           </div>
         </div>
+
+        <section class="supported-models" aria-labelledby="supportedModelsTitle">
+          <div class="supported-models-header">
+            <h2 id="supportedModelsTitle" data-i18n="dashboard.supported.title">已验证的模型范围</h2>
+            <a class="btn supported-models-action" href="#/test" data-i18n="dashboard.supported.testBtn">去测试页验证</a>
+          </div>
+          <p class="hint supported-models-desc" data-i18n="dashboard.supported.desc">协议层兼容上游实际提供的 OpenAI-compatible 模型；以下是已完成 VS/Copilot 专项验证的代表系列。</p>
+          <div class="table-scroll">
+            <table class="table supported-models-table">
+              <thead>
+                <tr>
+                  <th data-i18n="dashboard.supported.family">模型系列</th>
+                  <th data-i18n="dashboard.supported.models">已验证代表型号</th>
+                  <th data-i18n="dashboard.supported.coverage">兼容重点</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="model-family" data-i18n="dashboard.supported.deepseek.family">DeepSeek</td>
+                  <td class="model-ids" data-i18n="dashboard.supported.deepseek.models">deepseek-v4-flash</td>
+                  <td data-i18n="dashboard.supported.deepseek.coverage">流式响应与大上下文</td>
+                </tr>
+                <tr>
+                  <td class="model-family" data-i18n="dashboard.supported.step.family">Step</td>
+                  <td class="model-ids" data-i18n="dashboard.supported.step.models">step-router-v1 / step-3.7-flash</td>
+                  <td data-i18n="dashboard.supported.step.coverage">DSML 工具调用转换</td>
+                </tr>
+                <tr>
+                  <td class="model-family" data-i18n="dashboard.supported.gpt.family">GPT 系列</td>
+                  <td class="model-ids" data-i18n="dashboard.supported.gpt.models">gpt-5.5,5.6等</td>
+                  <td data-i18n="dashboard.supported.gpt.coverage">按上游 /models 返回接入 GPT 型号</td>
+                </tr>
+                <tr>
+                  <td class="model-family" data-i18n="dashboard.supported.glm.family">GLM</td>
+                  <td class="model-ids" data-i18n="dashboard.supported.glm.models">glm-5.2 / z-ai/glm-5.2</td>
+                  <td data-i18n="dashboard.supported.glm.coverage">短名、namespaced 名称与大请求</td>
+                </tr>
+                <tr>
+                  <td class="model-family" data-i18n="dashboard.supported.kimi.family">Kimi</td>
+                  <td class="model-ids" data-i18n="dashboard.supported.kimi.models">kimi-for-coding</td>
+                  <td data-i18n="dashboard.supported.kimi.coverage">Coding 版本路径与多轮消息</td>
+                </tr>
+                <tr>
+                  <td class="model-family" data-i18n="dashboard.supported.mimo.family">MiMo</td>
+                  <td class="model-ids" data-i18n="dashboard.supported.mimo.models">mimo-v2.5 / mimo-v2.5-pro</td>
+                  <td data-i18n="dashboard.supported.mimo.coverage">输出参数方言、SSE 与工具调用</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="supported-models-note" data-i18n="dashboard.supported.note">型号可见性、账号权限和服务稳定性由所配置的上游 provider 决定；“系列兼容”不等于每个型号均已逐一实测。</p>
+        </section>
 
         <h2 data-i18n="dashboard.stats.title">快速状态</h2>
         <div class="stats">

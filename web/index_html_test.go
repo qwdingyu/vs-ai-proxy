@@ -87,6 +87,98 @@ func TestDashboardTokenUsageIsWiredWithoutTreatingUnknownAsZero(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsVerifiedModelCoverageWithoutClaimingEveryModelIsTested(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	for _, marker := range []string{
+		`class="supported-models"`,
+		`href="#/test" data-i18n="dashboard.supported.testBtn"`,
+		`data-i18n="dashboard.supported.desc"`,
+		`data-i18n="dashboard.supported.note"`,
+		`deepseek-v4-flash`,
+		`step-router-v1 / step-3.7-flash`,
+		`gpt-5.5,5.6等`,
+		`glm-5.2 / z-ai/glm-5.2`,
+		`kimi-for-coding`,
+		`mimo-v2.5 / mimo-v2.5-pro`,
+		`“系列兼容”不等于每个型号均已逐一实测`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("verified model coverage missing %q", marker)
+		}
+	}
+	if strings.Contains(html, "step_route_v1") {
+		t.Fatal("dashboard should use the upstream model ID step-router-v1")
+	}
+}
+
+func TestVerifiedModelCoverageMatchesREADMEAndHeroSummary(t *testing.T) {
+	htmlData, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	readmeData, err := os.ReadFile("../README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+
+	readmeCoverage := readREADMEModelCoverage(string(readmeData))
+	webCoverage := readWebModelCoverage(string(htmlData))
+	if len(readmeCoverage) != len(webCoverage) {
+		t.Fatalf("model family count differs: README=%d Web=%d", len(readmeCoverage), len(webCoverage))
+	}
+	for family, readmeModels := range readmeCoverage {
+		webModels, ok := webCoverage[family]
+		if !ok {
+			t.Errorf("Web model coverage missing README family %q", family)
+			continue
+		}
+		if webModels != readmeModels {
+			t.Errorf("model IDs differ for %s: README=%q Web=%q", family, readmeModels, webModels)
+		}
+	}
+
+	summary := readI18nCatalog(t, "i18n/zh.js")["dashboard.hero.models"]
+	if summary == "" {
+		t.Fatal("zh catalog missing dashboard.hero.models")
+	}
+	for family := range readmeCoverage {
+		if !strings.Contains(summary, family) {
+			t.Errorf("hero model summary missing README family %q", family)
+		}
+	}
+}
+
+func readREADMEModelCoverage(content string) map[string]string {
+	rowPattern := regexp.MustCompile(`(?m)^\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|`)
+	return collectModelCoverage(rowPattern.FindAllStringSubmatch(content, -1))
+}
+
+func readWebModelCoverage(content string) map[string]string {
+	rowPattern := regexp.MustCompile(`(?s)<td class="model-family"[^>]*>([^<]+)</td>\s*<td class="model-ids"[^>]*>([^<]+)</td>`)
+	return collectModelCoverage(rowPattern.FindAllStringSubmatch(content, -1))
+}
+
+func collectModelCoverage(rows [][]string) map[string]string {
+	modelIDPattern := regexp.MustCompile(`[a-z0-9]+(?:[-./][a-z0-9]+)+`)
+	coverage := make(map[string]string)
+	for _, row := range rows {
+		if len(row) < 3 {
+			continue
+		}
+		family := strings.TrimSpace(row[1])
+		modelIDs := modelIDPattern.FindAllString(strings.ToLower(row[2]), -1)
+		if family == "模型系列" || strings.HasPrefix(family, "---") || len(modelIDs) == 0 {
+			continue
+		}
+		coverage[family] = strings.Join(modelIDs, ",")
+	}
+	return coverage
+}
+
 func TestDashboardTokenUsageExplainsCoverageAndSubsets(t *testing.T) {
 	data, err := fs.ReadFile(MustSubFS(), "index.html")
 	if err != nil {
