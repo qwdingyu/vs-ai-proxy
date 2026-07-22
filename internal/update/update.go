@@ -341,21 +341,16 @@ func LaunchWindowsSelfUpdate(result SelfUpdateResult, args []string) error {
 	if err := appendWindowsSelfUpdateLog(paths.LogPath, "launcher prepared script="+paths.ScriptPath+" stage="+result.StagedBinaryPath); err != nil {
 		return err
 	}
-	logFile, err := os.OpenFile(paths.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", paths.ScriptPath)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	// 不重定向 stdout/stderr 到日志文件：PowerShell 脚本自身通过 Write-UpdateLog
+	// 写入日志；若重定向 stdout/stderr 会保持文件句柄打开，导致脚本内 Out-File
+	// -Append 因同一进程的文件锁冲突而失败（"文件正由另一进程使用"）。
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
-		_, _ = writeWindowsSelfUpdateLogLine(logFile, "launcher failed to start powershell: "+err.Error())
-		_ = logFile.Close()
+		_ = appendWindowsSelfUpdateLog(paths.LogPath, "launcher failed to start powershell: "+err.Error())
 		return err
 	}
-	_, _ = writeWindowsSelfUpdateLogLine(logFile, "launcher started powershell pid="+strconv.Itoa(cmd.Process.Pid))
-	_ = logFile.Close()
+	_ = appendWindowsSelfUpdateLog(paths.LogPath, "launcher started powershell pid="+strconv.Itoa(cmd.Process.Pid))
 	return nil
 }
 
