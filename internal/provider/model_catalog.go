@@ -412,6 +412,32 @@ func MergeModelProfiles(base, override ModelProfile) ModelProfile {
 	return merged
 }
 
+// EnrichMetadata 将外部元数据合并到内置模型元数据列表中。
+// 已存在的条目（按 model+provider 去重）不会被覆盖。
+// 调用后会自动重建 catalog，使新元数据对 Profile() / ProfileAny() 可见。
+func (c *ModelCatalog) EnrichMetadata(profiles []ModelProfile) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// 去重：已存在的元数据条目保留
+	seen := map[string]struct{}{}
+	for _, p := range c.metadata {
+		key := strings.ToLower(p.Model + "\x00" + p.Provider)
+		seen[key] = struct{}{}
+	}
+
+	for _, p := range profiles {
+		key := strings.ToLower(p.Model + "\x00" + p.Provider)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		c.metadata = append(c.metadata, p)
+	}
+
+	c.rebuildLocked()
+}
+
 // Rebuild 重建 catalog，通常在 provider 发现结果或配置变更后调用。
 func (c *ModelCatalog) Rebuild() {
 	c.mu.Lock()

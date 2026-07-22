@@ -92,6 +92,24 @@ func (s *Server) snapshot() (*config.AppConfig, *provider.Registry, *provider.Mo
 	return s.config, s.registry, s.catalog
 }
 
+// EnrichModelMetadata 将外部远程元数据补充到 catalog 中。
+// 远程元数据优先级低于内置 models.json 和用户 config.json 配置。
+// 调用后 catalog 会被重建，新的 Profile() 查询会包含远程数据。
+func (s *Server) EnrichModelMetadata(profiles []provider.ModelProfile) {
+	if len(profiles) == 0 {
+		return
+	}
+
+	s.mu.RLock()
+	catalog := s.catalog
+	s.mu.RUnlock()
+
+	if catalog != nil {
+		catalog.EnrichMetadata(profiles)
+		s.logger.Info("已补充远程模型元数据: %d 条", len(profiles))
+	}
+}
+
 // SnapshotComponents 返回当前配置、registry 与 catalog 的只读快照，供后台任务使用。
 func (s *Server) SnapshotComponents() (*config.AppConfig, *provider.Registry, *provider.ModelCatalog) {
 	return s.snapshot()

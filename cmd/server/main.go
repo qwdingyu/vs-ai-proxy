@@ -25,6 +25,7 @@ import (
 	"github.com/dingyuwang/vs-ai-proxy/internal/benchmark"
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
 	"github.com/dingyuwang/vs-ai-proxy/internal/log"
+	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 	"github.com/dingyuwang/vs-ai-proxy/internal/proxy"
 	"github.com/dingyuwang/vs-ai-proxy/internal/store"
 	"github.com/dingyuwang/vs-ai-proxy/internal/update"
@@ -122,6 +123,7 @@ func main() {
 	go benchSvc.Run(ctx)
 	go persistStoreLoop(ctx, st, storePath, logger)
 	go watchConfigLoop(ctx, configMgr, proxySrv, logger)
+	go enrichModelMetadataLoop(ctx, proxySrv, logger, config.DefaultConfigDir())
 
 	publicAddr := displayAddr(appAddr)
 	logger.Info("VS AI Proxy %s 已启动，监听地址=http://%s，管理面板=http://%s/admin", version, publicAddr, publicAddr)
@@ -849,6 +851,40 @@ func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *p
 		}
 	}
 }
+
+// enrichModelMetadataLoop 后台定期拉取远程模型元数据（OpenRouter > LiteLLM），
+// 补充到 catalog 中。不阻塞启动，失败只打日志不中断服务。
+//
+// 鲁棒性策略：
+//   - 启动后立即使用缓存（即使已过期），保证毫秒级加载
+//   - 网络故障时使用过期缓存保底，服务不降级
+//   - 内置 models.json 和用户 config.json 的优先级始终高于远程源
+func enrichModelMetadataLoop(ctx context.Context, proxySrv *proxy.Server, logger *log.Logger, configDir string) {
+	fetcher := provider.NewMetadataFetcher(configDir)
+
+	// 首次加载：优先使用缓存（即使过期），网络请求在后台静默进行
+	if profiles := fetcher.Fetch(ctx); profiles != nil {
+		proxySrv.EnrichModelMetadata(profiles)
+		logger.Info("远程模型元数据已加载: %d 条", len(profiles))
+	}
+
+	ticker := time.NewTicker(remoteMetadataRefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if profiles := fetcher.Fetch(ctx); profiles != nil {
+				proxySrv.EnrichModelMetadata(profiles)
+				logger.Info("远程模型元数据已刷新: %d 条", len(profiles))
+			}
+		}
+	}
+}
+
+const remoteMetadataRefreshInterval = 1 * time.Hour
 
 func configFileFingerprint(path string) (time.Time, string, error) {
 	info, err := os.Stat(path)
