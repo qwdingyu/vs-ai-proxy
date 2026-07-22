@@ -37,6 +37,21 @@ func TestDefaultConfigIncludesUseAIAsFirstProvider(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigDoesNotIncludeOllamaLocalProvider(t *testing.T) {
+	cfg := DefaultConfig()
+
+	for _, p := range cfg.Providers {
+		if p.Type == "ollama" || p.ID == "ollama-local" || p.Name == "ollama" {
+			t.Fatalf("default config should not include Ollama provider: %#v", p)
+		}
+	}
+	for _, m := range cfg.Models {
+		if m.ProviderID == "ollama-local" || m.Provider == "ollama" || m.Name == "llama-3.3-70b" {
+			t.Fatalf("default config should not include Ollama model: %#v", m)
+		}
+	}
+}
+
 func TestDefaultConfigPathUsesXDGStyleHomeConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("HOME", "/tmp/test-home")

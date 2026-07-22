@@ -1054,6 +1054,7 @@
       if (log.request_id) parts.push(t('logs.toolDiagnostics.requestId') + ' ' + log.request_id);
       if (log.request_tools) parts.push(t('logs.toolDiagnostics.request') + ' ' + log.request_tools);
       if (log.response_tools) parts.push(t('logs.toolDiagnostics.response') + ' ' + log.response_tools);
+      if (log.tool_outcome) parts.push(t('logs.toolDiagnostics.outcome') + ' ' + log.tool_outcome);
       if (log.request_tools && !log.response_tools && !log.is_success) parts.push(t('logs.toolDiagnostics.noResponseTools'));
       if (log.fallback_mode) parts.push(t('logs.toolDiagnostics.fallback') + ' ' + log.fallback_mode);
       if (log.normalization) parts.push(t('logs.toolDiagnostics.normalization') + ' ' + log.normalization);
@@ -1081,6 +1082,7 @@
         `${t('logs.diagnostic.summary')}: ${log.diagnostic_summary || '-'}`,
         `${t('logs.diagnostic.requestTools')}: ${log.request_tools || '-'}`,
         `${t('logs.diagnostic.responseTools')}: ${log.response_tools || '-'}`,
+        `${t('logs.diagnostic.toolOutcome')}: ${log.tool_outcome || '-'}`,
         `${t('logs.diagnostic.streamState')}: ${log.stream_state || '-'}`,
         `${t('logs.diagnostic.attempts')}: ${log.attempts_summary || '-'}`,
       ].join('\n');

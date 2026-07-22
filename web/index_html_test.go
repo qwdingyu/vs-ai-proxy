@@ -394,6 +394,7 @@ func TestLogRowsCanCopyDiagnosticSummary(t *testing.T) {
 		`tbody.innerHTML = '<tr><td colspan="11" class="empty">' + t('table.empty.logs') + '</td></tr>';`,
 		`data-action="copy-log-diagnostic"`,
 		"formatLogDiagnosticCopyText",
+		`${t('logs.diagnostic.toolOutcome')}: ${log.tool_outcome || '-'}`,
 		"currentLogRows = logs",
 		`t('action.copyDiagnostic')`,
 	}

@@ -42,6 +42,7 @@ type RequestLog struct {
 	StreamState              string      `json:"stream_state,omitempty"`
 	RequestTools             string      `json:"request_tools,omitempty"`
 	ResponseTools            string      `json:"response_tools,omitempty"`
+	ToolOutcome              string      `json:"tool_outcome,omitempty"`
 	FallbackMode             string      `json:"fallback_mode,omitempty"`
 	Normalization            string      `json:"normalization,omitempty"`
 	Usage                    *TokenUsage `json:"usage,omitempty"`
@@ -318,6 +319,7 @@ func matchesLogFilters(log RequestLog, filters LogFilters) bool {
 			log.StreamState,
 			log.RequestTools,
 			log.ResponseTools,
+			log.ToolOutcome,
 		}, " "))
 		if !strings.Contains(joined, needle) {
 			return false

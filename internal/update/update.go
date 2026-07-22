@@ -27,6 +27,7 @@ const (
 	defaultRepoOwner     = "qwdingyu"
 	defaultRepoName      = "vs-ai-proxy"
 	appName              = "vs-ai-proxy"
+	windowsPowerShellBOM = "\xEF\xBB\xBF"
 	releaseAssetRetries  = 3
 )
 
@@ -334,7 +335,7 @@ func LaunchWindowsSelfUpdate(result SelfUpdateResult, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(paths.LogPath), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(paths.ScriptPath, []byte(script), 0o600); err != nil {
+	if err := writeWindowsSelfUpdateScriptFile(paths.ScriptPath, script); err != nil {
 		return err
 	}
 	if err := appendWindowsSelfUpdateLog(paths.LogPath, "launcher prepared script="+paths.ScriptPath+" stage="+result.StagedBinaryPath); err != nil {
@@ -381,6 +382,44 @@ func WindowsSelfUpdateDiagnosticPaths(result SelfUpdateResult) WindowsSelfUpdate
 	}
 }
 
+func writeWindowsSelfUpdateScriptFile(scriptPath, script string) error {
+	dir := filepath.Dir(scriptPath)
+	tmp, err := os.CreateTemp(dir, filepath.Base(scriptPath)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.WriteString(windowsPowerShellBOM + script); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	if err := removeFile(scriptPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := renameFile(tmpPath, scriptPath); err != nil {
+		return err
+	}
+	cleanupTemp = false
+	return nil
+}
+
 func windowsSelfUpdateScript(result SelfUpdateResult, args []string, logPath string, pidToWait int, workingDir string) string {
 	quotedArgs := powershellStringArray(args)
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
@@ -391,52 +430,52 @@ $backup = %s
 $log = %s
 $argsToPass = @(%s)
 function Write-UpdateLog([string]$message) {
-  "[$(Get-Date -Format o)] $message" | Out-File -FilePath $log -Encoding utf8 -Append
+  ('[{0}] {1}' -f (Get-Date -Format o), $message) | Out-File -FilePath $log -Encoding utf8 -Append
 }
 function Assert-PathExists([string]$path, [string]$label) {
-  if (-not (Test-Path -LiteralPath $path)) { throw "$label 不存在: $path" }
+  if (-not (Test-Path -LiteralPath $path)) { throw ($label + ' 不存在: ' + $path) }
 }
 function Move-WithRetry([string]$source, [string]$target, [string]$label) {
   $lastError = $null
   for ($i = 1; $i -le 20; $i++) {
     try {
       Move-Item -LiteralPath $source -Destination $target -Force
-      Write-UpdateLog "$label 成功，第 $i 次尝试"
+      Write-UpdateLog ($label + ' 成功，第 ' + $i + ' 次尝试')
       return
     } catch {
       $lastError = $_.Exception.Message
-      Write-UpdateLog "$label 失败，第 $i 次尝试: $lastError"
+      Write-UpdateLog ($label + ' 失败，第 ' + $i + ' 次尝试: ' + $lastError)
       Start-Sleep -Milliseconds 300
     }
   }
-  throw "$label 失败，已重试 20 次: $lastError"
+  throw ($label + ' 失败，已重试 20 次: ' + $lastError)
 }
 try {
-  Write-UpdateLog "waiting for pid $pidToWait"
+  Write-UpdateLog ('waiting for pid ' + $pidToWait)
   while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
-  Write-UpdateLog "preflight exe=$exe stage=$stage backup=$backup"
+  Write-UpdateLog ('preflight exe=' + $exe + ' stage=' + $stage + ' backup=' + $backup)
   Assert-PathExists $stage '新版暂存文件'
   $stageInfo = Get-Item -LiteralPath $stage
-  if ($stageInfo.Length -le 0) { throw "新版暂存文件为空: $stage" }
+  if ($stageInfo.Length -le 0) { throw ('新版暂存文件为空: ' + $stage) }
   if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
   if (Test-Path -LiteralPath $exe) { Move-WithRetry $exe $backup '备份旧版本' }
   Move-WithRetry $stage $exe '安装新版本'
   Assert-PathExists $exe '安装后的程序'
-  if ((Test-Path -LiteralPath $stage)) { throw "新版暂存文件仍存在，说明替换未完成: $stage" }
-  Write-UpdateLog "starting $exe"
+  if ((Test-Path -LiteralPath $stage)) { throw ('新版暂存文件仍存在，说明替换未完成: ' + $stage) }
+  Write-UpdateLog ('starting ' + $exe)
   Start-Process -FilePath $exe -ArgumentList $argsToPass -WorkingDirectory %s
   Write-UpdateLog 'done'
 } catch {
-  Write-UpdateLog "ERROR $($_.Exception.Message)"
-  Write-UpdateLog "ERROR_RECORD $($_ | Out-String)"
-  if ($_.ScriptStackTrace) { Write-UpdateLog "ERROR_STACK $($_.ScriptStackTrace)" }
-  if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) { Write-UpdateLog "ERROR_POSITION $($_.InvocationInfo.PositionMessage)" }
+  Write-UpdateLog ('ERROR ' + $_.Exception.Message)
+  Write-UpdateLog ('ERROR_RECORD ' + ($_ | Out-String))
+  if ($_.ScriptStackTrace) { Write-UpdateLog ('ERROR_STACK ' + $_.ScriptStackTrace) }
+  if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) { Write-UpdateLog ('ERROR_POSITION ' + $_.InvocationInfo.PositionMessage) }
   if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $exe)) {
     try {
       Move-Item -LiteralPath $backup -Destination $exe -Force
       Write-UpdateLog 'rollback restored backup'
     } catch {
-      Write-UpdateLog "rollback failed: $($_.Exception.Message)"
+      Write-UpdateLog ('rollback failed: ' + $_.Exception.Message)
     }
   }
   throw

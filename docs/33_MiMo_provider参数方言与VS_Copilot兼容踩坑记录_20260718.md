@@ -283,3 +283,4 @@ go test ./web -count=1
 3. `reasoning_content` 是 MiMo 正常响应的一部分，不应在 raw passthrough 或 SSE 聚合中丢失。
 4. `content="" + reasoning_content 非空` 不是空响应；但如果客户端后续历史只保留了空 `content`，可能引发多轮质量或兼容问题。
 5. `proxy_parse_error` 文案可继续优化，但不要把参数方言、截断、工具契约失败都混成“上游坏了”。
+6. 字段方言修好之后，仍可能出现「budget 绝对值不够 reasoning + tool_calls」：HTTP 200、`finish_reason=length`、无结构化 `tool_calls`，客户端误报为 git/工具失败。完整 live 复现矩阵与全局对策见 `37_MiMo_git工具调用失败根因分析与对策_20260722.md`（该文归档时未改代码）。

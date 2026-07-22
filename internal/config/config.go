@@ -110,14 +110,6 @@ func DefaultConfig() *AppConfig {
 				Enabled:  false,
 				Priority: 1,
 			},
-			{
-				ID:       "ollama-local",
-				Name:     "ollama",
-				BaseURL:  "http://localhost:11434",
-				Type:     "ollama",
-				Enabled:  true,
-				Priority: 2,
-			},
 		},
 		Models: []ModelConfig{
 			{
@@ -126,15 +118,6 @@ func DefaultConfig() *AppConfig {
 				Provider:        "deepseek",
 				ContextLength:   intPtr(1000000),
 				MaxOutputTokens: intPtr(384000),
-				SupportsTools:   boolPtr(true),
-				Enabled:         true,
-			},
-			{
-				Name:            "llama-3.3-70b",
-				ProviderID:      "ollama-local",
-				Provider:        "ollama",
-				ContextLength:   intPtr(128000),
-				MaxOutputTokens: intPtr(16384),
 				SupportsTools:   boolPtr(true),
 				Enabled:         true,
 			},

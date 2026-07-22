@@ -375,6 +375,10 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if responseTools == "" {
 			responseTools = firstNonEmptyHeader(ww.Header(), "X-Proxy-Response-Tools")
 		}
+		toolOutcome := ww.toolOutcome
+		if toolOutcome == "" {
+			toolOutcome = firstNonEmptyHeader(ww.Header(), "X-Proxy-Tool-Outcome")
+		}
 		fallbackMode := ww.fallbackMode
 		if fallbackMode == "" {
 			fallbackMode = firstNonEmptyHeader(ww.Header(), "X-Proxy-Fallback-Mode")
@@ -426,6 +430,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			NetworkPeer:              networkPeer,
 			RequestTools:             requestTools,
 			ResponseTools:            responseTools,
+			ToolOutcome:              toolOutcome,
 			FallbackMode:             fallbackMode,
 			Normalization:            normalization,
 			StreamState:              streamState,
@@ -634,6 +639,7 @@ type responseWriter struct {
 	effectiveTimeoutSeconds  int
 	requestTools             string
 	responseTools            string
+	toolOutcome              string
 	fallbackMode             string
 	normalization            string
 	streamState              string
@@ -902,6 +908,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 								cancel()
 								setProxyFallbackMode(w, "nonstream-to-stream")
 								setResponseToolDiagnosticHeader(w, fallbackResp)
+								setToolOutcomeDiagnosticHeader(w, req, fallbackResp)
 								setResponseUsage(w, fallbackResp.Usage)
 								w.Header().Set("Content-Type", "application/json")
 								w.WriteHeader(http.StatusOK)
@@ -971,6 +978,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				setRawResponseToolDiagnosticHeader(w, body)
+				setRawToolOutcomeDiagnosticHeader(w, req, body)
 				setRawOpenAIResponseUsage(w, body)
 				s.cacheRawOpenAIChatResponse(body)
 				w.Header().Set("Content-Type", "application/json")
@@ -994,6 +1002,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						cancel()
 						setProxyFallbackMode(w, "nonstream-to-stream")
 						setResponseToolDiagnosticHeader(w, fallbackResp)
+						setToolOutcomeDiagnosticHeader(w, req, fallbackResp)
 						setResponseUsage(w, fallbackResp.Usage)
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusOK)
@@ -1035,6 +1044,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		setResponseToolDiagnosticHeader(w, resp)
+		setToolOutcomeDiagnosticHeader(w, req, resp)
 		setResponseUsage(w, resp.Usage)
 		s.cacheChatResponse(resp)
 
@@ -1259,6 +1269,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 							}
 							if protocolErr == nil {
 								setResponseToolDiagnosticHeader(w, &typed)
+								setToolOutcomeDiagnosticHeader(w, req, &typed)
 								s.cacheChatResponse(&typed)
 							}
 						}
@@ -1310,6 +1321,7 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		setResponseToolDiagnosticHeader(w, resp)
+		setToolOutcomeDiagnosticHeader(w, req, resp)
 		setResponseUsage(w, resp.Usage)
 		s.cacheChatResponse(resp)
 
@@ -1402,6 +1414,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 				if validationErr := validateProviderResponseToolContract(resp); validationErr == nil {
 					setProxyFallbackMode(w, "stream-to-nonstream")
 					setResponseToolDiagnosticHeader(w, resp)
+					setToolOutcomeDiagnosticHeader(w, req, resp)
 					setResponseUsage(w, resp.Usage)
 					if writeErr := writeOpenAIChatResponseAsSSE(w, flusher, resp); writeErr == nil {
 						s.cacheChatResponse(resp)
@@ -1441,6 +1454,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		fillMissingStreamResponseModel(dsmlResp, req.Model)
 		normalizeProviderSpecificToolCalls(dsmlResp, allowedToolNames(req))
 		setResponseToolDiagnosticHeader(w, dsmlResp)
+		setToolOutcomeDiagnosticHeader(w, req, dsmlResp)
 		setResponseUsage(w, dsmlResp.Usage)
 		s.cacheChatResponse(dsmlResp)
 		return writeOpenAIChatResponseAsSSE(w, flusher, dsmlResp)
@@ -1491,6 +1505,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 	}
 	setResponseUsage(w, acc.usage)
+	setStreamToolOutcomeDiagnosticHeader(w, req, acc)
 	if err := eventProcessor.commit(); err != nil {
 		return fmt.Errorf("写入响应失败: OpenAI SSE: %w", err)
 	}
@@ -1584,6 +1599,7 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 		return fmt.Errorf("解析 Ollama 工具流失败: %w", err)
 	}
 	setResponseUsage(w, ollamaAcc.usage)
+	setStreamToolOutcomeDiagnosticHeader(w, req, ollamaAcc)
 	if err := eventProcessor.commit(); err != nil {
 		return fmt.Errorf("写入 Ollama 工具流失败: %w", err)
 	}
@@ -1629,6 +1645,7 @@ func (s *Server) streamOllamaPassthrough(w http.ResponseWriter, r *http.Request,
 	setResponseUsage(w, acc.usage)
 	s.cacheStreamAccumulator(acc)
 	setStreamToolDiagnosticHeader(w, acc)
+	setStreamToolOutcomeDiagnosticHeader(w, req, acc)
 	return nil
 }
 
@@ -1684,6 +1701,7 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
 	}
 	setResponseUsage(w, acc.usage)
+	setStreamToolOutcomeDiagnosticHeader(w, req, acc)
 	if err := eventProcessor.commit(); err != nil {
 		return fmt.Errorf("写入响应失败: Ollama NDJSON: %w", err)
 	}

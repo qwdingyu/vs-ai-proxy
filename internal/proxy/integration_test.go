@@ -2888,6 +2888,122 @@ func TestChatCompletionsNormalizesTokenBudgetAliasesBeforeUpstream(t *testing.T)
 	}
 }
 
+func TestChatCompletionsMarksToolOutcomeWhenRawOpenAITruncatesWithoutTools(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"mimo-v2.5"}]}`))
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"id":"chatcmpl-truncated",
+				"object":"chat.completion",
+				"model":"mimo-v2.5",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"partial"},"finish_reason":"length"}],
+				"usage":{"prompt_tokens":20,"completion_tokens":32,"total_tokens":52,"completion_tokens_details":{"reasoning_tokens":32}}
+			}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	prov := provider.NewOpenAIProviderWithCapability("xiaomimimo", "xiaomimimo", "sk-test", upstream.URL+"/v1", true, time.Second)
+	server := newOpenServer(prov)
+	handler := server.loggingMiddleware(withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	}))
+
+	body := `{
+		"model":"mimo-v2.5",
+		"messages":[{"role":"user","content":"use git status"}],
+		"max_completion_tokens":32,
+		"tools":[{"type":"function","function":{"name":"git","parameters":{"type":"object"}}}],
+		"tool_choice":"auto"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "req-tool-outcome-raw")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Tool-Outcome"); got != "truncated_no_tools" {
+		t.Fatalf("tool outcome header = %q, want truncated_no_tools", got)
+	}
+	logs := server.store.GetLogs(1)
+	if len(logs) != 1 || logs[0].ToolOutcome != "truncated_no_tools" {
+		t.Fatalf("logs = %#v, want tool_outcome=truncated_no_tools", logs)
+	}
+	if logs[0].Usage == nil || logs[0].Usage.ReasoningTokens != 32 {
+		t.Fatalf("usage = %#v, want reasoning_tokens=32", logs[0].Usage)
+	}
+}
+
+func TestChatCompletionsMarksToolOutcomeWhenOpenAIStreamTruncatesWithoutTools(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"mimo-v2.5"}]}`))
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(strings.Join([]string{
+				`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+				`data: {"choices":[{"delta":{"reasoning_content":"partial"},"finish_reason":null}]}`,
+				`data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":20,"completion_tokens":32,"total_tokens":52,"completion_tokens_details":{"reasoning_tokens":32}}}`,
+				`data: [DONE]`,
+				``,
+			}, "\n")))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	prov := provider.NewOpenAIProviderWithCapability("xiaomimimo", "xiaomimimo", "sk-test", upstream.URL+"/v1", true, time.Second)
+	server := newOpenServer(prov)
+	handler := server.loggingMiddleware(withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	}))
+
+	body := `{
+		"model":"mimo-v2.5",
+		"stream":true,
+		"messages":[{"role":"user","content":"use git status"}],
+		"max_completion_tokens":32,
+		"tools":[{"type":"function","function":{"name":"git","parameters":{"type":"object"}}}],
+		"tool_choice":"auto"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "req-tool-outcome-stream")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Tool-Outcome"); got != "truncated_no_tools" {
+		t.Fatalf("tool outcome header = %q, want truncated_no_tools; headers=%v", got, rec.Header())
+	}
+	if !strings.Contains(rec.Body.String(), `"finish_reason":"length"`) {
+		t.Fatalf("stream body missing length finish: %s", rec.Body.String())
+	}
+	logs := server.store.GetLogs(1)
+	if len(logs) != 1 || logs[0].ToolOutcome != "truncated_no_tools" {
+		t.Fatalf("logs = %#v, want tool_outcome=truncated_no_tools", logs)
+	}
+	if logs[0].Usage == nil || logs[0].Usage.ReasoningTokens != 32 {
+		t.Fatalf("usage = %#v, want reasoning_tokens=32", logs[0].Usage)
+	}
+}
+
 func TestOllamaChatNormalizesTokenBudgetAliasesBeforeProvider(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, &fakeChatResponse{Model: "gpt-5.5", Content: "ok"}, "")
 	server := newOpenServer(prov)

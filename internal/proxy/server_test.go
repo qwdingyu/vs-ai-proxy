@@ -618,6 +618,7 @@ func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) 
 	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setProxyDiagnosticHeader(w, "X-Proxy-Request-Tools", "declared: git,powershell")
 		setProxyDiagnosticHeader(w, "X-Proxy-Response-Tools", "returned: powershell")
+		setProxyDiagnosticHeader(w, "X-Proxy-Tool-Outcome", "truncated_no_tools")
 		setProxyFallbackMode(w, "stream-to-nonstream")
 		setProxyToolNormalization(w, "dsml")
 		setProxyStreamState(w, "upstream_connected")
@@ -638,6 +639,9 @@ func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) 
 	if logEntry.RequestTools != "declared: git,powershell" || logEntry.ResponseTools != "returned: powershell" {
 		t.Fatalf("tool diagnostics missing: %#v", logEntry)
 	}
+	if logEntry.ToolOutcome != "truncated_no_tools" {
+		t.Fatalf("tool outcome missing: %#v", logEntry)
+	}
 	if logEntry.FallbackMode != "stream-to-nonstream" || logEntry.Normalization != "dsml" {
 		t.Fatalf("recovery diagnostics missing: %#v", logEntry)
 	}
@@ -649,6 +653,45 @@ func TestLoggingMiddlewareCapturesToolDiagnosticsWithoutArguments(t *testing.T) 
 	}
 	if strings.Contains(logEntry.RequestTools+logEntry.ResponseTools, "Get-ChildItem") {
 		t.Fatalf("tool diagnostics must not include command arguments: %#v", logEntry)
+	}
+}
+
+func TestToolOutcomeDiagnosticMarksLengthWithoutToolsOnlyForToolRequests(t *testing.T) {
+	toolReq := &provider.ChatRequest{
+		Tools: []provider.Tool{{
+			Type: "function",
+			Function: provider.ToolFunc{
+				Name: "git",
+			},
+		}},
+	}
+	truncated := &provider.ChatResponse{Choices: []provider.Choice{{
+		FinishReason: "length",
+		Message:      provider.Message{Role: "assistant", Reasoning: "partial"},
+	}}}
+
+	rec := httptest.NewRecorder()
+	setToolOutcomeDiagnosticHeader(rec, toolReq, truncated)
+	if got := rec.Header().Get("X-Proxy-Tool-Outcome"); got != "truncated_no_tools" {
+		t.Fatalf("tool outcome = %q, want truncated_no_tools", got)
+	}
+
+	withTool := &provider.ChatResponse{Choices: []provider.Choice{{
+		FinishReason: "tool_calls",
+		Message: provider.Message{ToolCalls: []provider.ToolCall{{
+			ID: "call_1", Type: "function", Function: provider.FunctionCall{Name: "git", Arguments: `{"args":["status"]}`},
+		}}},
+	}}}
+	rec = httptest.NewRecorder()
+	setToolOutcomeDiagnosticHeader(rec, toolReq, withTool)
+	if got := rec.Header().Get("X-Proxy-Tool-Outcome"); got != "" {
+		t.Fatalf("tool outcome = %q, want empty for executable tools", got)
+	}
+
+	rec = httptest.NewRecorder()
+	setToolOutcomeDiagnosticHeader(rec, &provider.ChatRequest{}, truncated)
+	if got := rec.Header().Get("X-Proxy-Tool-Outcome"); got != "" {
+		t.Fatalf("tool outcome = %q, want empty for non-tool request", got)
 	}
 }
 

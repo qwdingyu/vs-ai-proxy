@@ -132,16 +132,59 @@ func setResponseToolDiagnosticHeader(w http.ResponseWriter, resp *provider.ChatR
 	}
 }
 
+func setToolOutcomeDiagnosticHeader(w http.ResponseWriter, req *provider.ChatRequest, resp *provider.ChatResponse) {
+	if !requestDeclaresTools(req) || !chatResponseWasTruncatedWithoutTools(resp) {
+		return
+	}
+	setProxyDiagnosticHeader(w, "X-Proxy-Tool-Outcome", "truncated_no_tools")
+}
+
 func setRawResponseToolDiagnosticHeader(w http.ResponseWriter, body []byte) {
 	if summary := responseToolSummaryFromRawOpenAIJSON(body); summary != "" {
 		setProxyDiagnosticHeader(w, "X-Proxy-Response-Tools", summary)
 	}
 }
 
+func setRawToolOutcomeDiagnosticHeader(w http.ResponseWriter, req *provider.ChatRequest, body []byte) {
+	if !requestDeclaresTools(req) {
+		return
+	}
+	var resp provider.ChatResponse
+	if json.Unmarshal(body, &resp) != nil {
+		return
+	}
+	setToolOutcomeDiagnosticHeader(w, req, &resp)
+}
+
 func setStreamToolDiagnosticHeader(w http.ResponseWriter, acc *streamReasoningAccumulator) {
 	if summary := toolSummaryFromAccumulator(acc); summary != "" {
 		setProxyDiagnosticHeader(w, "X-Proxy-Response-Tools", summary)
 	}
+}
+
+func setStreamToolOutcomeDiagnosticHeader(w http.ResponseWriter, req *provider.ChatRequest, acc *streamReasoningAccumulator) {
+	if !requestDeclaresTools(req) || acc == nil || acc.hasToolCalls {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(acc.finishReason), "length") {
+		setProxyDiagnosticHeader(w, "X-Proxy-Tool-Outcome", "truncated_no_tools")
+	}
+}
+
+func chatResponseWasTruncatedWithoutTools(resp *provider.ChatResponse) bool {
+	if resp == nil || len(resp.Choices) == 0 {
+		return false
+	}
+	sawLength := false
+	for _, choice := range resp.Choices {
+		if len(choice.Message.ToolCalls) > 0 || choice.Message.FunctionCall != nil {
+			return false
+		}
+		if strings.EqualFold(strings.TrimSpace(choice.FinishReason), "length") {
+			sawLength = true
+		}
+	}
+	return sawLength
 }
 
 func setProxyFallbackMode(w http.ResponseWriter, mode string) {
@@ -182,6 +225,8 @@ func setResponseWriterDiagnosticField(w http.ResponseWriter, key, value string) 
 			target.requestTools = value
 		case "X-Proxy-Response-Tools":
 			target.responseTools = value
+		case "X-Proxy-Tool-Outcome":
+			target.toolOutcome = value
 		case "X-Proxy-Fallback-Mode":
 			target.fallbackMode = value
 		case "X-Proxy-Tool-Call-Normalization":

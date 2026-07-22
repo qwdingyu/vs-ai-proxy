@@ -369,6 +369,7 @@
     'logs.toolDiagnostics.requestId': 'Request ID',
     'logs.toolDiagnostics.request': 'Request',
     'logs.toolDiagnostics.response': 'Response',
+    'logs.toolDiagnostics.outcome': 'Outcome',
     'logs.toolDiagnostics.fallback': 'Fallback',
     'logs.toolDiagnostics.normalization': 'Normalization',
     'logs.toolDiagnostics.stream': 'Stream',
@@ -388,6 +389,7 @@
     'logs.diagnostic.summary': 'diagnostic_summary',
     'logs.diagnostic.requestTools': 'request_tools',
     'logs.diagnostic.responseTools': 'response_tools',
+    'logs.diagnostic.toolOutcome': 'tool_outcome',
     'logs.diagnostic.streamState': 'stream_state',
     'logs.diagnostic.attempts': 'attempts',
 

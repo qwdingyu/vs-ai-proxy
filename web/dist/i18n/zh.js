@@ -369,6 +369,7 @@
     'logs.toolDiagnostics.requestId': '请求ID',
     'logs.toolDiagnostics.request': '请求',
     'logs.toolDiagnostics.response': '响应',
+    'logs.toolDiagnostics.outcome': '结果',
     'logs.toolDiagnostics.fallback': '恢复',
     'logs.toolDiagnostics.normalization': '归一化',
     'logs.toolDiagnostics.stream': '流',
@@ -388,6 +389,7 @@
     'logs.diagnostic.summary': 'diagnostic_summary',
     'logs.diagnostic.requestTools': 'request_tools',
     'logs.diagnostic.responseTools': 'response_tools',
+    'logs.diagnostic.toolOutcome': 'tool_outcome',
     'logs.diagnostic.streamState': 'stream_state',
     'logs.diagnostic.attempts': 'attempts',
 

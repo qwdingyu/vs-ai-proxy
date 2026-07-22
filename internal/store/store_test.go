@@ -168,6 +168,7 @@ func TestGetLogsPageFilteredCoversDiagnosticFields(t *testing.T) {
 		NetworkPeer:       "104.21.57.81:443",
 		StreamState:       "upstream_connecting",
 		RequestTools:      "declared: create_file,get_file",
+		ToolOutcome:       "truncated_no_tools",
 	})
 	s.AddLog(RequestLog{Method: "POST", Path: "/v1/chat/completions", Provider: "deepseek", Model: "deepseek-v4-flash", StatusCode: 200, IsSuccess: true, RequestID: "req-ok"})
 
@@ -178,7 +179,7 @@ func TestGetLogsPageFilteredCoversDiagnosticFields(t *testing.T) {
 		ErrorCode:   "network",
 		RequestID:   "network-1",
 		ErrorReason: "连接异常",
-		Search:      "create_file",
+		Search:      "truncated_no_tools",
 	}
 	result := s.GetLogsPageFiltered(1, 10, filters)
 

@@ -725,7 +725,8 @@ func TestWindowsSelfUpdateScriptIncludesPreflightRetryRollbackAndCleanupChecks(t
 		"function Write-UpdateLog",
 		"function Assert-PathExists",
 		"function Move-WithRetry",
-		"$label 不存在",
+		"('[{0}] {1}' -f (Get-Date -Format o), $message)",
+		"$label + ' 不存在",
 		"新版暂存文件为空",
 		"已重试 20 次",
 		"新版暂存文件仍存在",
@@ -733,12 +734,55 @@ func TestWindowsSelfUpdateScriptIncludesPreflightRetryRollbackAndCleanupChecks(t
 		"ERROR_STACK",
 		"ERROR_POSITION",
 		"rollback restored backup",
+		"Write-UpdateLog ('rollback failed: ' + $_.Exception.Message)",
 		"--config",
 		`C:\cfg\config.json`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
+	}
+	for _, bad := range []string{
+		`Write-UpdateLog "`,
+		`throw "`,
+		`$($_.Exception.Message)`,
+		`$($_ | Out-String)`,
+	} {
+		if strings.Contains(script, bad) {
+			t.Fatalf("script contains parser-fragile form %q:\n%s", bad, script)
+		}
+	}
+}
+
+func TestWriteWindowsSelfUpdateScriptFileReplacesStaleScript(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "vs-ai-proxy-self-update.ps1")
+	oldScript := "Write-UpdateLog \"rollback failed: $($_.Exception.Message)\n" + strings.Repeat("old-tail", 64)
+	newScript := "Write-UpdateLog ('rollback failed: ' + $_.Exception.Message)\n"
+	if err := os.WriteFile(scriptPath, []byte(oldScript), 0o600); err != nil {
+		t.Fatalf("write stale script: %v", err)
+	}
+
+	if err := writeWindowsSelfUpdateScriptFile(scriptPath, newScript); err != nil {
+		t.Fatalf("writeWindowsSelfUpdateScriptFile() error = %v", err)
+	}
+
+	got, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read replaced script: %v", err)
+	}
+	if string(got) != windowsPowerShellBOM+newScript {
+		t.Fatalf("script content = %q, want exact BOM-prefixed new script %q", string(got), windowsPowerShellBOM+newScript)
+	}
+	if !strings.HasPrefix(string(got), windowsPowerShellBOM) {
+		t.Fatalf("script should include UTF-8 BOM for Windows PowerShell 5.1 compatibility")
+	}
+	temps, err := filepath.Glob(filepath.Join(dir, "vs-ai-proxy-self-update.ps1.*.tmp"))
+	if err != nil {
+		t.Fatalf("glob temp scripts: %v", err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("temporary scripts left behind: %v", temps)
 	}
 }
 
