@@ -1271,6 +1271,19 @@ func TestShouldAttemptAlternateChatModeRejectsTransportAttemptFailures(t *testin
 	}
 }
 
+func TestShouldAttemptAlternateChatModeRejectsSubmittedUpstreamHTTPFailures(t *testing.T) {
+	err := withUpstreamAttempts(
+		&providerHTTPError{StatusCode: http.StatusServiceUnavailable, Message: "unavailable"},
+		[]UpstreamAttempt{{
+			HTTPStatus: http.StatusServiceUnavailable,
+		}},
+	)
+
+	if ShouldAttemptAlternateChatMode(err) {
+		t.Fatal("submitted upstream 5xx must not trigger stream/non-stream fallback")
+	}
+}
+
 func TestOpenAIProviderListModelsReportsNonJSONBodyPreview(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

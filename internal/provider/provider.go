@@ -1091,7 +1091,10 @@ func ShouldAttemptAlternateChatMode(err error) bool {
 	if attempts := UpstreamAttempts(err); len(attempts) > 0 {
 		last := attempts[len(attempts)-1]
 		if last.HTTPStatus > 0 {
-			return last.HTTPStatus >= http.StatusInternalServerError
+			// 带 UpstreamAttempts 的 HTTP 状态来自真实 provider HTTP 调用；
+			// 此时 chat POST 已经到达上游并返回了响应，不能再通过流式/非流式
+			// 互切发起第二次同内容请求。provider 内部短重试已经在返回该错误前完成。
+			return false
 		}
 		if strings.TrimSpace(last.Stage) != "" {
 			return false
