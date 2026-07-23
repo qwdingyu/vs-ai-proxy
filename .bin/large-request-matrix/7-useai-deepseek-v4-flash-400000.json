@@ -7,7 +7,7 @@
   "model": "deepseek-v4-flash",
   "provider_id": "useai",
   "mode": "proxy-only",
-  "cooldown_seconds": 0,
+  "cooldown_seconds": 10,
   "direct": {
     "curl_rc": 0,
     "status": "000",
@@ -23,17 +23,17 @@
   "proxy": {
     "curl_rc": 0,
     "status": "200",
-    "ttfb_ms": 4206.11,
-    "total_ms": 4206.737,
+    "ttfb_ms": 6730.125,
+    "total_ms": 6730.555,
     "upload_bytes": 400008,
-    "download_bytes": 8697,
-    "sse_events": 32,
+    "download_bytes": 7609,
+    "sse_events": 28,
     "sse_done": true,
     "error_kind": null
   },
   "proxy_diagnostic": {
     "status_code": 200,
-    "elapsed_ms": 4205.507995999999,
+    "elapsed_ms": 6728.3875020000005,
     "request_bytes": 400008,
     "upstream_bytes": 400000,
     "stream_state": "downstream_started",

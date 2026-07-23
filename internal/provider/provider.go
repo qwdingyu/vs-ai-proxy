@@ -1026,12 +1026,9 @@ func (p *OpenAIProvider) shouldRetryOpenAIProviderError(err error) bool {
 	if errors.As(err, &transportErr) {
 		return isRetryableUpstreamTransportError(transportErr)
 	}
-	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "empty reply") ||
-		strings.Contains(lower, "connection reset") ||
-		strings.Contains(lower, "eof") ||
-		strings.Contains(lower, "stream error") ||
-		strings.Contains(lower, "timeout")
+	// 没有 structured transport stage 时，只允许“明显仍在建连阶段”的连接类错误短重试。
+	// 不匹配裸 eof/timeout/stream error：这些经常出现在已提交请求之后，字符串启发式会误放大非幂等 chat POST。
+	return isRetryableConnectionBreak(err)
 }
 
 func isRetryableUpstreamTransportError(err *upstreamTransportError) bool {

@@ -93,9 +93,15 @@ record = {
     'target_bytes': int(target_bytes),
     'script_rc': int(rc),
     'direct_status': result.get('direct_status') or direct.get('status'),
+    'direct_curl_rc': direct.get('curl_rc'),
     'direct_elapsed_ms': result.get('direct_elapsed_ms') or direct.get('total_ms'),
+    'direct_sse_done': direct.get('sse_done'),
+    'direct_error_kind': direct.get('error_kind'),
     'proxy_status': result.get('proxy_status') or proxy.get('status'),
+    'proxy_curl_rc': proxy.get('curl_rc'),
     'proxy_elapsed_ms': result.get('proxy_elapsed_ms') or proxy.get('total_ms'),
+    'proxy_sse_done': proxy.get('sse_done'),
+    'proxy_error_kind': proxy.get('error_kind'),
     'error_code': last.get('error_code'),
     'request_bytes': request_bytes,
     'upstream_bytes': upstream_bytes,
@@ -152,15 +158,23 @@ except FileNotFoundError:
 
 def is_success(record):
     # 成功率必须按运行模式判断：proxy-only 不要求 direct 成功，
-    # direct-proxy 则要求两侧都 2xx，避免把上游直连失败误算成代理稳定。
-    proxy_status = str(record.get('proxy_status') or '')
-    direct_status = str(record.get('direct_status') or '')
+    # direct-proxy 则要求两侧都完整成功，避免把上游直连失败误算成代理稳定。
+    # 本脚本固定发送 stream=true；HTTP 2xx 但 curl 中断或缺 data:[DONE]
+    # 代表半截流，不能算成功，否则发布前 soak 会虚报稳定性。
+    def endpoint_ok(prefix):
+        status = str(record.get(f'{prefix}_status') or '')
+        return (
+            status.startswith('2') and
+            int(record.get(f'{prefix}_curl_rc') or 0) == 0 and
+            record.get(f'{prefix}_error_kind') in (None, '') and
+            record.get(f'{prefix}_sse_done') is True
+        )
     mode = record.get('mode') or ''
     if mode == 'direct-only':
-        return direct_status.startswith('2')
+        return endpoint_ok('direct')
     if mode == 'proxy-only':
-        return proxy_status.startswith('2')
-    return direct_status.startswith('2') and proxy_status.startswith('2')
+        return endpoint_ok('proxy')
+    return endpoint_ok('direct') and endpoint_ok('proxy')
 
 def percentile(values, pct):
     values = sorted(v for v in values if isinstance(v, (int, float)))
@@ -188,6 +202,8 @@ for (provider_id, model, target_bytes), items in sorted(groups.items()):
         'success_rate': round(len(successes) / len(items), 4) if items else 0,
         'error_codes': dict(Counter(str(item.get('error_code') or '-') for item in items)),
         'stream_states': dict(Counter(str(item.get('stream_state') or '-') for item in items)),
+        'direct_error_kinds': dict(Counter(str(item.get('direct_error_kind') or '-') for item in items)),
+        'proxy_error_kinds': dict(Counter(str(item.get('proxy_error_kind') or '-') for item in items)),
         'network_peers': dict(Counter(str(item.get('network_peer') or '-') for item in items)),
         'proxy_elapsed_p50_ms': percentile(proxy_elapsed, 50),
         'proxy_elapsed_p95_ms': percentile(proxy_elapsed, 95),
@@ -204,7 +220,8 @@ print('\n===== matrix summary =====')
 for r in records:
     print(
         f"round={r.get('round')}\t{r.get('provider_id')}\t{r.get('model')}\t{r.get('target_bytes')}\t"
-        f"direct={r.get('direct_status')}\tproxy={r.get('proxy_status')}\t"
+        f"direct={r.get('direct_status')}/rc={r.get('direct_curl_rc')}/done={r.get('direct_sse_done')}\t"
+        f"proxy={r.get('proxy_status')}/rc={r.get('proxy_curl_rc')}/done={r.get('proxy_sse_done')}\t"
         f"code={r.get('error_code') or '-'}\tstate={r.get('stream_state') or '-'}\t"
         f"peer={r.get('network_peer') or '-'}\treq={r.get('request_bytes')}\t"
         f"up={r.get('upstream_bytes')}\tdelta={r.get('delta_bytes')}\t"
@@ -216,6 +233,7 @@ for item in aggregate:
         f"{item['provider_id']}\t{item['model']}\t{item['target_bytes']}\t"
         f"runs={item['runs']}\tsuccess_rate={item['success_rate']:.2%}\t"
         f"errors={item['error_codes']}\tstates={item['stream_states']}\t"
+        f"direct_err={item['direct_error_kinds']}\tproxy_err={item['proxy_error_kinds']}\t"
         f"proxy_p50={item['proxy_elapsed_p50_ms']}\tproxy_p95={item['proxy_elapsed_p95_ms']}"
     )
 print(f"\n矩阵结果: {summary_path}")

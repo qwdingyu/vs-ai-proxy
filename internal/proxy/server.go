@@ -363,6 +363,9 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		ww.finalizeRequestStatus(reqWithID)
 
 		elapsed := time.Since(start).Seconds() * 1000
+		if s.logger != nil && shouldWarnLargeChatRequest(reqWithID.URL.Path, reqWithID.ContentLength, ww.upstreamBytes) {
+			s.logger.Warn("大请求体: path=%s request_id=%s request_bytes=%s upstream_bytes=%s action=减少会话历史/附件或切换更稳定渠道", reqWithID.URL.Path, requestID, humanBytes(reqWithID.ContentLength), humanBytes(ww.upstreamBytes))
+		}
 
 		// 优先使用 responseWriter 上 handler 直接设置的字段，
 		// 兜底从响应头读取（兼容测试代码等不走 handler 直接设置头部的路径）。
@@ -436,7 +439,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			EffectiveTimeoutSeconds:  effectiveTimeout,
 			StatusCode:               ww.statusCode,
 			ElapsedMs:                elapsed,
-			IsSuccess:                ww.statusCode < 400,
+			IsSuccess:                requestLogIsSuccess(ww.statusCode, logErrorCode),
 			ErrorCode:                logErrorCode,
 			ErrorMessage:             errorMessage,
 			ErrorHint:                errorHint,
@@ -782,7 +785,6 @@ func (w *streamAttemptWriter) HasWritten() bool {
 	return w.wrote
 }
 
-// handleRoot 根路径
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -900,6 +902,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				if streamWriter.HasWritten() {
 					// 已经写出 SSE 后不能切换候选，但协议截断/错误帧仍然是 provider 失败，
 					// 不能记成成功污染健康排序和后续诊断。
+					markWrittenStreamFailure(w, attempt)
 					registry.RecordCandidateFailure(prov.Name(), err)
 					return
 				}
@@ -1236,9 +1239,13 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 				attempts = append(attempts, attempt)
 				s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
+				if isClientGoneError(err) {
+					return
+				}
 				if streamWriter.HasWritten() {
 					// 已经写出部分 Ollama 响应后发生协议/网络错误，不能切换候选，
 					// 但仍必须记录 provider 失败，避免健康排序把半截响应当成功。
+					markWrittenStreamFailure(w, attempt)
 					registry.RecordCandidateFailure(prov.Name(), err)
 					return
 				}
@@ -2056,15 +2063,6 @@ func requestContextWithTimeout(parent context.Context, timeoutSeconds int) (cont
 	return context.WithTimeout(parent, time.Duration(timeoutSeconds)*time.Second)
 }
 
-func canAttemptAlternateChatMode(cfg *config.AppConfig, ctx context.Context, err error) bool {
-	// 流式/非流式互相兜底可能产生第二次上游请求，必须受同一个防御开关控制。
-	// 客户端已取消时不兜底，避免用户离开后代理继续消耗上游额度。
-	return proxyDefenseEnabled(cfg) && ctx != nil && ctx.Err() == nil && provider.ShouldAttemptAlternateChatMode(err)
-}
-
-// alternateChatModeFailure 保留备用模式和初始模式的完整失败链。
-// 备用模式是最后实际执行的步骤，放在错误前部并使用 %w，便于诊断分类和
-// errors.Is/As 反映最接近客户端结果的原因；初始错误仍保留用于现场还原。
 func alternateChatModeFailure(initialErr, fallbackErr error) error {
 	if fallbackErr == nil {
 		return initialErr
@@ -2073,15 +2071,6 @@ func alternateChatModeFailure(initialErr, fallbackErr error) error {
 		return fallbackErr
 	}
 	return fmt.Errorf("备用聊天模式失败: %w（初始模式错误: %v）", fallbackErr, initialErr)
-}
-
-func shouldStopCandidateFallback(category string) bool {
-	switch category {
-	case "client_gone", "upstream_quota_exhausted", "upstream_auth_error", "upstream_rate_limit", "upstream_payload_too_large", "upstream_message_error", "upstream_request_error", "upstream_no_response", "upstream_stream_interrupted":
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *Server) logProviderAttemptFailureForRequest(ctx context.Context, requestedModel, modelID, providerName string, attempt attemptDiagnostic) {

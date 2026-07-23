@@ -7,7 +7,7 @@
   "model": "deepseek-v4-flash",
   "provider_id": "useai",
   "mode": "proxy-only",
-  "cooldown_seconds": 0,
+  "cooldown_seconds": 10,
   "direct": {
     "curl_rc": 0,
     "status": "000",
@@ -22,23 +22,28 @@
   },
   "proxy": {
     "curl_rc": 0,
-    "status": "200",
-    "ttfb_ms": 7444.88,
-    "total_ms": 7445.174,
+    "status": "502",
+    "ttfb_ms": 3072.621,
+    "total_ms": 3072.994,
     "upload_bytes": 400008,
-    "download_bytes": 5117,
-    "sse_events": 19,
-    "sse_done": true,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
     "error_kind": null
   },
   "proxy_diagnostic": {
-    "status_code": 200,
-    "elapsed_ms": 7444.286022,
+    "status_code": 502,
+    "elapsed_ms": 3070.387385,
     "request_bytes": 400008,
     "upstream_bytes": 400000,
-    "stream_state": "downstream_started",
+    "stream_state": "upstream_waiting_response_headers",
     "configured_timeout_seconds": 90,
     "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3070ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
     "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
   }
 }

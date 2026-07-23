@@ -1,8 +1,11 @@
 {"payload_shape": "message", "request_bytes": 400000, "messages_bytes": 379286, "tools_bytes": 20595, "tool_count": 20, "model": "deepseek-v4-flash", "provider_id": "deepseek"}
 
 == 1. direct upstream: https://api.deepseek.com/chat/completions ==
+skip direct upstream because MODE=proxy-only
 
 == 2. local proxy: build and start ==
+
+== cooldown: sleep 10s before proxy request ==
 
 == 3. proxy request: /v1/chat/completions ==
 {
@@ -13,43 +16,39 @@
   "tool_count": 20,
   "model": "deepseek-v4-flash",
   "provider_id": "deepseek",
-  "mode": "direct-proxy",
-  "cooldown_seconds": 0,
+  "mode": "proxy-only",
+  "cooldown_seconds": 10,
   "direct": {
     "curl_rc": 0,
-    "status": "402",
-    "ttfb_ms": 1907.761,
-    "total_ms": 1908.056,
-    "upload_bytes": 400000,
-    "download_bytes": 111,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
     "sse_events": 0,
     "sse_done": false,
-    "error_kind": null
+    "error_kind": null,
+    "skipped": true
   },
   "proxy": {
     "curl_rc": 0,
-    "status": "502",
-    "ttfb_ms": 777.22,
-    "total_ms": 777.681,
+    "status": "200",
+    "ttfb_ms": 1104.236,
+    "total_ms": 1105.206,
     "upload_bytes": 400011,
-    "download_bytes": 673,
-    "sse_events": 0,
-    "sse_done": false,
+    "download_bytes": 7202,
+    "sse_events": 23,
+    "sse_done": true,
     "error_kind": null
   },
   "proxy_diagnostic": {
-    "status_code": 502,
-    "elapsed_ms": 776.1863450000001,
+    "status_code": 200,
+    "elapsed_ms": 1103.122631,
     "request_bytes": 400011,
     "upstream_bytes": 400028,
-    "stream_state": "upstream_connecting",
+    "stream_state": "downstream_started",
     "configured_timeout_seconds": 90,
     "effective_timeout_seconds": 90,
-    "error_code": "upstream_api_error",
-    "error_reason": "上游拒绝请求",
-    "error_action": "检查账号状态和模型名称。",
-    "diagnostic_summary": "上游拒绝请求；耗时 776ms；请求体 390.6 KB；上游体 390.7 KB；流状态 upstream_connecting",
-    "attempts_summary": "deepseek/deepseek-v4-flash 759ms upstream_api_error (upstream_attempts=1 last=http_402/upstream_api_error)",
     "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
   }
 }

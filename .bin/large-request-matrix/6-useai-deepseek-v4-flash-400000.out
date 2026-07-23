@@ -5,6 +5,8 @@ skip direct upstream because MODE=proxy-only
 
 == 2. local proxy: build and start ==
 
+== cooldown: sleep 10s before proxy request ==
+
 == 3. proxy request: /v1/chat/completions ==
 {
   "payload_shape": "message",
@@ -15,7 +17,7 @@ skip direct upstream because MODE=proxy-only
   "model": "deepseek-v4-flash",
   "provider_id": "useai",
   "mode": "proxy-only",
-  "cooldown_seconds": 0,
+  "cooldown_seconds": 10,
   "direct": {
     "curl_rc": 0,
     "status": "000",
@@ -31,27 +33,27 @@ skip direct upstream because MODE=proxy-only
   "proxy": {
     "curl_rc": 0,
     "status": "502",
-    "ttfb_ms": 5670.335,
-    "total_ms": 5670.649,
+    "ttfb_ms": 3077.051,
+    "total_ms": 3077.247,
     "upload_bytes": 400008,
-    "download_bytes": 488,
+    "download_bytes": 688,
     "sse_events": 0,
     "sse_done": false,
     "error_kind": null
   },
   "proxy_diagnostic": {
     "status_code": 502,
-    "elapsed_ms": 5669.554143,
+    "elapsed_ms": 3074.444401,
     "request_bytes": 400008,
     "upstream_bytes": 400000,
-    "stream_state": "upstream_connected",
+    "stream_state": "upstream_waiting_response_headers",
     "configured_timeout_seconds": 90,
     "effective_timeout_seconds": 90,
-    "error_code": "upstream_stream_interrupted",
-    "error_reason": "上游响应流中断",
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
     "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
-    "diagnostic_summary": "上游响应流中断；耗时 5670ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected",
-    "attempts_summary": "useai/deepseek-v4-flash 5.7s upstream_stream_interrupted",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3074ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
     "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
   }
 }

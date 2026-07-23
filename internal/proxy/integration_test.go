@@ -3304,6 +3304,41 @@ func TestOpenAIToOllamaStreamReadErrorClassifiesAsUpstreamInterrupted(t *testing
 	}
 }
 
+func TestStreamingPartialUpstreamFailureIsLoggedAsFailureAfterDownstreamStarted(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`,
+		"",
+	}, "\n")
+	prov := newFakeProvider("openai", true, []string{"gpt-test"}, nil, stream)
+	prov.streamReadErr = io.ErrUnexpectedEOF
+	server := newOpenServer(prov)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-test","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("client-facing status = %d, want 200 after downstream stream started; body=%s", rec.Code, rec.Body.String())
+	}
+	logs := server.store.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	logEntry := logs[0]
+	if logEntry.StatusCode != http.StatusBadGateway || logEntry.IsSuccess {
+		t.Fatalf("log status/success = %d/%v, want 502/false; log=%#v", logEntry.StatusCode, logEntry.IsSuccess, logEntry)
+	}
+	if logEntry.ErrorCode != "upstream_stream_interrupted" {
+		t.Fatalf("log error_code = %q, want upstream_stream_interrupted; log=%#v", logEntry.ErrorCode, logEntry)
+	}
+	if !strings.Contains(logEntry.AttemptsSummary, "upstream_stream_interrupted") {
+		t.Fatalf("attempts_summary = %q, want upstream_stream_interrupted", logEntry.AttemptsSummary)
+	}
+}
+
 func TestOllamaChatPreservesMessageAndOptionExtensions(t *testing.T) {
 	prov := newFakeProvider("ollama", true, []string{"llama"}, &fakeChatResponse{Model: "llama", Content: "ok"}, "")
 	server := newOpenServer(prov)
