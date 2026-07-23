@@ -601,6 +601,41 @@ func TestLoggingMiddlewareMarksClientGoneAfterPartialStream(t *testing.T) {
 	}
 }
 
+func TestLoggingMiddlewareDoesNotOverwriteExplicitUpstreamFailureWhenContextCanceled(t *testing.T) {
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setProxyDiagnosticHeader(w, "X-Proxy-Error-Code", "upstream_no_response")
+		setProxyDiagnosticHeader(w, "X-Proxy-Error-Message", "上游接收后未响应")
+		setProxyDiagnosticHeader(w, "X-Proxy-Error-Hint", "稍后重试，或切换到更稳定的同模型渠道。")
+		setProxyDiagnosticHeader(w, "X-Proxy-Stream-State", "upstream_waiting_response_headers")
+		w.WriteHeader(http.StatusBadGateway)
+		cancel()
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logs := st.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if logs[0].StatusCode != http.StatusBadGateway || logs[0].IsSuccess {
+		t.Fatalf("log status = %d success=%v, want 502 false", logs[0].StatusCode, logs[0].IsSuccess)
+	}
+	if logs[0].ErrorCode != "upstream_no_response" {
+		t.Fatalf("error_code = %q, want upstream_no_response", logs[0].ErrorCode)
+	}
+	if logs[0].CancelReason != "" {
+		t.Fatalf("cancel_reason = %q, want empty for explicit upstream failure", logs[0].CancelReason)
+	}
+	if logs[0].StreamState != "upstream_waiting_response_headers" {
+		t.Fatalf("stream_state = %q, want upstream_waiting_response_headers", logs[0].StreamState)
+	}
+}
+
 func TestEnrichClientGoneDiagnosticsNearClientDeadline(t *testing.T) {
 	code, message, hint := enrichClientGoneDiagnostics(499, 99_995, 1_075_855, "client_gone", "客户端取消", "原始提示")
 

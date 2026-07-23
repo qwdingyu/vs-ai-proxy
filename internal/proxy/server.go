@@ -706,9 +706,14 @@ func (w *responseWriter) finalizeRequestStatus(r *http.Request) {
 	if w == nil || r == nil || r.Context().Err() == nil {
 		return
 	}
-	if w.statusCode < http.StatusBadRequest {
-		w.statusCode = 499
+	// 这里只能补记“处理链路没有给出明确失败归因”的下游断开。
+	// 如果 handler 已经写出 4xx/5xx，或已经通过 X-Proxy-Error-Code 标明
+	// upstream_no_response / upstream_stream_interrupted 等上游主因，不能在收尾阶段
+	// 因 request context 关闭而覆盖成 client_gone，否则会把真实上游失败批量误报为客户端断开。
+	if w.statusCode >= http.StatusBadRequest || strings.TrimSpace(w.Header().Get("X-Proxy-Error-Code")) != "" {
+		return
 	}
+	w.statusCode = 499
 	w.Header().Set("X-Proxy-Error-Code", "client_gone")
 	w.Header().Set("X-Proxy-Error-Message", "客户端已取消请求。")
 	w.Header().Set("X-Proxy-Error-Hint", "重新发送；若反复出现，请新建会话。")
