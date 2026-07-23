@@ -72,6 +72,49 @@ type ModelTokenStatistics struct {
 	ReasoningTokens    int64  `json:"reasoning_tokens"`
 }
 
+// StabilityBreakdown 是稳定性摘要中的 Top-N 计数项。
+// 使用数组而不是 map，保证 JSON 顺序稳定，方便人工复制、测试断言和长期对比。
+type StabilityBreakdown struct {
+	Key   string `json:"key"`
+	Count int    `json:"count"`
+}
+
+// StabilityFailureSample 只保留最近失败中排障最需要的字段。
+// 不直接嵌入完整 RequestLog，避免 /diagnostics/summary 在日志很大时变成第二个日志接口。
+type StabilityFailureSample struct {
+	RequestID         string    `json:"request_id,omitempty"`
+	Timestamp         time.Time `json:"timestamp,omitempty"`
+	StatusCode        int       `json:"status_code,omitempty"`
+	ErrorCode         string    `json:"error_code,omitempty"`
+	ErrorReason       string    `json:"error_reason,omitempty"`
+	DiagnosticSummary string    `json:"diagnostic_summary,omitempty"`
+	CancelReason      string    `json:"cancel_reason,omitempty"`
+	StreamState       string    `json:"stream_state,omitempty"`
+	RequestBytes      int64     `json:"request_bytes,omitempty"`
+	UpstreamBytes     int64     `json:"upstream_bytes,omitempty"`
+	ElapsedMs         float64   `json:"elapsed_ms,omitempty"`
+}
+
+// StabilitySummary 按 provider/model/upstream 汇总当前保留日志中的近期稳定性。
+// 这是诊断视图，不参与路由、重试或熔断决策，避免观测逻辑反向影响核心透传路径。
+type StabilitySummary struct {
+	Provider         string                  `json:"provider,omitempty"`
+	Model            string                  `json:"model,omitempty"`
+	Upstream         string                  `json:"upstream,omitempty"`
+	Runs             int                     `json:"runs"`
+	Successes        int                     `json:"successes"`
+	Failures         int                     `json:"failures"`
+	SuccessRate      float64                 `json:"success_rate"`
+	TopErrorCodes    []StabilityBreakdown    `json:"top_error_codes,omitempty"`
+	TopStreamStates  []StabilityBreakdown    `json:"top_stream_states,omitempty"`
+	TopCancelReasons []StabilityBreakdown    `json:"top_cancel_reasons,omitempty"`
+	RequestBytesP50  int64                   `json:"request_bytes_p50,omitempty"`
+	RequestBytesP95  int64                   `json:"request_bytes_p95,omitempty"`
+	ElapsedMsP50     float64                 `json:"elapsed_ms_p50,omitempty"`
+	ElapsedMsP95     float64                 `json:"elapsed_ms_p95,omitempty"`
+	LatestFailure    *StabilityFailureSample `json:"latest_failure,omitempty"`
+}
+
 // TokenPeriodStatistics 是首页日/周/月用量的周期桶。
 // 这里的 RequestCount 是“有 provider/model/upstream 归属的请求数”，
 // UsageReportedCount 才是“上游明确返回 usage 的请求数”。这两个字段必须分开，
@@ -273,6 +316,218 @@ func (s *Store) GetLatestFailure() (RequestLog, bool) {
 		}
 	}
 	return RequestLog{}, false
+}
+
+// GetRecentStabilitySummary 汇总最近 limit 条可归属到 provider/model/upstream 的请求。
+// limit <= 0 时使用当前全部保留日志；该方法只做观测聚合，不修改累计 Statistics。
+func (s *Store) GetRecentStabilitySummary(limit int) []StabilitySummary {
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
+
+	if limit <= 0 || limit > len(s.logs) {
+		limit = len(s.logs)
+	}
+	if limit == 0 {
+		return []StabilitySummary{}
+	}
+
+	start := len(s.logs) - limit
+	groups := make(map[string]*stabilityAccumulator)
+	for i := start; i < len(s.logs); i++ {
+		log := s.logs[i]
+		provider := strings.TrimSpace(log.Provider)
+		model := strings.TrimSpace(log.Model)
+		upstream := strings.TrimSpace(log.Upstream)
+		if provider == "" && model == "" && upstream == "" {
+			// 健康检查、静态资源和其他无模型归属请求不进入模型稳定性判断，
+			// 否则会稀释真正的 provider/model 失败率。
+			continue
+		}
+
+		key := modelStatsKey(provider, model, upstream)
+		acc := groups[key]
+		if acc == nil {
+			acc = &stabilityAccumulator{
+				summary: StabilitySummary{Provider: provider, Model: model, Upstream: upstream},
+			}
+			groups[key] = acc
+		}
+		acc.add(log)
+	}
+
+	out := make([]StabilitySummary, 0, len(groups))
+	for _, acc := range groups {
+		out = append(out, acc.finish())
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Failures != out[j].Failures {
+			return out[i].Failures > out[j].Failures
+		}
+		if out[i].SuccessRate != out[j].SuccessRate {
+			return out[i].SuccessRate < out[j].SuccessRate
+		}
+		if out[i].Runs != out[j].Runs {
+			return out[i].Runs > out[j].Runs
+		}
+		left := modelStatsKey(out[i].Provider, out[i].Model, out[i].Upstream)
+		right := modelStatsKey(out[j].Provider, out[j].Model, out[j].Upstream)
+		return left < right
+	})
+	return out
+}
+
+type stabilityAccumulator struct {
+	summary       StabilitySummary
+	errorCodes    map[string]int
+	streamStates  map[string]int
+	cancelReasons map[string]int
+	requestBytes  []int64
+	elapsedMs     []float64
+}
+
+func (a *stabilityAccumulator) add(log RequestLog) {
+	a.summary.Runs++
+	if log.IsSuccess {
+		a.summary.Successes++
+	} else {
+		a.summary.Failures++
+		a.incrementErrorCode(log.ErrorCode)
+		a.summary.LatestFailure = stabilityFailureSample(log)
+	}
+	a.incrementStreamState(log.StreamState)
+	a.incrementCancelReason(log.CancelReason)
+	if log.RequestBytes > 0 {
+		a.requestBytes = append(a.requestBytes, log.RequestBytes)
+	}
+	if log.ElapsedMs > 0 {
+		a.elapsedMs = append(a.elapsedMs, log.ElapsedMs)
+	}
+}
+
+func (a *stabilityAccumulator) incrementErrorCode(value string) {
+	if a.errorCodes == nil {
+		a.errorCodes = make(map[string]int)
+	}
+	a.errorCodes[stabilityBucket(value, "unknown_failure")]++
+}
+
+func (a *stabilityAccumulator) incrementStreamState(value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if a.streamStates == nil {
+		a.streamStates = make(map[string]int)
+	}
+	a.streamStates[value]++
+}
+
+func (a *stabilityAccumulator) incrementCancelReason(value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if a.cancelReasons == nil {
+		a.cancelReasons = make(map[string]int)
+	}
+	a.cancelReasons[value]++
+}
+
+func (a *stabilityAccumulator) finish() StabilitySummary {
+	summary := a.summary
+	if summary.Runs > 0 {
+		summary.SuccessRate = float64(summary.Successes) / float64(summary.Runs)
+	}
+	summary.TopErrorCodes = topStabilityBreakdowns(a.errorCodes, 5)
+	summary.TopStreamStates = topStabilityBreakdowns(a.streamStates, 5)
+	summary.TopCancelReasons = topStabilityBreakdowns(a.cancelReasons, 5)
+	summary.RequestBytesP50 = percentileInt64(a.requestBytes, 50)
+	summary.RequestBytesP95 = percentileInt64(a.requestBytes, 95)
+	summary.ElapsedMsP50 = percentileFloat64(a.elapsedMs, 50)
+	summary.ElapsedMsP95 = percentileFloat64(a.elapsedMs, 95)
+	return summary
+}
+
+func stabilityBucket(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func stabilityFailureSample(log RequestLog) *StabilityFailureSample {
+	return &StabilityFailureSample{
+		RequestID:         log.RequestID,
+		Timestamp:         log.Timestamp,
+		StatusCode:        log.StatusCode,
+		ErrorCode:         log.ErrorCode,
+		ErrorReason:       log.ErrorReason,
+		DiagnosticSummary: log.DiagnosticSummary,
+		CancelReason:      log.CancelReason,
+		StreamState:       log.StreamState,
+		RequestBytes:      log.RequestBytes,
+		UpstreamBytes:     log.UpstreamBytes,
+		ElapsedMs:         log.ElapsedMs,
+	}
+}
+
+func topStabilityBreakdowns(counts map[string]int, limit int) []StabilityBreakdown {
+	if len(counts) == 0 || limit == 0 {
+		return nil
+	}
+	items := make([]StabilityBreakdown, 0, len(counts))
+	for key, count := range counts {
+		items = append(items, StabilityBreakdown{Key: key, Count: count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Count != items[j].Count {
+			return items[i].Count > items[j].Count
+		}
+		return items[i].Key < items[j].Key
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items
+}
+
+func percentileInt64(values []int64, percentile int) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]int64(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	return sorted[nearestRankIndex(len(sorted), percentile)]
+}
+
+func percentileFloat64(values []float64, percentile int) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+	return sorted[nearestRankIndex(len(sorted), percentile)]
+}
+
+func nearestRankIndex(length, percentile int) int {
+	if length <= 1 {
+		return 0
+	}
+	if percentile <= 0 {
+		return 0
+	}
+	if percentile >= 100 {
+		return length - 1
+	}
+	index := (percentile*length + 99) / 100
+	if index <= 0 {
+		return 0
+	}
+	if index > length {
+		return length - 1
+	}
+	return index - 1
 }
 
 func matchesLogFilters(log RequestLog, filters LogFilters) bool {

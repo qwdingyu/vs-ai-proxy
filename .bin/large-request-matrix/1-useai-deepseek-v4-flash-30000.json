@@ -1,0 +1,44 @@
+{
+  "payload_shape": "message",
+  "request_bytes": 30000,
+  "messages_bytes": 9286,
+  "tools_bytes": 20595,
+  "tool_count": 20,
+  "model": "deepseek-v4-flash",
+  "provider_id": "useai",
+  "mode": "proxy-only",
+  "cooldown_seconds": 0,
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 2550.047,
+    "total_ms": 2550.415,
+    "upload_bytes": 30008,
+    "download_bytes": 7601,
+    "sse_events": 28,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 2544.778284,
+    "request_bytes": 30008,
+    "upstream_bytes": 30000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}

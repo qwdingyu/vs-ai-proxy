@@ -1465,6 +1465,12 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 	acc := newStreamReasoningAccumulator()
 	buffered, dsmlResp, detectedDSML, probeErr := probeOpenAIStreamForDSML(scanner, allowedToolNames(req))
 	if probeErr != nil {
+		// DSML 探测发生在向下游写首个 SSE 之前。若 scanner 报的是 EOF/连接重置，
+		// 说明上游响应流在应用层终态前断开；若是解析/大小限制错误，仍保留
+		// proxy_parse_error，不能把协议不兼容虚报成网络问题。
+		if isLikelyUpstreamStreamReadError(probeErr) {
+			return upstreamStreamInterruptedError("OpenAI SSE", probeErr)
+		}
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", probeErr)
 	}
 	if detectedDSML {
@@ -1503,7 +1509,10 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 		if flushErr := eventProcessor.flushPendingBeforeReadError(); flushErr != nil {
 			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", flushErr)
 		}
-		return err
+		// scanner.Err 非空表示底层 reader 在 [DONE] 或合法 finish_reason 前失败。
+		// 此时不能 fallback 到另一种模式：可能已经向 VS 写过 token，自动重放会让
+		// 用户端看到两段不一致的会话或重复工具调用。
+		return upstreamStreamInterruptedError("OpenAI SSE", err)
 	}
 	if err := eventProcessor.finish(); err != nil {
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
@@ -1530,6 +1539,35 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 	s.cacheStreamAccumulator(acc)
 	setStreamToolDiagnosticHeader(w, acc)
 	return nil
+}
+
+func upstreamStreamInterruptedError(protocol string, err error) error {
+	if err == nil {
+		return nil
+	}
+	protocol = strings.TrimSpace(protocol)
+	if protocol == "" {
+		protocol = "stream"
+	}
+	return fmt.Errorf("上游流中断: %s: %w", protocol, err)
+}
+
+func isLikelyUpstreamStreamReadError(err error) bool {
+	// 只把底层读失败归类为上游流中断。应用层错误，例如 SSE 过大、
+	// JSON 无法解析、工具协议不完整，必须继续走 proxy_parse_error，
+	// 这样发布验证时才能区分“上游链路断开”和“代理协议处理 bug”。
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "eof") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "broken pipe") ||
+		strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "use of closed network connection")
 }
 
 // streamOllamaToOpenAI 将 Ollama NDJSON 流转换为 OpenAI SSE。
@@ -1594,7 +1632,7 @@ func (s *Server) streamOllamaToOpenAI(w http.ResponseWriter, r *http.Request, pr
 	}
 
 	if err := scanner.Err(); err != nil {
-		return err
+		return upstreamStreamInterruptedError("Ollama NDJSON", err)
 	}
 	if err := validateOllamaStreamCompletion(ollamaAcc); err != nil {
 		return fmt.Errorf("解析 Ollama 流失败: %w", err)
@@ -1658,7 +1696,10 @@ func (s *Server) streamOllamaPassthrough(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return err
+		return upstreamStreamInterruptedError("Ollama NDJSON", err)
+	}
+	if err := validateOllamaStreamCompletion(acc); err != nil {
+		return fmt.Errorf("解析 Ollama 流失败: %w", err)
 	}
 	setResponseUsage(w, acc.usage)
 	s.cacheStreamAccumulator(acc)
@@ -1710,7 +1751,7 @@ func (s *Server) streamOpenAIToOllama(w http.ResponseWriter, r *http.Request, pr
 		if flushErr := eventProcessor.flushPendingBeforeReadError(); flushErr != nil {
 			return fmt.Errorf("解析响应失败: OpenAI SSE: %w", flushErr)
 		}
-		return err
+		return upstreamStreamInterruptedError("OpenAI SSE", err)
 	}
 	if err := eventProcessor.finish(); err != nil {
 		return fmt.Errorf("解析响应失败: OpenAI SSE: %w", err)
@@ -2031,7 +2072,7 @@ func alternateChatModeFailure(initialErr, fallbackErr error) error {
 
 func shouldStopCandidateFallback(category string) bool {
 	switch category {
-	case "client_gone", "upstream_quota_exhausted", "upstream_auth_error", "upstream_rate_limit", "upstream_payload_too_large", "upstream_message_error", "upstream_request_error":
+	case "client_gone", "upstream_quota_exhausted", "upstream_auth_error", "upstream_rate_limit", "upstream_payload_too_large", "upstream_message_error", "upstream_request_error", "upstream_no_response", "upstream_stream_interrupted":
 		return true
 	default:
 		return false

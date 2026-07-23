@@ -212,6 +212,95 @@ var errProviderResponseBodyTooLarge = errors.New("上游响应体超过大小限
 // ErrOpenAIStreamTooLarge 表示待聚合的 OpenAI SSE 超过调用方指定的总字节上限。
 var ErrOpenAIStreamTooLarge = errors.New("OpenAI SSE 响应超过大小限制")
 
+// UpstreamAttempt 描述一次真实发往上游 provider 的 HTTP 尝试。
+//
+// 设计边界：
+//  1. 一次客户端请求可能在 provider 内部发生短重试，因此 proxy 不能只记录最后一个 error 文本。
+//  2. 诊断必须能区分“尚未提交请求”和“请求已写出但上游未响应”，否则会把上游/网关问题虚报成本机连接问题。
+//  3. 这里刻意只保存阶段、耗时、HTTP 状态码和脱敏错误摘要；不保存 URL、Header、请求体或响应体，
+//     避免诊断日志泄漏 API Key 或用户提示词。
+type UpstreamAttempt struct {
+	Stage      string        // httptrace 记录的最后网络阶段，例如 connecting / waiting_response_headers。
+	Elapsed    time.Duration // 单次 HTTP 尝试耗时，不包含 provider 外层候选 fallback 耗时。
+	HTTPStatus int           // 上游已返回 HTTP 响应时的状态码；传输层失败时为 0。
+	Error      string        // 单次尝试的脱敏错误文本，用于后续 proxy 分类和日志摘要。
+}
+
+// upstreamAttemptCarrier 是 provider 错误携带结构化上游尝试明细的内部协议。
+// proxy 层通过 errors.As 读取它，不需要依赖 OpenAIProvider 的具体错误类型。
+type upstreamAttemptCarrier interface {
+	UpstreamAttempts() []UpstreamAttempt
+}
+
+// upstreamAttemptsError 包装最终错误，并附带本次 provider 内部短重试的所有尝试。
+// Error/Unwrap 保持原错误链，避免破坏既有 errors.Is / errors.As 逻辑。
+type upstreamAttemptsError struct {
+	err      error
+	attempts []UpstreamAttempt
+}
+
+func (e *upstreamAttemptsError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *upstreamAttemptsError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *upstreamAttemptsError) UpstreamAttempts() []UpstreamAttempt {
+	if e == nil || len(e.attempts) == 0 {
+		return nil
+	}
+	return append([]UpstreamAttempt(nil), e.attempts...)
+}
+
+// upstreamTransportError 表示 http.Client.Do 在建立请求、连接、TLS、写请求或等待响应头阶段失败。
+//
+// Stage 来自 httptrace，是两个核心决策的依据：
+//  1. 重试安全性：writing_request / waiting_response_headers 之后，非幂等 chat POST 可能已经被上游接收。
+//  2. 诊断准确性：waiting_response_headers 说明代理已完成上传并等待响应头，不能再笼统报“无法连接上游”。
+type upstreamTransportError struct {
+	Stage string
+	Err   error
+}
+
+func (e *upstreamTransportError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	stage := strings.TrimSpace(e.Stage)
+	if stage == "" {
+		stage = "preparing_request"
+	}
+	return fmt.Sprintf("upstream_stage=%s: %v", stage, e.Err)
+}
+
+func (e *upstreamTransportError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// UpstreamAttempts 从任意 provider 错误中提取结构化尝试明细。
+// 返回副本，调用方可以安全读取，但不应把它当成持久化业务状态。
+func UpstreamAttempts(err error) []UpstreamAttempt {
+	if err == nil {
+		return nil
+	}
+	var carrier upstreamAttemptCarrier
+	if !errors.As(err, &carrier) {
+		return nil
+	}
+	return carrier.UpstreamAttempts()
+}
+
 func (e *providerHTTPError) Error() string {
 	if e == nil {
 		return ""
@@ -793,12 +882,15 @@ func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 	// New API / sub2api 内部可能配置多个渠道，但实测单渠道 5xx/EOF 有时会直接透出。
 	// 防御开启时，代理侧只对瞬态错误做短重试，给上游网关重新选择渠道的机会；4xx 不重试，避免放大参数/鉴权错误。
 	var lastErr error
+	attempts := []UpstreamAttempt{}
 	for attempt := 0; attempt < p.openAIProviderMaxAttempts(); attempt++ {
+		attemptStart := time.Now()
 		respBody, err := p.doChatRaw(ctx, body)
 		if err == nil {
 			return respBody, nil
 		}
 		lastErr = err
+		attempts = append(attempts, newUpstreamAttempt(err, time.Since(attemptStart)))
 		if !p.shouldRetryOpenAIProviderError(err) || attempt == p.openAIProviderMaxAttempts()-1 {
 			break
 		}
@@ -810,7 +902,7 @@ func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 			}
 		}
 	}
-	return nil, lastErr
+	return nil, withUpstreamAttempts(lastErr, attempts)
 }
 
 func (p *OpenAIProvider) doChatRaw(ctx context.Context, body []byte) ([]byte, error) {
@@ -862,6 +954,37 @@ func (p *OpenAIProvider) doChatRaw(ctx context.Context, body []byte) ([]byte, er
 	return respBody, nil
 }
 
+func withUpstreamAttempts(err error, attempts []UpstreamAttempt) error {
+	if err == nil || len(attempts) == 0 {
+		return err
+	}
+	return &upstreamAttemptsError{
+		err:      err,
+		attempts: append([]UpstreamAttempt(nil), attempts...),
+	}
+}
+
+// newUpstreamAttempt 将一次 provider 内部尝试的最终错误转换为结构化摘要。
+// HTTP 错误优先保存状态码；传输错误优先保存 httptrace 阶段。
+func newUpstreamAttempt(err error, elapsed time.Duration) UpstreamAttempt {
+	attempt := UpstreamAttempt{
+		Elapsed: elapsed,
+		Error:   "",
+	}
+	if err != nil {
+		attempt.Error = err.Error()
+	}
+	var httpErr *providerHTTPError
+	if errors.As(err, &httpErr) {
+		attempt.HTTPStatus = httpErr.StatusCode
+	}
+	var transportErr *upstreamTransportError
+	if errors.As(err, &transportErr) {
+		attempt.Stage = strings.TrimSpace(transportErr.Stage)
+	}
+	return attempt
+}
+
 const openAIProviderMaxAttempts = 3
 
 func openAIProviderRetryDelay(attempt int) time.Duration {
@@ -874,6 +997,9 @@ func (p *OpenAIProvider) openAIProviderMaxAttempts() int {
 	if p == nil || !p.DefenseEnabled {
 		return 1
 	}
+	// 防御开启时最多 3 次 provider 内部尝试，用于覆盖 New API/sub2api
+	// 偶发 5xx 或连接建立前失败。该重试不是跨 provider fallback，也不应突破
+	// providerOperationContext 给整次请求设置的总预算。
 	return openAIProviderMaxAttempts
 }
 
@@ -891,7 +1017,14 @@ func (p *OpenAIProvider) shouldRetryOpenAIProviderError(err error) bool {
 	}
 	var httpErr *providerHTTPError
 	if errors.As(err, &httpErr) {
+		// 保留历史防御行为：上游明确返回 5xx 时允许短重试，主要用于
+		// new-api/sub2api 单个失败渠道直接透出 503 的场景。它会产生第二次
+		// 上游请求，因此受 DefenseEnabled 控制；4xx/429 不在这里盲目重试。
 		return httpErr.StatusCode >= http.StatusInternalServerError
+	}
+	var transportErr *upstreamTransportError
+	if errors.As(err, &transportErr) {
+		return isRetryableUpstreamTransportError(transportErr)
 	}
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, "empty reply") ||
@@ -901,12 +1034,68 @@ func (p *OpenAIProvider) shouldRetryOpenAIProviderError(err error) bool {
 		strings.Contains(lower, "timeout")
 }
 
+func isRetryableUpstreamTransportError(err *upstreamTransportError) bool {
+	if err == nil || err.Err == nil {
+		return false
+	}
+	if errors.Is(err.Err, context.Canceled) || errors.Is(err.Err, context.DeadlineExceeded) {
+		return false
+	}
+	stage := strings.TrimSpace(err.Stage)
+	switch stage {
+	case "resolving_dns", "connecting", "tls_handshake", "preparing_request":
+		// 这些阶段还没有把完整 chat POST 提交给上游业务处理，短重试不会造成
+		// 重复计费或重复工具调用；是否可重试仍由具体连接错误类型决定。
+		return isRetryableConnectionBreak(err.Err)
+	default:
+		// writing_request / waiting_response_headers 之后，上游可能已经收到部分或全部
+		// 非幂等 chat 请求。代理层不能盲目重放，否则可能重复计费或重复执行工具。
+		// 这里也不通过 Idempotency-Key 把 POST 标记为 replayable，避免 Transport
+		// 在读取首响应失败等“可能已提交”场景内部重放。
+		return false
+	}
+}
+
+// isRetryableConnectionBreak 只判断连接建立前后的短暂网络错误。
+// 该函数不单独决定是否重试；调用方还必须结合 httptrace 阶段，避免重放已提交请求。
+func isRetryableConnectionBreak(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "empty reply") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "broken pipe") ||
+		strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "no such host") ||
+		strings.Contains(lower, "network is unreachable") ||
+		strings.Contains(lower, "use of closed network connection") ||
+		strings.Contains(lower, "eof")
+}
+
 // ShouldAttemptAlternateChatMode 判断流式与非流式之间是否值得做一次协议兜底。
 // 只允许服务端 5xx、网络瞬态错误和响应协议不兼容触发；鉴权、参数、限流和取消
 // 不切换模式，避免重复计费、请求放大以及在客户端已放弃后继续访问上游。
 func ShouldAttemptAlternateChatMode(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
+	}
+	if attempts := UpstreamAttempts(err); len(attempts) > 0 {
+		last := attempts[len(attempts)-1]
+		if last.HTTPStatus > 0 {
+			return last.HTTPStatus >= http.StatusInternalServerError
+		}
+		if strings.TrimSpace(last.Stage) != "" {
+			return false
+		}
 	}
 	var httpErr *providerHTTPError
 	if errors.As(err, &httpErr) {
@@ -976,12 +1165,15 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	// 流式路径同样要短重试。管理测试页和 VS 流式下游都会走这里，
 	// 若首个 New API 渠道短暂 503，重试可避免用户看到一次性失败。
 	var lastErr error
+	attempts := []UpstreamAttempt{}
 	for attempt := 0; attempt < p.openAIProviderMaxAttempts(); attempt++ {
+		attemptStart := time.Now()
 		stream, err := p.doChatStream(ctx, body)
 		if err == nil {
 			return &cancelReadCloser{ReadCloser: stream, cancel: cancel}, nil
 		}
 		lastErr = err
+		attempts = append(attempts, newUpstreamAttempt(err, time.Since(attemptStart)))
 		if !p.shouldRetryOpenAIProviderError(err) || attempt == p.openAIProviderMaxAttempts()-1 {
 			break
 		}
@@ -995,7 +1187,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 		}
 	}
 	cancel()
-	return nil, lastErr
+	return nil, withUpstreamAttempts(lastErr, attempts)
 }
 
 func marshalOpenAIChatCompletionsRequest(req *ChatRequest) ([]byte, error) {
@@ -1116,7 +1308,7 @@ func (p *OpenAIProvider) doChatHTTPRequest(req *http.Request) (*http.Response, e
 	tracedReq, requestTrace := traceUpstreamHTTPRequest(req)
 	resp, err := client.Do(tracedReq)
 	if err != nil {
-		return nil, fmt.Errorf("upstream_stage=%s: %w", requestTrace.name(), err)
+		return nil, &upstreamTransportError{Stage: requestTrace.name(), Err: err}
 	}
 	return resp, nil
 }

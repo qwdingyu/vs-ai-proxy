@@ -256,6 +256,53 @@ func TestGetLatestFailureReturnsNewestFailure(t *testing.T) {
 	}
 }
 
+func TestGetRecentStabilitySummaryGroupsByProviderModelAndUpstream(t *testing.T) {
+	s := New(100)
+	base := time.Date(2026, 7, 23, 10, 0, 0, 0, time.Local)
+	logs := []RequestLog{
+		{Timestamp: base, Provider: "useai", Model: "gpt-5.5", Upstream: "gpt-5.5", StatusCode: 200, ElapsedMs: 10, RequestBytes: 100, IsSuccess: true},
+		{Timestamp: base.Add(time.Minute), Provider: "useai", Model: "gpt-5.5", Upstream: "gpt-5.5", StatusCode: 502, ErrorCode: "upstream_stream_interrupted", ErrorReason: "流中断", StreamState: "upstream_connected", CancelReason: "client_gone", ElapsedMs: 20, RequestBytes: 200, IsSuccess: false},
+		{Timestamp: base.Add(2 * time.Minute), Provider: "useai", Model: "gpt-5.5", Upstream: "gpt-5.5", StatusCode: 200, ElapsedMs: 30, RequestBytes: 300, IsSuccess: true},
+		{Timestamp: base.Add(3 * time.Minute), Provider: "useai", Model: "gpt-5.5", Upstream: "gpt-5.5", StatusCode: 200, ElapsedMs: 40, RequestBytes: 400, IsSuccess: true},
+		{Timestamp: base.Add(4 * time.Minute), Provider: "deepseek", Model: "deepseek-v4-flash", Upstream: "deepseek-v4-flash", StatusCode: 502, ErrorCode: "client_gone", ErrorReason: "客户端断开", StreamState: "waiting_response_headers", CancelReason: "client_deadline_reached", ElapsedMs: 15, RequestBytes: 150, IsSuccess: false},
+		{Timestamp: base.Add(5 * time.Minute), Provider: "deepseek", Model: "deepseek-v4-flash", Upstream: "deepseek-v4-flash", StatusCode: 200, ElapsedMs: 25, RequestBytes: 250, IsSuccess: true},
+		{Timestamp: base.Add(6 * time.Minute), Provider: "deepseek", Model: "deepseek-v4-flash", Upstream: "deepseek-v4-flash", StatusCode: 502, ErrorCode: "upstream_stream_interrupted", ErrorReason: "上游流中断", StreamState: "upstream_connected", CancelReason: "client_gone", ElapsedMs: 35, RequestBytes: 350, IsSuccess: false},
+		{Method: "GET", Path: "/health", StatusCode: 200, IsSuccess: true},
+	}
+	for _, log := range logs {
+		s.AddLog(log)
+	}
+
+	summaries := s.GetRecentStabilitySummary(100)
+	if got, want := len(summaries), 2; got != want {
+		t.Fatalf("len(summaries) = %d, want %d: %#v", got, want, summaries)
+	}
+	if summaries[0].Provider != "deepseek" || summaries[0].Failures != 2 || summaries[0].Runs != 3 {
+		t.Fatalf("first summary = %#v, want deepseek with 2 failures", summaries[0])
+	}
+	if summaries[0].SuccessRate != 1.0/3.0 {
+		t.Fatalf("first success rate = %v, want 1/3", summaries[0].SuccessRate)
+	}
+	if summaries[0].LatestFailure == nil || summaries[0].LatestFailure.ErrorCode != "upstream_stream_interrupted" || summaries[0].LatestFailure.CancelReason != "client_gone" {
+		t.Fatalf("latest failure = %#v, want newest deepseek failure sample", summaries[0].LatestFailure)
+	}
+	if got := summaries[0].TopErrorCodes; len(got) != 2 || got[0].Key != "client_gone" || got[0].Count != 1 || got[1].Key != "upstream_stream_interrupted" || got[1].Count != 1 {
+		t.Fatalf("top error codes = %#v, want two equally frequent codes sorted by key", got)
+	}
+	if got := summaries[0].TopStreamStates; len(got) != 2 || got[0].Count != 1 || got[1].Count != 1 {
+		t.Fatalf("top stream states = %#v, want two tracked states", got)
+	}
+	if got := summaries[0].TopCancelReasons; len(got) != 2 || got[0].Key != "client_deadline_reached" || got[1].Key != "client_gone" {
+		t.Fatalf("top cancel reasons = %#v, want both tracked reasons", got)
+	}
+	if summaries[1].Provider != "useai" || summaries[1].Failures != 1 || summaries[1].Runs != 4 {
+		t.Fatalf("second summary = %#v, want useai with 1 failure", summaries[1])
+	}
+	if summaries[1].RequestBytesP50 != 200 || summaries[1].RequestBytesP95 != 400 || summaries[1].ElapsedMsP50 != 20 || summaries[1].ElapsedMsP95 != 40 {
+		t.Fatalf("percentiles = %#v, want request 200/400 and elapsed 20/40", summaries[1])
+	}
+}
+
 func TestStoreConcurrentAddLogAndStatistics(t *testing.T) {
 	s := New(5000)
 	var wg sync.WaitGroup

@@ -909,6 +909,47 @@ func TestOpenAIChatDoesNotFallbackToStreamForClientError(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatDoesNotFallbackToStreamForTransportAttemptFailure(t *testing.T) {
+	prov := newFakeProvider("useai", true, []string{"deepseek-v4-flash"}, nil, strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"fallback should not run"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+	prov.rawErr = testUpstreamAttemptsError{
+		message: "请求失败: use of closed network connection",
+		attempts: []provider.UpstreamAttempt{{
+			Stage:   "writing_request",
+			Elapsed: 150 * time.Millisecond,
+			Error:   "write tcp 127.0.0.1:1->104.21.57.81:443: use of closed network connection",
+		}},
+	}
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"deepseek-v4-flash",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if prov.streamCalls != 0 {
+		t.Fatalf("streamCalls=%d, transport failures must not trigger alternate-mode requests", prov.streamCalls)
+	}
+	if got := rec.Header().Get("X-Proxy-Attempts-Summary"); !strings.Contains(got, "upstream_attempts=1 last=writing_request/network_error") {
+		t.Fatalf("attempts summary = %q, want upstream attempt detail", got)
+	}
+	if got := rec.Header().Get("X-Proxy-Stream-State"); got != "upstream_writing_request" {
+		t.Fatalf("stream state = %q, want upstream_writing_request", got)
+	}
+}
+
 func TestOpenAIStreamFallsBackToNonStreamWhenStreamUpstreamFails(t *testing.T) {
 	prov := newFakeProvider("useai2", true, []string{"gpt-5.5"}, &fakeChatResponse{Model: "gpt-5.5", Content: "Hello non-stream"}, "")
 	prov.streamErr = errors.New(`API 错误 503: {"error":{"message":"Service temporarily unavailable"}}`)
@@ -3186,6 +3227,80 @@ func TestOllamaStreamPassthroughPreservesNDJSON(t *testing.T) {
 	}
 	if !strings.Contains(body, `"done":true`) {
 		t.Fatalf("expected final chunk, got %q", body)
+	}
+}
+
+func TestOllamaToOpenAIStreamReadErrorClassifiesAsUpstreamInterrupted(t *testing.T) {
+	stream := `{"model":"llama","message":{"role":"assistant","content":"partial"},"done":false}` + "\n"
+	prov := newFakeProvider("ollama", true, []string{"llama"}, nil, stream)
+	prov.streamReadErr = io.ErrUnexpectedEOF
+	server := newOpenServer(prov)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	err := server.streamOllamaToOpenAI(rec, req, prov, &provider.ChatRequest{Model: "llama"}, rec)
+	if err == nil {
+		t.Fatal("streamOllamaToOpenAI error = nil, want upstream interruption")
+	}
+	attempt := newAttemptDiagnostic("ollama", "llama", 12, err)
+	if attempt.Category != "upstream_stream_interrupted" {
+		t.Fatalf("category = %q, want upstream_stream_interrupted; err=%v", attempt.Category, err)
+	}
+}
+
+func TestOllamaPassthroughStreamReadErrorClassifiesAsUpstreamInterrupted(t *testing.T) {
+	stream := `{"model":"llama","message":{"role":"assistant","content":"partial"},"done":false}` + "\n"
+	prov := newFakeProvider("ollama", true, []string{"llama"}, nil, stream)
+	prov.streamReadErr = io.ErrUnexpectedEOF
+	server := newOpenServer(prov)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
+	rec := httptest.NewRecorder()
+	err := server.streamOllamaPassthrough(rec, req, prov, &provider.ChatRequest{Model: "llama"}, rec)
+	if err == nil {
+		t.Fatal("streamOllamaPassthrough error = nil, want upstream interruption")
+	}
+	attempt := newAttemptDiagnostic("ollama", "llama", 12, err)
+	if attempt.Category != "upstream_stream_interrupted" {
+		t.Fatalf("category = %q, want upstream_stream_interrupted; err=%v", attempt.Category, err)
+	}
+}
+
+func TestOllamaPassthroughCleanEOFBeforeDoneClassifiesAsUpstreamInterrupted(t *testing.T) {
+	stream := `{"model":"llama","message":{"role":"assistant","content":"partial"},"done":false}` + "\n"
+	prov := newFakeProvider("ollama", true, []string{"llama"}, nil, stream)
+	server := newOpenServer(prov)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
+	rec := httptest.NewRecorder()
+	err := server.streamOllamaPassthrough(rec, req, prov, &provider.ChatRequest{Model: "llama"}, rec)
+	if err == nil {
+		t.Fatal("streamOllamaPassthrough error = nil, want missing terminal state failure")
+	}
+	attempt := newAttemptDiagnostic("ollama", "llama", 12, err)
+	if attempt.Category != "upstream_stream_interrupted" {
+		t.Fatalf("category = %q, want upstream_stream_interrupted; err=%v", attempt.Category, err)
+	}
+}
+
+func TestOpenAIToOllamaStreamReadErrorClassifiesAsUpstreamInterrupted(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`,
+		"",
+	}, "\n")
+	prov := newFakeProvider("openai", true, []string{"gpt-test"}, nil, stream)
+	prov.streamReadErr = io.ErrUnexpectedEOF
+	server := newOpenServer(prov)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
+	rec := httptest.NewRecorder()
+	err := server.streamOpenAIToOllama(rec, req, prov, &provider.ChatRequest{Model: "gpt-test"}, rec)
+	if err == nil {
+		t.Fatal("streamOpenAIToOllama error = nil, want upstream interruption")
+	}
+	attempt := newAttemptDiagnostic("openai", "gpt-test", 12, err)
+	if attempt.Category != "upstream_stream_interrupted" {
+		t.Fatalf("category = %q, want upstream_stream_interrupted; err=%v", attempt.Category, err)
 	}
 }
 

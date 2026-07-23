@@ -52,6 +52,29 @@ func TestAuthMiddlewareRequiresBearerToken(t *testing.T) {
 	}
 }
 
+func TestLikelyUpstreamStreamReadErrorDoesNotCatchProtocolErrors(t *testing.T) {
+	if !isLikelyUpstreamStreamReadError(io.ErrUnexpectedEOF) {
+		t.Fatal("unexpected EOF should be reported as an upstream stream interruption")
+	}
+	if isLikelyUpstreamStreamReadError(errOpenAIStreamTooLarge) {
+		t.Fatal("OpenAI SSE size/protocol errors must remain proxy_parse_error")
+	}
+	if isLikelyUpstreamStreamReadError(errors.New("解析响应失败: invalid JSON")) {
+		t.Fatal("application-level parse errors must not be reported as upstream stream interruptions")
+	}
+}
+
+func TestShouldStopCandidateFallbackForSubmittedOrStartedUpstreamRequest(t *testing.T) {
+	for _, category := range []string{"upstream_no_response", "upstream_stream_interrupted"} {
+		if !shouldStopCandidateFallback(category) {
+			t.Fatalf("%s must stop candidate fallback to avoid replaying a submitted chat request", category)
+		}
+	}
+	if shouldStopCandidateFallback("upstream_server_error") {
+		t.Fatal("explicit 5xx remains eligible for configured recovery paths")
+	}
+}
+
 func TestChatHandlersRejectRequestBodiesOverSharedLimit(t *testing.T) {
 	server := &Server{}
 	tests := []struct {
@@ -1001,7 +1024,11 @@ func TestStreamOpenAIToOllamaPassesThroughUndeclaredToolContinuation(t *testing.
 }
 
 func TestStreamOllamaPassthroughWritesNDJSON(t *testing.T) {
-	stream := `{"model":"llama","message":{"role":"assistant","content":"hi"},"done":false}` + "\n"
+	stream := strings.Join([]string{
+		`{"model":"llama","message":{"role":"assistant","content":"hi"},"done":false}`,
+		`{"model":"llama","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}`,
+		"",
+	}, "\n")
 	server := &Server{}
 	prov := &fakeStreamProvider{name: "ollama", body: stream}
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)
@@ -1228,7 +1255,11 @@ func TestStreamOpenAILeavesUndeclaredDSMLAsText(t *testing.T) {
 
 func TestStreamOllamaPassthroughHandlesLargeNDJSONLine(t *testing.T) {
 	largeContent := strings.Repeat("x", 80*1024)
-	stream := `{"model":"llama","message":{"role":"assistant","content":"` + largeContent + `"},"done":false}` + "\n"
+	stream := strings.Join([]string{
+		`{"model":"llama","message":{"role":"assistant","content":"` + largeContent + `"},"done":false}`,
+		`{"model":"llama","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}`,
+		"",
+	}, "\n")
 	server := &Server{}
 	prov := &fakeStreamProvider{name: "ollama", body: stream}
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", nil)

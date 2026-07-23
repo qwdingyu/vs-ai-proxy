@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
 
 type testUpstreamHTTPError struct {
@@ -17,6 +20,17 @@ type testUpstreamHTTPError struct {
 func (e testUpstreamHTTPError) Error() string                 { return "upstream request failed" }
 func (e testUpstreamHTTPError) UpstreamHTTPStatusCode() int   { return e.status }
 func (e testUpstreamHTTPError) UpstreamHTTPErrorBody() []byte { return []byte(e.body) }
+
+type testUpstreamAttemptsError struct {
+	message  string
+	attempts []provider.UpstreamAttempt
+}
+
+func (e testUpstreamAttemptsError) Error() string { return e.message }
+
+func (e testUpstreamAttemptsError) UpstreamAttempts() []provider.UpstreamAttempt {
+	return append([]provider.UpstreamAttempt(nil), e.attempts...)
+}
 
 func TestSanitizeDiagnosticMessageRedactsSecretsAndTruncates(t *testing.T) {
 	message := "request failed: Bearer secret-token-value-123456 api_key:secret-api-key-123456 sk-testsecret1234567890 " +
@@ -220,6 +234,134 @@ func TestWriteProxyDiagnosticErrorSetsAttemptsSummaryHeader(t *testing.T) {
 
 	if got := rec.Header().Get("X-Proxy-Attempts-Summary"); !strings.Contains(got, "useai/gpt-5.5 654ms upstream_server_error") {
 		t.Fatalf("attempts summary header = %q", got)
+	}
+}
+
+func TestNewAttemptDiagnosticIncludesStructuredUpstreamAttempts(t *testing.T) {
+	err := testUpstreamAttemptsError{
+		message: "请求失败: use of closed network connection",
+		attempts: []provider.UpstreamAttempt{
+			{
+				Stage:   "writing_request",
+				Elapsed: 120 * time.Millisecond,
+				Error:   "write tcp 127.0.0.1:1->104.21.57.81:443: use of closed network connection",
+			},
+			{
+				Stage:   "connecting",
+				Elapsed: 220 * time.Millisecond,
+				Error:   "dial tcp: connect: connection refused",
+			},
+		},
+	}
+
+	attempt := newAttemptDiagnostic("useai", "deepseek-v4-flash", 6500, err)
+
+	if attempt.Category != "network_error" {
+		t.Fatalf("category = %q, want network_error", attempt.Category)
+	}
+	if len(attempt.UpstreamAttempts) != 2 {
+		t.Fatalf("upstream attempts = %#v, want 2 attempts", attempt.UpstreamAttempts)
+	}
+	if attempt.UpstreamAttempts[0].Stage != "writing_request" {
+		t.Fatalf("first upstream stage = %q, want writing_request", attempt.UpstreamAttempts[0].Stage)
+	}
+	summary := attemptsSummary([]attemptDiagnostic{attempt})
+	if !strings.Contains(summary, "upstream_attempts=2 last=connecting/network_error") {
+		t.Fatalf("attempts summary = %q, want structured upstream attempts", summary)
+	}
+
+	rec := httptest.NewRecorder()
+	writeProxyDiagnosticError(
+		rec,
+		http.StatusBadGateway,
+		allCandidatesFailedDiagnostic(
+			"UseAI - deepseek-v4-flash",
+			"deepseek-v4-flash",
+			1,
+			[]attemptDiagnostic{attempt},
+		),
+	)
+	if got := rec.Header().Get("X-Proxy-Stream-State"); got != "upstream_connecting" {
+		t.Fatalf("stream state = %q, want upstream_connecting", got)
+	}
+}
+
+func TestWaitingForResponseHeadersIsReportedAsUpstreamNoResponse(t *testing.T) {
+	err := testUpstreamAttemptsError{
+		message: "请求失败: EOF",
+		attempts: []provider.UpstreamAttempt{{
+			Stage:   "waiting_response_headers",
+			Elapsed: 3200 * time.Millisecond,
+			Error:   "upstream_stage=waiting_response_headers: EOF",
+		}},
+	}
+
+	attempt := newAttemptDiagnostic("useai", "deepseek-v4-flash", 3200, err)
+	if attempt.Category != "upstream_no_response" {
+		t.Fatalf("category = %q, want upstream_no_response", attempt.Category)
+	}
+	summary := attemptsSummary([]attemptDiagnostic{attempt})
+	if !strings.Contains(summary, "last=waiting_response_headers/upstream_no_response") {
+		t.Fatalf("attempts summary = %q, want response-header stage", summary)
+	}
+	diag := summarizeLogDiagnostic(
+		attempt.Category,
+		http.StatusBadGateway,
+		3200,
+		400008,
+		400000,
+		"",
+		"upstream_waiting_response_headers",
+		"",
+		"",
+	)
+	if diag.Reason != "上游接收后未响应" {
+		t.Fatalf("reason = %q, want 上游接收后未响应", diag.Reason)
+	}
+	if !strings.Contains(diag.Summary, "未返回响应头") {
+		t.Fatalf("summary = %q, want response-header wording", diag.Summary)
+	}
+}
+
+func TestUpstreamStreamInterruptedHasSpecificDiagnostic(t *testing.T) {
+	attempt := newAttemptDiagnostic(
+		"useai",
+		"deepseek-v4-flash",
+		5600,
+		errors.New("上游流中断: OpenAI SSE: unexpected EOF"),
+	)
+
+	if attempt.Category != "upstream_stream_interrupted" {
+		t.Fatalf("category = %q, want upstream_stream_interrupted", attempt.Category)
+	}
+	diag := summarizeLogDiagnostic(
+		attempt.Category,
+		http.StatusBadGateway,
+		5600,
+		400008,
+		400000,
+		"",
+		"upstream_connected",
+		"",
+		"",
+	)
+	if diag.Reason != "上游响应流中断" {
+		t.Fatalf("reason = %q, want 上游响应流中断", diag.Reason)
+	}
+	if !strings.Contains(diag.Summary, "响应流中断") {
+		t.Fatalf("summary = %q, want stream interruption wording", diag.Summary)
+	}
+}
+
+func TestMissingStreamTerminalStateClassifiesAsUpstreamInterrupted(t *testing.T) {
+	for _, message := range []string{
+		"解析响应失败: OpenAI SSE: OpenAI SSE 在 finish_reason 或 [DONE] 之前结束",
+		"解析 Ollama 流失败: Ollama 流在 done=true 或 [DONE] 之前结束",
+	} {
+		attempt := newAttemptDiagnostic("useai", "deepseek-v4-flash", 123, errors.New(message))
+		if attempt.Category != "upstream_stream_interrupted" {
+			t.Fatalf("category = %q, want upstream_stream_interrupted; message=%s", attempt.Category, message)
+		}
 	}
 }
 

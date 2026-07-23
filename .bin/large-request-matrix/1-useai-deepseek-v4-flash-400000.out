@@ -1,0 +1,52 @@
+{"payload_shape": "message", "request_bytes": 400000, "messages_bytes": 379286, "tools_bytes": 20595, "tool_count": 20, "model": "deepseek-v4-flash", "provider_id": "useai"}
+
+== 1. direct upstream: https://api.eforge.xyz/v1/chat/completions ==
+
+== 2. local proxy: build and start ==
+
+== 3. proxy request: /v1/chat/completions ==
+{
+  "payload_shape": "message",
+  "request_bytes": 400000,
+  "messages_bytes": 379286,
+  "tools_bytes": 20595,
+  "tool_count": 20,
+  "model": "deepseek-v4-flash",
+  "provider_id": "useai",
+  "mode": "direct-proxy",
+  "cooldown_seconds": 0,
+  "direct": {
+    "curl_rc": 18,
+    "status": "200",
+    "ttfb_ms": 2906.146,
+    "total_ms": 3007.643,
+    "upload_bytes": 400000,
+    "download_bytes": 2181,
+    "sse_events": 8,
+    "sse_done": false,
+    "error_kind": "curl_error"
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3909.77,
+    "total_ms": 3910.181,
+    "upload_bytes": 400008,
+    "download_bytes": 8453,
+    "sse_events": 31,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3909.1639640000003,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json

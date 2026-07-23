@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1065,6 +1066,88 @@ func TestOpenAIProviderRetriesShareOneOperationTimeout(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderChatRawReturnsStructuredRetryAttempts(t *testing.T) {
+	prov := NewOpenAIProviderWithCapability(
+		"openai",
+		"openai",
+		"sk-test",
+		"https://example.invalid",
+		true,
+		2*time.Second,
+	)
+	var calls int
+	prov.Client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return nil, io.EOF
+	})
+
+	_, err := prov.ChatRaw(context.Background(), &ChatRequest{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("ChatRaw should return the final transport error")
+	}
+	if calls != prov.openAIProviderMaxAttempts() {
+		t.Fatalf("calls = %d, want %d", calls, prov.openAIProviderMaxAttempts())
+	}
+	attempts := UpstreamAttempts(err)
+	if len(attempts) != prov.openAIProviderMaxAttempts() {
+		t.Fatalf("upstream attempts = %#v, want %d attempts", attempts, prov.openAIProviderMaxAttempts())
+	}
+	for _, attempt := range attempts {
+		if attempt.Stage != "preparing_request" {
+			t.Fatalf("attempt stage = %q, want preparing_request; attempts=%#v", attempt.Stage, attempts)
+		}
+		if !strings.Contains(strings.ToLower(attempt.Error), "eof") {
+			t.Fatalf("attempt error = %q, want eof", attempt.Error)
+		}
+	}
+}
+
+func TestOpenAIProviderDoesNotManuallyRetryAfterRequestWriteStarts(t *testing.T) {
+	prov := NewOpenAIProviderWithCapability(
+		"openai",
+		"openai",
+		"sk-test",
+		"https://example.invalid",
+		true,
+		time.Second,
+	)
+	err := fmt.Errorf(
+		"请求失败: %w",
+		&upstreamTransportError{
+			Stage: "writing_request",
+			Err:   errors.New("write tcp 127.0.0.1:1->104.21.57.81:443: use of closed network connection"),
+		},
+	)
+
+	if prov.shouldRetryOpenAIProviderError(err) {
+		t.Fatal("request write failures must be left to net/http safe replay rules")
+	}
+}
+
+func TestOpenAIProviderDoesNotSendIdempotencyHeaderForChatRequests(t *testing.T) {
+	var idempotencyHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idempotencyHeader = r.Header.Get("Idempotency-Key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithCapability("openai", "openai", "sk-test", upstream.URL, true, time.Second)
+	if _, err := prov.ChatRaw(context.Background(), &ChatRequest{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatRaw returned error: %v", err)
+	}
+	if idempotencyHeader != "" {
+		t.Fatalf("idempotency header was sent upstream: %q", idempotencyHeader)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -1171,6 +1254,20 @@ func TestShouldAttemptAlternateChatModeRejectsNonRecoverableErrors(t *testing.T)
 	}
 	if !ShouldAttemptAlternateChatMode(&providerHTTPError{StatusCode: http.StatusServiceUnavailable, Message: "unavailable"}) {
 		t.Fatal("503 should allow one alternate-mode recovery attempt")
+	}
+}
+
+func TestShouldAttemptAlternateChatModeRejectsTransportAttemptFailures(t *testing.T) {
+	err := withUpstreamAttempts(
+		errors.New("请求失败: connection reset by peer"),
+		[]UpstreamAttempt{{
+			Stage: "connecting",
+			Error: "connection reset by peer",
+		}},
+	)
+
+	if ShouldAttemptAlternateChatMode(err) {
+		t.Fatal("transport connection failures should not trigger stream/non-stream fallback")
 	}
 }
 

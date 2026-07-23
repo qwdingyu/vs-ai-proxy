@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
 
 const maxDiagnosticMessageBytes = 1000
@@ -26,6 +29,18 @@ type attemptDiagnostic struct {
 	Message   string  `json:"message"`
 	ElapsedMs float64 `json:"elapsed_ms,omitempty"`
 	Peer      string  `json:"network_peer,omitempty"`
+	// UpstreamAttempts 是 provider 内部真实 HTTP 尝试明细。
+	// 外层 attempt 表示“候选 provider/模型”；内层 attempt 表示同一 provider
+	// 为了防御瞬态故障做过的短重试。两层分开，日志才能判断是否发生了请求放大。
+	UpstreamAttempts []upstreamAttemptDiagnostic `json:"upstream_attempts,omitempty"`
+}
+
+type upstreamAttemptDiagnostic struct {
+	Stage      string  `json:"stage,omitempty"`        // provider httptrace 的最后阶段，不包含 URL/Header/正文。
+	Category   string  `json:"category"`               // 根据 HTTP 状态码、阶段和错误文本归一后的诊断类别。
+	ElapsedMs  float64 `json:"elapsed_ms,omitempty"`   // 单次上游 HTTP 尝试耗时，单位毫秒。
+	HTTPStatus int     `json:"http_status,omitempty"`  // 上游返回 HTTP 响应时记录；纯传输失败为 0。
+	Peer       string  `json:"network_peer,omitempty"` // 从错误文本解析出的远端地址，可能是 CDN 边缘节点。
 }
 
 type upstreamHTTPErrorMetadata interface {
@@ -54,10 +69,13 @@ func writeProxyDiagnosticError(w http.ResponseWriter, status int, diag proxyDiag
 	w.Header().Set("X-Proxy-Error-Message", diagnosticHeaderValue(diag.Message))
 	w.Header().Set("X-Proxy-Error-Hint", diagnosticHeaderValue(diag.Details.Hint))
 	if summary := attemptsSummary(diag.Details.Attempts); summary != "" {
-		w.Header().Set("X-Proxy-Attempts-Summary", diagnosticHeaderValue(summary))
+		setProxyDiagnosticHeader(w, "X-Proxy-Attempts-Summary", diagnosticHeaderValue(summary))
 	}
 	if peer := firstAttemptNetworkPeer(diag.Details.Attempts); peer != "" {
-		w.Header().Set("X-Proxy-Network-Peer", peer)
+		setProxyDiagnosticHeader(w, "X-Proxy-Network-Peer", peer)
+	}
+	if streamState := firstAttemptStreamState(diag.Details.Attempts); streamState != "" {
+		setProxyDiagnosticHeader(w, "X-Proxy-Stream-State", streamState)
 	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": diag})
@@ -162,6 +180,10 @@ func failureCategoryRank(category string) int {
 		return 50
 	case "upstream_server_error":
 		return 60
+	case "upstream_no_response":
+		return 65
+	case "upstream_stream_interrupted":
+		return 68
 	case "network_error":
 		return 70
 	case "proxy_parse_error":
@@ -195,9 +217,32 @@ func attemptsSummary(attempts []attemptDiagnostic) string {
 		if category == "" {
 			category = "provider_error"
 		}
-		parts = append(parts, label+duration+" "+category)
+		detail := upstreamAttemptsSummary(attempt.UpstreamAttempts)
+		if detail != "" {
+			detail = " " + detail
+		}
+		parts = append(parts, label+duration+" "+category+detail)
 	}
 	return strings.Join(parts, " | ")
+}
+
+func upstreamAttemptsSummary(attempts []upstreamAttemptDiagnostic) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+	last := attempts[len(attempts)-1]
+	category := strings.TrimSpace(last.Category)
+	if category == "" {
+		category = "provider_error"
+	}
+	stage := strings.TrimSpace(last.Stage)
+	if stage == "" && last.HTTPStatus > 0 {
+		stage = "http_" + strconv.Itoa(last.HTTPStatus)
+	}
+	if stage == "" {
+		return "(upstream_attempts=" + strconv.Itoa(len(attempts)) + " last=" + category + ")"
+	}
+	return "(upstream_attempts=" + strconv.Itoa(len(attempts)) + " last=" + stage + "/" + category + ")"
 }
 
 func humanDurationMs(ms float64) string {
@@ -230,23 +275,126 @@ func newAttemptDiagnostic(providerName, upstreamModel string, elapsedMs float64,
 	if err != nil {
 		message = sanitizeDiagnosticMessage(err.Error())
 	}
-	return attemptDiagnostic{
-		Provider:  providerName,
-		Upstream:  upstreamModel,
-		Category:  classifyProxyErrorFromErr(err, message),
-		Message:   message,
-		ElapsedMs: elapsedMs,
-		Peer:      networkPeerFromMessage(message),
+	upstreamAttempts := newUpstreamAttemptDiagnostics(err)
+	category := classifyProxyErrorFromErr(err, message)
+	if refined := refinedCategoryFromUpstreamAttempts(upstreamAttempts, category); refined != "" {
+		category = refined
 	}
+	return attemptDiagnostic{
+		Provider:         providerName,
+		Upstream:         upstreamModel,
+		Category:         category,
+		Message:          message,
+		ElapsedMs:        elapsedMs,
+		Peer:             networkPeerFromMessage(message),
+		UpstreamAttempts: upstreamAttempts,
+	}
+}
+
+func newUpstreamAttemptDiagnostics(err error) []upstreamAttemptDiagnostic {
+	attempts := provider.UpstreamAttempts(err)
+	if len(attempts) == 0 {
+		return nil
+	}
+	out := make([]upstreamAttemptDiagnostic, 0, len(attempts))
+	for _, attempt := range attempts {
+		message := sanitizeDiagnosticMessage(attempt.Error)
+		category := classifyUpstreamAttempt(attempt, message)
+		if attempt.HTTPStatus >= http.StatusInternalServerError {
+			category = "upstream_server_error"
+		}
+		out = append(out, upstreamAttemptDiagnostic{
+			Stage:      strings.TrimSpace(attempt.Stage),
+			Category:   category,
+			ElapsedMs:  float64(attempt.Elapsed) / float64(time.Millisecond),
+			HTTPStatus: attempt.HTTPStatus,
+			Peer:       networkPeerFromMessage(message),
+		})
+	}
+	return out
+}
+
+func classifyUpstreamAttempt(attempt provider.UpstreamAttempt, message string) string {
+	// HTTP 状态码优先于错误文本。很多 provider 会把 JSON error body、
+	// context canceled、网关文字混在一起，优先相信明确的 HTTP 语义可减少误报。
+	if attempt.HTTPStatus >= http.StatusInternalServerError {
+		return "upstream_server_error"
+	}
+	if attempt.HTTPStatus > 0 {
+		return classifyProxyErrorFromErr(nil, "API 错误 "+strconv.Itoa(attempt.HTTPStatus)+": "+message)
+	}
+	category := classifyProxyErrorFromErr(nil, message)
+	if category == "network_error" {
+		switch strings.TrimSpace(attempt.Stage) {
+		case "waiting_response_headers", "receiving_response_headers":
+			// 这两个阶段说明请求已经写出，上游或中间网关没有给出完整响应头。
+			// 用户看到的是间歇性 502，但根因不应再笼统写成“无法连接上游”。
+			return "upstream_no_response"
+		}
+	}
+	return category
+}
+
+func refinedCategoryFromUpstreamAttempts(attempts []upstreamAttemptDiagnostic, fallback string) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+	// 外层错误文本可能只是“请求失败: EOF”，内层 stage 才知道 EOF 出现在
+	// connecting 还是 waiting_response_headers。只用最后一次真实上游尝试修正
+	// 外层类别，避免把早期已恢复的尝试误当成本次最终主因。
+	last := attempts[len(attempts)-1]
+	category := strings.TrimSpace(last.Category)
+	if category == "" || category == fallback {
+		return ""
+	}
+	return category
 }
 
 func firstAttemptNetworkPeer(attempts []attemptDiagnostic) string {
 	for i := len(attempts) - 1; i >= 0; i-- {
+		for j := len(attempts[i].UpstreamAttempts) - 1; j >= 0; j-- {
+			if peer := strings.TrimSpace(attempts[i].UpstreamAttempts[j].Peer); peer != "" {
+				return peer
+			}
+		}
 		if peer := strings.TrimSpace(attempts[i].Peer); peer != "" {
 			return peer
 		}
 	}
 	return ""
+}
+
+func firstAttemptStreamState(attempts []attemptDiagnostic) string {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		for j := len(attempts[i].UpstreamAttempts) - 1; j >= 0; j-- {
+			if state := streamStateForUpstreamStage(attempts[i].UpstreamAttempts[j].Stage); state != "" {
+				return state
+			}
+		}
+	}
+	return ""
+}
+
+func streamStateForUpstreamStage(stage string) string {
+	// X-Proxy-Stream-State 既用于真实流式，也用于非流式失败诊断。
+	// 这里把 provider 的 HTTP 阶段映射成已有日志字段，保证管理页、JSON store
+	// 和响应头看到的是同一套阶段语义。
+	switch strings.TrimSpace(stage) {
+	case "resolving_dns":
+		return "upstream_resolving_dns"
+	case "connecting":
+		return "upstream_connecting"
+	case "tls_handshake":
+		return "upstream_tls_handshake"
+	case "writing_request":
+		return "upstream_writing_request"
+	case "waiting_response_headers":
+		return "upstream_waiting_response_headers"
+	case "receiving_response_headers":
+		return "upstream_receiving_response_headers"
+	default:
+		return ""
+	}
 }
 
 func sanitizeDiagnosticMessage(message string) string {
@@ -271,6 +419,12 @@ func classifyProxyErrorFromErr(err error, message string) string {
 		return "upstream_quota_exhausted"
 	case isInvalidAssistantMessageError(upstreamDetails):
 		return "upstream_message_error"
+	case strings.Contains(message, "上游流中断"):
+		return "upstream_stream_interrupted"
+	case strings.Contains(message, "在 finish_reason 或 [DONE] 之前结束"):
+		return "upstream_stream_interrupted"
+	case strings.Contains(message, "在 done=true 或 [DONE] 之前结束"):
+		return "upstream_stream_interrupted"
 	// 上游已经明确返回 HTTP 状态码时，优先相信状态码。
 	// 某些链路会把 “API 错误 400/413 ... context canceled” 混在同一错误文本里，
 	// 如果先匹配 context canceled，会把参数错误/大请求错误误判成 client_gone。
@@ -409,6 +563,10 @@ func userFacingDiagnosticFor(category string) userFacingDiagnostic {
 		return userFacingDiagnostic{Reason: "上游不接受本次请求", Action: "检查模型名、Base URL 和不兼容参数。"}
 	case "upstream_server_error":
 		return userFacingDiagnostic{Reason: "上游服务暂不可用", Action: "稍后重试，或切换模型。"}
+	case "upstream_no_response":
+		return userFacingDiagnostic{Reason: "上游接收后未响应", Action: "稍后重试，或切换到更稳定的同模型渠道。"}
+	case "upstream_stream_interrupted":
+		return userFacingDiagnostic{Reason: "上游响应流中断", Action: "稍后重试，或切换到更稳定的同模型渠道。"}
 	case "upstream_api_error":
 		return userFacingDiagnostic{Reason: "上游拒绝请求", Action: "检查账号状态和模型名称。"}
 	case "timeout":
@@ -451,6 +609,10 @@ func summarizeLogDiagnostic(code string, statusCode int, elapsedMs float64, requ
 		prefix = "上游限流"
 	case "upstream_server_error":
 		prefix = "上游返回 5xx"
+	case "upstream_no_response":
+		prefix = "上游已接收但未返回响应头"
+	case "upstream_stream_interrupted":
+		prefix = "上游响应流中断"
 	case "upstream_message_error":
 		prefix = "上游拒绝会话消息"
 	case "upstream_request_error":

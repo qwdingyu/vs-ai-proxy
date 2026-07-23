@@ -39,6 +39,9 @@ RESULT_PATH="$RESULT_DIR/result.json"
 umask 077
 mkdir -p "$RESULT_DIR"
 chmod 700 "$WORK_DIR" "$RESULT_DIR"
+# 每轮诊断必须从空结果开始。矩阵脚本会复用 .bin/useai-large-diagnostic/result.json，
+# 如果本轮在写 result 前失败而旧文件还在，就会把上一轮结果误算成本轮，造成稳定性虚报。
+rm -f "$RESULT_PATH" "$RESULT_DIR/logs.json"
 
 stop_proxy() {
   if [[ -f "$PID_FILE" ]]; then
@@ -425,7 +428,10 @@ result['proxy_diagnostic'] = {
     key: last.get(key)
     for key in (
         'status_code', 'elapsed_ms', 'request_bytes', 'upstream_bytes', 'stream_state',
-        'error_code', 'attempts_summary', 'request_tools',
+        'configured_timeout_seconds', 'effective_timeout_seconds',
+        'error_code', 'error_reason', 'error_action', 'diagnostic_summary',
+        'attempts_summary', 'cancel_reason', 'network_peer',
+        'request_tools', 'response_tools', 'tool_outcome', 'fallback_mode',
     )
     if last.get(key) is not None
 }
@@ -437,3 +443,9 @@ print(json.dumps(result, ensure_ascii=False, indent=2))
 PY
 
 printf '\n脱敏诊断结果已保存: %s\n' "$RESULT_PATH"
+if [[ -f "$STORE_PATH" ]]; then
+  # store 日志只包含脱敏诊断字段、大小、状态、工具名摘要和 token 用量，
+  # 不包含完整请求体或 API Key。复制到 .bin 便于复盘；该目录不应提交。
+  cp "$STORE_PATH" "$RESULT_DIR/logs.json"
+  chmod 600 "$RESULT_DIR/logs.json"
+fi

@@ -373,6 +373,7 @@ type diagnosticsSummaryResponse struct {
 	Runtime          runtimeStatusResponse    `json:"runtime"`
 	Statistics       store.Statistics         `json:"statistics"`
 	LatestFailure    store.RequestLog         `json:"latest_failure"`
+	RecentStability  []store.StabilitySummary `json:"recent_stability"`
 	ProviderHealth   []providerHealthResponse `json:"provider_health"`
 	ProblemProviders []providerHealthResponse `json:"problem_providers"`
 	CopySummary      string                   `json:"copy_summary"`
@@ -405,6 +406,7 @@ func (s *Server) getDiagnosticsSummary(c *gin.Context) {
 	if item, ok := s.store.GetLatestFailure(); ok {
 		latestFailure = item
 	}
+	recentStability := s.store.GetRecentStabilitySummary(200)
 	providerHealth := s.providerHealthSnapshotResponse()
 	problemProviders := []providerHealthResponse{}
 	for _, item := range providerHealth {
@@ -417,9 +419,10 @@ func (s *Server) getDiagnosticsSummary(c *gin.Context) {
 		Runtime:          s.runtimeStatusPayload(),
 		Statistics:       stats,
 		LatestFailure:    latestFailure,
+		RecentStability:  recentStability,
 		ProviderHealth:   providerHealth,
 		ProblemProviders: problemProviders,
-		CopySummary:      buildDiagnosticsCopySummary(stats, latestFailure, problemProviders),
+		CopySummary:      buildDiagnosticsCopySummary(stats, latestFailure, recentStability, problemProviders),
 	})
 }
 
@@ -543,7 +546,7 @@ func (s *Server) providerHealthSnapshotResponse() []providerHealthResponse {
 	return out
 }
 
-func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.RequestLog, problemProviders []providerHealthResponse) string {
+func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.RequestLog, recentStability []store.StabilitySummary, problemProviders []providerHealthResponse) string {
 	lines := []string{
 		fmt.Sprintf("请求统计: total=%d success=%d failure=%d avg=%.0fms", stats.TotalRequests, stats.SuccessCount, stats.FailureCount, stats.AvgLatencyMs),
 	}
@@ -567,6 +570,25 @@ func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.Req
 			parts = append(parts, fmt.Sprintf("%s failures=%d cooldown=%dms last=%s", item.Provider, item.ConsecutiveFailures, item.CooldownRemainingMs, item.LastError))
 		}
 		lines = append(lines, "异常 provider: "+strings.Join(parts, " | "))
+	}
+	if len(recentStability) > 0 {
+		limit := len(recentStability)
+		if limit > 3 {
+			limit = 3
+		}
+		parts := make([]string, 0, limit)
+		for i := 0; i < limit; i++ {
+			item := recentStability[i]
+			parts = append(parts, fmt.Sprintf("%s/%s/%s runs=%d ok=%d fail=%d rate=%.0f%%", item.Provider, item.Model, item.Upstream, item.Runs, item.Successes, item.Failures, item.SuccessRate*100))
+		}
+		lines = append(lines, "近期稳定性: "+strings.Join(parts, " | "))
+		if recentStability[0].LatestFailure != nil {
+			failure := recentStability[0].LatestFailure
+			lines = append(lines, fmt.Sprintf("近期最新失败: request_id=%s status=%d code=%s stream=%s cancel=%s", failure.RequestID, failure.StatusCode, failure.ErrorCode, failure.StreamState, failure.CancelReason))
+			if strings.TrimSpace(failure.ErrorReason) != "" {
+				lines = append(lines, "近期失败原因: "+failure.ErrorReason)
+			}
+		}
 	}
 	return strings.Join(lines, "\n")
 }

@@ -216,9 +216,10 @@ tests/useai_large_request_diagnostic.sh
 | `upstream_bytes` | 代理发给上游的 JSON 请求体大小 | 用于判断代理是否异常膨胀 |
 | `delta_bytes` | `upstream_bytes - request_bytes` | 很小表示代理没有明显放大 |
 | `error_code` | 代理分类后的错误 | 例如 `upstream_payload_too_large`、`client_deadline_reached` |
+| `attempts_summary` | provider/模型尝试摘要 | 新版会包含 `upstream_attempts=N last=<stage>/<category>`，用于区分 DNS、连接、上传和等待响应头 |
+| `stream_state` | 失败或流式处理阶段 | 例如 `upstream_connecting`、`upstream_writing_request`、`upstream_waiting_response_headers` |
 | `cancel_reason` | 499/取消类请求的进一步原因 | `client_deadline_reached` 表示接近 VS/Copilot 等待上限 |
 | `network_peer` | 网络错误中解析出的远端 IP:port | 如果是 `104.21.x.x` / `172.67.x.x`，通常是 Cloudflare/CDN 边缘 IP，不是源站 IP |
-| `stream_state` | 流式请求进度 | `upstream_connecting`、`upstream_connected`、`downstream_started` |
 | `upstream_stage` | provider HTTP 失败时当前 hop 的最后网络阶段 | `preparing_request`、`resolving_dns`、`connecting`、`tls_handshake`、`writing_request`、`waiting_response_headers`、`receiving_response_headers` |
 
 判断规则：
@@ -244,6 +245,8 @@ tests/useai_large_request_diagnostic.sh
 
 - 批量复用 `useai_large_request_diagnostic.sh`。
 - 一次性比较多个 provider、多个模型、多个请求体大小。
+- 通过 `REPEAT` 重复每个 case，适合短冒烟、30 轮 soak、整夜稳定性测试。
+- 聚合成功率、错误码、`stream_state`、`network_peer`、耗时 p50/p95，并保留每轮 JSONL。
 - 避免每次临时写一堆 curl/Python，降低误判和漂移。
 
 默认矩阵：
@@ -276,6 +279,18 @@ SIZES='1060000' tests/large_request_matrix_diagnostic.sh
 ```bash
 SIZES='50000' \
 CASES=$'deepseek|deepseek|deepseek-v4-flash\nuseai|UseAI|deepseek-v4-flash\nusecpa|UseCpa|step-3.7-flash\nuseai2|UseAI2|gpt-5.5' \
+tests/large_request_matrix_diagnostic.sh
+```
+
+对 UseAI 与官方 DeepSeek 各跑 20 轮 400KB soak：
+
+```bash
+REPEAT=20 \
+SIZES="400000" \
+CASES="useai|UseAI|deepseek-v4-flash
+deepseek|deepseek|deepseek-v4-flash" \
+DIRECT_TIMEOUT_SECONDS=140 \
+PROXY_TIMEOUT_SECONDS=160 \
 tests/large_request_matrix_diagnostic.sh
 ```
 

@@ -354,6 +354,8 @@ func TestDiagnosticsSummaryEndpointReturnsCopyableSummary(t *testing.T) {
 		ErrorReason:       "客户端等待上限",
 		ErrorAction:       "查上游首 token",
 		DiagnosticSummary: "VS/Copilot 接近等待上限后取消",
+		CancelReason:      "client_deadline_reached",
+		StreamState:       "waiting_response_headers",
 		IsSuccess:         false,
 	})
 
@@ -367,6 +369,7 @@ func TestDiagnosticsSummaryEndpointReturnsCopyableSummary(t *testing.T) {
 	var got struct {
 		CopySummary      string                   `json:"copy_summary"`
 		LatestFailure    store.RequestLog         `json:"latest_failure"`
+		RecentStability  []store.StabilitySummary `json:"recent_stability"`
 		ProblemProviders []providerHealthResponse `json:"problem_providers"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -377,6 +380,9 @@ func TestDiagnosticsSummaryEndpointReturnsCopyableSummary(t *testing.T) {
 	}
 	if got.LatestFailure.ErrorCode != "client_deadline_reached" {
 		t.Fatalf("latest failure = %#v", got.LatestFailure)
+	}
+	if len(got.RecentStability) != 1 || got.RecentStability[0].Failures != 1 || got.RecentStability[0].TopCancelReasons[0].Key != "client_deadline_reached" {
+		t.Fatalf("recent stability = %#v, want one failing useai summary with cancel reason", got.RecentStability)
 	}
 	if len(got.ProblemProviders) == 0 || got.ProblemProviders[0].Provider != "useai" {
 		t.Fatalf("problem providers = %#v, want useai", got.ProblemProviders)
@@ -476,7 +482,7 @@ func TestDiagnosticsSummaryCopyTextIncludesLatestFailureAndProblemProvider(t *te
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal diagnostics summary: %v", err)
 	}
-	for _, want := range []string{"req-copy-1", "client_deadline_reached", "查上游首 token", "异常 provider"} {
+	for _, want := range []string{"req-copy-1", "client_deadline_reached", "查上游首 token", "异常 provider", "近期稳定性", "近期最新失败"} {
 		if !strings.Contains(got.CopySummary, want) {
 			t.Fatalf("copy_summary = %q, want contains %q", got.CopySummary, want)
 		}
