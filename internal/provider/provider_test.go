@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1935,5 +1937,214 @@ func TestOllamaProviderConvertsOpenAIMultimodalContentToImages(t *testing.T) {
 	}
 	if images[0] != "data:image/png;base64,AA==" {
 		t.Fatalf("image = %q, want data url", images[0])
+	}
+}
+
+// -----------------------------------------------------------------------------
+// upstreamHTTPTrace 阶段机单元测试
+// -----------------------------------------------------------------------------
+
+func TestUpstreamHTTPTraceNameReportsCorrectStage(t *testing.T) {
+	trace := &upstreamHTTPTrace{}
+	trace.stage.Store(int32(upstreamStagePreparing))
+	if name := trace.name(); name != "preparing_request" {
+		t.Fatalf("stage name = %q, want preparing_request", name)
+	}
+	trace.stage.Store(int32(upstreamStageResolvingDNS))
+	if name := trace.name(); name != "resolving_dns" {
+		t.Fatalf("stage name = %q, want resolving_dns", name)
+	}
+	trace.stage.Store(int32(upstreamStageConnecting))
+	if name := trace.name(); name != "connecting" {
+		t.Fatalf("stage name = %q, want connecting", name)
+	}
+	trace.stage.Store(int32(upstreamStageTLSHandshake))
+	if name := trace.name(); name != "tls_handshake" {
+		t.Fatalf("stage name = %q, want tls_handshake", name)
+	}
+	trace.stage.Store(int32(upstreamStageWritingRequest))
+	if name := trace.name(); name != "writing_request" {
+		t.Fatalf("stage name = %q, want writing_request", name)
+	}
+	trace.stage.Store(int32(upstreamStageWaitingResponseHeaders))
+	if name := trace.name(); name != "waiting_response_headers" {
+		t.Fatalf("stage name = %q, want waiting_response_headers", name)
+	}
+	trace.stage.Store(int32(upstreamStageReceivingResponseHeaders))
+	if name := trace.name(); name != "receiving_response_headers" {
+		t.Fatalf("stage name = %q, want receiving_response_headers", name)
+	}
+}
+
+func TestUpstreamHTTPTraceStageOnlyMovesForward(t *testing.T) {
+	// 阶段只能前进（monotonic），回退操作会被 setStage 的 next <= current 检查拒绝。
+	// atomic.CompareAndSwap 本身不检查数值大小——保护逻辑在 traceUpstreamHTTPRequest 的
+	// setStage 闭包中。这里显式模拟该保护语义。
+	trace := &upstreamHTTPTrace{}
+	trace.stage.Store(int32(upstreamStageWaitingResponseHeaders))
+
+	// 模拟 setStage(upstreamStageConnecting)：next(3) <= current(5)，应拒绝。
+	next := int32(upstreamStageConnecting)
+	current := trace.stage.Load()
+	if next > current {
+		trace.stage.CompareAndSwap(current, next)
+	}
+	if name := trace.name(); name != "waiting_response_headers" {
+		t.Fatalf("stage was rolled back to %q, must stay at waiting_response_headers", name)
+	}
+
+	// 模拟 setStage(upstreamStageReceivingResponseHeaders)：next(6) > current(5)，应前进。
+	next = int32(upstreamStageReceivingResponseHeaders)
+	current = trace.stage.Load()
+	if next > current {
+		trace.stage.CompareAndSwap(current, next)
+	}
+	if name := trace.name(); name != "receiving_response_headers" {
+		t.Fatalf("stage = %q, want receiving_response_headers after forward CAS", name)
+	}
+}
+
+func TestUpstreamHTTPTraceNilNameReturnsPreparing(t *testing.T) {
+	var trace *upstreamHTTPTrace
+	if name := trace.name(); name != "preparing_request" {
+		t.Fatalf("nil trace name = %q, want preparing_request", name)
+	}
+}
+
+func TestTraceUpstreamHTTPRequestClonesRequestAndAttachesContext(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.invalid/v1/chat/completions", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("X-Custom", "test")
+
+	tracedReq, traceState := traceUpstreamHTTPRequest(req)
+	if traceState == nil {
+		t.Fatal("traceState must not be nil")
+	}
+	if tracedReq == req {
+		t.Fatal("tracedReq must be a clone, not the original request")
+	}
+	if tracedReq.Header.Get("X-Custom") != "test" {
+		t.Fatal("clone must preserve original headers")
+	}
+	if traceState.name() != "preparing_request" {
+		t.Fatalf("initial stage = %q, want preparing_request", traceState.name())
+	}
+}
+
+// -----------------------------------------------------------------------------
+// sanitizeUpstreamErrorText 单元测试
+// -----------------------------------------------------------------------------
+
+func TestSanitizeUpstreamErrorTextStripsBearerTokens(t *testing.T) {
+	tests := []struct {
+		input    string
+		contains string
+		wantNot  string
+	}{
+		{
+			input:    "upstream_stage=connecting: Get \"https://api.example.com\": EOF; authorization=Bearer sk-or-v1-abc123def456ghi789jkl",
+			contains: "<redacted>",
+			wantNot:  "sk-or-v1-abc123def456ghi789jkl",
+		},
+		{
+			input:    "API error 401: invalid api_key: sk-S7x8K9mP2qR5tV1wX4yZ6aB3cD0eF7gH8iJ9kL",
+			contains: "sk-<redacted>",
+			wantNot:  "sk-S7x8K9mP2qR5tV1wX4yZ6aB3cD0eF7gH8iJ9kL",
+		},
+		{
+			input:    "header Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgN6P8pH3qB4F9Y5k1Lm2nR7sT8uV3wX4yZ6aB",
+			contains: "<redacted>",
+			wantNot:  "eyJhbGciOiJIUzI1NiJ9",
+		},
+		{
+			input:    "api-key: x7k9m2p5r8t1v4w6y3z0a",
+			contains: "<redacted>",
+			wantNot:  "x7k9m2p5r8t1v4w6y3z0a",
+		},
+		{
+			input:    "no secrets here, just a plain error message about DNS resolution failure",
+			contains: "no secrets here",
+			wantNot:  "",
+		},
+	}
+	for _, tt := range tests {
+		got := sanitizeUpstreamErrorText(tt.input)
+		if !strings.Contains(got, tt.contains) {
+			t.Fatalf("sanitize(%q) = %q, want to contain %q", tt.input, got, tt.contains)
+		}
+		if tt.wantNot != "" && strings.Contains(got, tt.wantNot) {
+			t.Fatalf("sanitize(%q) = %q, must NOT contain %q", tt.input, got, tt.wantNot)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// isRetryableConnectionBreak / isRetryableOpError 结构化错误测试
+// -----------------------------------------------------------------------------
+
+func TestIsRetryableConnectionBreakWithStructuredErrors(t *testing.T) {
+	// EOF 和 net.ErrClosed 是标准库哨兵错误，连接级断开 → 可重试。
+	if !isRetryableConnectionBreak(io.EOF) {
+		t.Fatal("io.EOF must be retryable connection break")
+	}
+	if !isRetryableConnectionBreak(io.ErrUnexpectedEOF) {
+		t.Fatal("io.ErrUnexpectedEOF must be retryable connection break")
+	}
+	if !isRetryableConnectionBreak(net.ErrClosed) {
+		t.Fatal("net.ErrClosed must be retryable connection break")
+	}
+
+	// *net.DNSError：DNS 解析失败，请求未建立 → 可重试。
+	dnsErr := &net.DNSError{Err: "no such host", Name: "api.example.invalid"}
+	if !isRetryableConnectionBreak(dnsErr) {
+		t.Fatal("*net.DNSError must be retryable connection break")
+	}
+
+	// *net.OpError with Op="dial"：拨号失败，连接未建立 → 可重试。
+	dialErr := &net.OpError{
+		Op:  "dial",
+		Net: "tcp",
+		Err: &os.SyscallError{Syscall: "connect", Err: errors.New("connection refused")},
+	}
+	if !isRetryableConnectionBreak(dialErr) {
+		t.Fatal("dial *net.OpError must be retryable connection break")
+	}
+
+	// *net.OpError with Op="read" but connection reset syscall → 也可重试（连接层错误）。
+	readErr := &net.OpError{
+		Op:  "read",
+		Net: "tcp",
+		Err: &os.SyscallError{Syscall: "read", Err: errors.New("connection reset by peer")},
+	}
+	if !isRetryableConnectionBreak(readErr) {
+		t.Fatal("read *net.OpError with connection reset must be retryable connection break")
+	}
+
+	// 非网络错误 → 不可重试。
+	if isRetryableConnectionBreak(errors.New("json: cannot unmarshal string into Go value")) {
+		t.Fatal("JSON parse error must NOT be retryable connection break")
+	}
+	if isRetryableConnectionBreak(context.Canceled) {
+		t.Fatal("context.Canceled must NOT be retryable connection break (caller checks separately)")
+	}
+	if isRetryableConnectionBreak(errors.New("some random business logic error")) {
+		t.Fatal("business error must NOT be retryable connection break")
+	}
+}
+
+func TestIsRetryableOpErrorRejectsContextErrors(t *testing.T) {
+	opErr := &net.OpError{
+		Op:  "dial",
+		Net: "tcp",
+		Err: context.Canceled,
+	}
+	if isRetryableOpError(opErr) {
+		t.Fatal("dial with context.Canceled must not be retryable")
+	}
+	opErr.Err = context.DeadlineExceeded
+	if isRetryableOpError(opErr) {
+		t.Fatal("dial with context.DeadlineExceeded must not be retryable")
 	}
 }

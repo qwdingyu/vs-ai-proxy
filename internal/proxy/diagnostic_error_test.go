@@ -318,6 +318,9 @@ func TestWaitingForResponseHeadersIsReportedAsUpstreamNoResponse(t *testing.T) {
 	if diag.Reason != "上游接收后未响应" {
 		t.Fatalf("reason = %q, want 上游接收后未响应", diag.Reason)
 	}
+	if !strings.Contains(diag.Action, "非本机断网") {
+		t.Fatalf("action = %q, want explicit not-local-network wording", diag.Action)
+	}
 	if !strings.Contains(diag.Summary, "未返回响应头") {
 		t.Fatalf("summary = %q, want response-header wording", diag.Summary)
 	}
@@ -347,6 +350,9 @@ func TestUpstreamStreamInterruptedHasSpecificDiagnostic(t *testing.T) {
 	)
 	if diag.Reason != "上游响应流中断" {
 		t.Fatalf("reason = %q, want 上游响应流中断", diag.Reason)
+	}
+	if !strings.Contains(diag.Action, "非本机断网") {
+		t.Fatalf("action = %q, want explicit not-local-network wording", diag.Action)
 	}
 	if !strings.Contains(diag.Summary, "响应流中断") {
 		t.Fatalf("summary = %q, want stream interruption wording", diag.Summary)

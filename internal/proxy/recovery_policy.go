@@ -22,9 +22,13 @@ import (
 //  - Defense 关闭：不走流式/非流式互切；
 //  - 跨 provider 默认已在 applyDefenseCandidatePolicy 截断为 1，本文件的 stop 列表是额外保险。
 
-// largeRequestWarnBytes 是“大包”观测阈值（约 400KB）。
-// 超过该值只打 WARN，不阻断请求；阈值来自 UseAI/DeepSeek 大请求踩坑经验，不是上游硬限制。
-const largeRequestWarnBytes int64 = 400 * 1024
+// LargeRequestWarnBytes 是“大包”观测阈值（约 400KB）。
+// 超过该值只打 WARN / 管理页预警，不阻断请求；阈值来自 UseAI/DeepSeek 大请求踩坑经验，不是上游硬限制。
+// 导出供 api/copy_summary 与前端阈值对齐，避免魔法数分叉。
+const LargeRequestWarnBytes int64 = 400 * 1024
+
+// 兼容本包内旧名；勿在新代码继续引入小写别名。
+const largeRequestWarnBytes = LargeRequestWarnBytes
 
 // shouldStopCandidateFallback 判断是否应停止尝试后续候选 provider/模型。
 // 返回 true 表示当前失败已表明“请求可能已提交”或“继续换线只会放大错误/计费”。
@@ -106,7 +110,22 @@ func shouldWarnLargeChatRequest(path string, requestBytes, upstreamBytes int64) 
 	if !isChatProxyPath(path) {
 		return false
 	}
-	return requestBytes >= largeRequestWarnBytes || upstreamBytes >= largeRequestWarnBytes
+	return requestBytes >= LargeRequestWarnBytes || upstreamBytes >= LargeRequestWarnBytes
+}
+
+// observedRequestBytes 选择写入 RequestLog 的体量字段。
+// Content-Length 可能为 -1（未知）或 0；此时用上游序列化体量兜底，保证管理页大包预警可用。
+func observedRequestBytes(contentLength, upstreamBytes int64) int64 {
+	if contentLength > 0 {
+		return contentLength
+	}
+	if upstreamBytes > 0 {
+		return upstreamBytes
+	}
+	if contentLength < 0 {
+		return 0
+	}
+	return contentLength
 }
 
 func isChatProxyPath(path string) bool {

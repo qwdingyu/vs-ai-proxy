@@ -288,6 +288,22 @@ func TestNormalizeForRuntimeClampsClientTimeoutBudget(t *testing.T) {
 	}
 }
 
+func TestNormalizeForRuntimeSkipsClampWhenDefenseDisabled(t *testing.T) {
+	disabled := false
+	budget := 300
+	cfg := &AppConfig{
+		Defense:   DefenseConfig{Enabled: &disabled, ClientTimeoutBudgetSeconds: &budget},
+		Providers: []ProviderConfig{DefaultUseAIProvider()},
+	}
+
+	NormalizeForRuntime(cfg)
+
+	// 防御关闭时，client_timeout_budget_seconds 不应被钳位到 [15, 95]
+	if cfg.Defense.ClientTimeoutBudgetSeconds == nil || *cfg.Defense.ClientTimeoutBudgetSeconds != 300 {
+		t.Fatalf("defense disabled: client_timeout_budget_seconds should not be clamped, got %d", *cfg.Defense.ClientTimeoutBudgetSeconds)
+	}
+}
+
 func TestNewManagerMigratesModelNamespaceProviderBinding(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := DefaultConfig()

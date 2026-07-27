@@ -17,9 +17,16 @@ const (
 	UseAIProviderType     = "openai"
 	UseAIProviderPriority = 0
 
+	// DefaultClientTimeoutBudgetSeconds 是客户端超时预算的默认值（秒）。
+	// 防御模式开启时，代理会把更长的模型 timeout_seconds 裁剪到该值，
+	// 避免 VS/Copilot 在 ~100 秒客户端超时后才收到上游响应。
+	// 防御模式关闭时，该值不生效，由模型 timeout_seconds 直接决定。
 	DefaultClientTimeoutBudgetSeconds = 90
-	MinClientTimeoutBudgetSeconds     = 15
-	MaxClientTimeoutBudgetSeconds     = 95
+	// MinClientTimeoutBudgetSeconds 和 MaxClientTimeoutBudgetSeconds 是
+	// 防御模式开启时 client_timeout_budget_seconds 的合法范围。
+	// 用户设置的值超出此范围会被钳位。
+	MinClientTimeoutBudgetSeconds = 15
+	MaxClientTimeoutBudgetSeconds = 95
 )
 
 // ProviderConfig 表示一个 AI 提供商的配置。
@@ -64,10 +71,12 @@ type AppConfig struct {
 }
 
 // DefenseConfig 控制代理侧对 OpenAI-compatible 上游的防御行为。
-// Enabled 用指针是为了区分“旧配置没写该字段”和“用户明确关闭”：旧配置升级时默认开启。
+// Enabled 用指针是为了区分"旧配置没写该字段"和"用户明确关闭"：旧配置升级时默认开启。
+// 注意：Enabled 同时控制 client_timeout_budget_seconds 是否生效——
+// 关闭后超时预算不裁剪，模型 timeout_seconds 直接透传到底层。
 type DefenseConfig struct {
-	Enabled                    *bool `json:"enabled"`                       // 是否启用短重试、稳定 User-Agent、限流冷却和协议兜底
-	ClientTimeoutBudgetSeconds *int  `json:"client_timeout_budget_seconds"` // VS/Copilot 等客户端等待预算，代理会把更长的模型超时裁剪到该值
+	Enabled                    *bool `json:"enabled"`                       // 是否启用短重试、稳定 User-Agent、限流冷却、协议兜底和超时预算裁剪
+	ClientTimeoutBudgetSeconds *int  `json:"client_timeout_budget_seconds"` // 客户端超时预算（秒），仅在防御模式开启时生效；关闭时该值被忽略，模型 timeout_seconds 直接透传
 }
 
 // DefaultConfigDir 返回本项目默认配置目录。
@@ -205,6 +214,14 @@ func NormalizeModel(m ModelConfig) ModelConfig {
 	return m
 }
 
+// NormalizeForRuntime 对配置进行运行时归一化，确保各字段合法且与旧配置兼容。
+//
+// 核心职责：
+//   - defense.enabled 默认为 true（向后兼容旧配置）；
+//   - 防御开启时，client_timeout_budget_seconds 钳位到 [MinClientTimeoutBudgetSeconds, MaxClientTimeoutBudgetSeconds]；
+//   - 防御关闭时，跳过预算钳位，让运行时直接透传模型 timeout_seconds；
+//   - 确保 UseAI 内置 provider 始终在列表第一位；
+//   - 将模型的 provider 旧字段迁移到 provider_id 稳定标识。
 func NormalizeForRuntime(cfg *AppConfig) {
 	if cfg == nil {
 		return
@@ -219,11 +236,15 @@ func NormalizeForRuntime(cfg *AppConfig) {
 		if budget <= 0 {
 			budget = DefaultClientTimeoutBudgetSeconds
 		}
-		if budget < MinClientTimeoutBudgetSeconds {
-			budget = MinClientTimeoutBudgetSeconds
-		}
-		if budget > MaxClientTimeoutBudgetSeconds {
-			budget = MaxClientTimeoutBudgetSeconds
+		// 防御关闭时，不强制钳位预算范围，让运行时直接透传模型 timeout_seconds。
+		// 用户主动关闭防御意味着期望完全控制超时策略，不再需要安全阀保护。
+		if cfg.Defense.Enabled == nil || *cfg.Defense.Enabled {
+			if budget < MinClientTimeoutBudgetSeconds {
+				budget = MinClientTimeoutBudgetSeconds
+			}
+			if budget > MaxClientTimeoutBudgetSeconds {
+				budget = MaxClientTimeoutBudgetSeconds
+			}
 		}
 		cfg.Defense.ClientTimeoutBudgetSeconds = intPtr(budget)
 	}

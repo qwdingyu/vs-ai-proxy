@@ -356,6 +356,7 @@ func TestDiagnosticsSummaryEndpointReturnsCopyableSummary(t *testing.T) {
 		DiagnosticSummary: "VS/Copilot 接近等待上限后取消",
 		CancelReason:      "client_deadline_reached",
 		StreamState:       "waiting_response_headers",
+		RequestBytes:      450 * 1024,
 		IsSuccess:         false,
 	})
 
@@ -378,14 +379,174 @@ func TestDiagnosticsSummaryEndpointReturnsCopyableSummary(t *testing.T) {
 	if !strings.Contains(got.CopySummary, "client_deadline_reached") || !strings.Contains(got.CopySummary, "查上游首 token") {
 		t.Fatalf("copy_summary missing actionable failure details: %q", got.CopySummary)
 	}
+	if !strings.Contains(got.CopySummary, "只读观测") || !strings.Contains(got.CopySummary, "大包预警") {
+		t.Fatalf("copy_summary missing read-only stability / large-packet note: %q", got.CopySummary)
+	}
 	if got.LatestFailure.ErrorCode != "client_deadline_reached" {
 		t.Fatalf("latest failure = %#v", got.LatestFailure)
 	}
 	if len(got.RecentStability) != 1 || got.RecentStability[0].Failures != 1 || got.RecentStability[0].TopCancelReasons[0].Key != "client_deadline_reached" {
 		t.Fatalf("recent stability = %#v, want one failing useai summary with cancel reason", got.RecentStability)
 	}
+	if got.RecentStability[0].RequestBytesP95 < 400*1024 {
+		t.Fatalf("recent stability request_bytes_p95 = %d, want ≥400KB for large-packet copy note", got.RecentStability[0].RequestBytesP95)
+	}
 	if len(got.ProblemProviders) == 0 || got.ProblemProviders[0].Provider != "useai" {
 		t.Fatalf("problem providers = %#v, want useai", got.ProblemProviders)
+	}
+}
+
+func TestDiagnosticsSummaryExposesObservationSingleSourceOfTruth(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	apiSrv.store.AddLog(store.RequestLog{
+		Method:       "POST",
+		Path:         "/v1/chat/completions",
+		Provider:     "useai",
+		Model:        "deepseek-v4-flash",
+		Upstream:     "deepseek-v4-flash",
+		StatusCode:   200,
+		IsSuccess:    true,
+		RequestBytes: 450 * 1024,
+	})
+
+	rec := httptest.NewRecorder()
+	apiSrv.engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnostics/summary", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Observation struct {
+			ReadOnly              bool  `json:"read_only"`
+			RecentStabilityLimit  int   `json:"recent_stability_limit"`
+			LargeRequestWarnBytes int64 `json:"large_request_warn_bytes"`
+			LargePacketGroupCount int   `json:"large_packet_group_count"`
+		} `json:"observation"`
+		CopySummary string `json:"copy_summary"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Observation.ReadOnly {
+		t.Fatalf("observation.read_only = false, want true (never drive routing)")
+	}
+	if got.Observation.RecentStabilityLimit != recentStabilitySampleLimit {
+		t.Fatalf("recent_stability_limit = %d, want %d", got.Observation.RecentStabilityLimit, recentStabilitySampleLimit)
+	}
+	if got.Observation.LargeRequestWarnBytes != proxy.LargeRequestWarnBytes {
+		t.Fatalf("large_request_warn_bytes = %d, want proxy.LargeRequestWarnBytes=%d", got.Observation.LargeRequestWarnBytes, proxy.LargeRequestWarnBytes)
+	}
+	if got.Observation.LargePacketGroupCount != 1 {
+		t.Fatalf("large_packet_group_count = %d, want 1", got.Observation.LargePacketGroupCount)
+	}
+	if !strings.Contains(got.CopySummary, "大包预警") {
+		t.Fatalf("copy_summary should use observation large-packet count: %q", got.CopySummary)
+	}
+}
+
+func TestDiagnosticsCopySummaryNotesUpstreamNoResponseIsNotLocalOffline(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	apiSrv.store.AddLog(store.RequestLog{
+		Method:      "POST",
+		Path:        "/v1/chat/completions",
+		Provider:    "useai",
+		Model:       "deepseek-v4-flash",
+		Upstream:    "deepseek-v4-flash",
+		StatusCode:  502,
+		ErrorCode:   "upstream_no_response",
+		ErrorReason: "上游接收后未响应",
+		ErrorAction: "非本机断网。减上下文后重试，或换更稳同模型渠道。",
+		StreamState: "upstream_waiting_response_headers",
+		IsSuccess:   false,
+	})
+
+	rec := httptest.NewRecorder()
+	apiSrv.engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnostics/summary", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		CopySummary string `json:"copy_summary"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(got.CopySummary, "不是本机断网") {
+		t.Fatalf("copy_summary missing not-local-offline note: %q", got.CopySummary)
+	}
+	if strings.Count(got.CopySummary, "不是本机断网") != 1 {
+		t.Fatalf("copy_summary should mention not-local-offline once, got: %q", got.CopySummary)
+	}
+}
+
+func TestCountLargePacketStabilityGroupsUsesWarnThreshold(t *testing.T) {
+	items := []store.StabilitySummary{
+		{Provider: "a", RequestBytesP95: proxy.LargeRequestWarnBytes - 1},
+		{Provider: "b", RequestBytesP95: proxy.LargeRequestWarnBytes},
+		{Provider: "c", RequestBytesP95: proxy.LargeRequestWarnBytes + 1},
+		{Provider: "d", RequestBytesP95: 0},
+	}
+	if got := countLargePacketStabilityGroups(items, proxy.LargeRequestWarnBytes); got != 2 {
+		t.Fatalf("count = %d, want 2 groups at/above threshold", got)
+	}
+	if got := countLargePacketStabilityGroups(items, 0); got != 0 {
+		t.Fatalf("warnBytes<=0 must count 0, got %d", got)
+	}
+	if got := countLargePacketStabilityGroups(nil, proxy.LargeRequestWarnBytes); got != 0 {
+		t.Fatalf("nil input count = %d, want 0", got)
+	}
+}
+
+func TestBuildDiagnosticsObservationDefaults(t *testing.T) {
+	obs := buildDiagnosticsObservation(nil)
+	if !obs.ReadOnly || obs.RecentStabilityLimit != recentStabilitySampleLimit {
+		t.Fatalf("observation defaults = %#v", obs)
+	}
+	if obs.LargeRequestWarnBytes != proxy.LargeRequestWarnBytes {
+		t.Fatalf("warn bytes = %d, want %d", obs.LargeRequestWarnBytes, proxy.LargeRequestWarnBytes)
+	}
+	if obs.LargePacketGroupCount != 0 {
+		t.Fatalf("empty stability large_packet_group_count = %d, want 0", obs.LargePacketGroupCount)
+	}
+}
+
+func TestDiagnosticsSummaryOmitsLargePacketWarningWhenBelowThreshold(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+	apiSrv.store.AddLog(store.RequestLog{
+		Method: "POST", Path: "/v1/chat/completions",
+		Provider: "deepseek", Model: "deepseek-v4-flash", Upstream: "deepseek-v4-flash",
+		StatusCode: 200, IsSuccess: true, RequestBytes: proxy.LargeRequestWarnBytes - 1,
+	})
+
+	rec := httptest.NewRecorder()
+	apiSrv.engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnostics/summary", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Observation diagnosticsObservation    `json:"observation"`
+		CopySummary string                    `json:"copy_summary"`
+		Stability   []store.StabilitySummary  `json:"recent_stability"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Observation.LargePacketGroupCount != 0 {
+		t.Fatalf("large_packet_group_count = %d, want 0", got.Observation.LargePacketGroupCount)
+	}
+	if strings.Contains(got.CopySummary, "大包预警") {
+		t.Fatalf("copy_summary should not warn below threshold: %q", got.CopySummary)
+	}
+	if len(got.Stability) != 1 {
+		t.Fatalf("stability = %#v, want one group", got.Stability)
+	}
+}
+
+func TestIsUpstreamConnectivityMisreadCode(t *testing.T) {
+	if !isUpstreamConnectivityMisreadCode("upstream_no_response") || !isUpstreamConnectivityMisreadCode("upstream_stream_interrupted") {
+		t.Fatal("expected upstream connectivity misread codes")
+	}
+	if isUpstreamConnectivityMisreadCode("network_error") || isUpstreamConnectivityMisreadCode("") {
+		t.Fatal("network_error / empty must not use not-local-offline note")
 	}
 }
 

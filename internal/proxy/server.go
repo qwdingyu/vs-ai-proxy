@@ -25,6 +25,9 @@ import (
 )
 
 const (
+	// defaultModelTimeoutSeconds 是模型未配置 timeout_seconds 时的默认上游超时（秒）。
+	// 防御开启时会被 client_timeout_budget_seconds（默认 90）进一步裁剪；
+	// 防御关闭时直接透传。
 	defaultModelTimeoutSeconds        = 180
 	clientDeadlineDiagnosticThreshold = 90_000
 	maxChatRequestBodyBytes           = 32 << 20
@@ -206,6 +209,9 @@ func (s *Server) providerFromConfig(cfg *config.AppConfig, p config.ProviderConf
 	}
 }
 
+// proxyDefenseEnabled 判断防御模式是否开启。
+// cfg 为 nil 或 Defense.Enabled 为 nil 时返回 true（默认开启），
+// 确保旧配置（无 defense 字段）自动获得安全阀保护。
 func proxyDefenseEnabled(cfg *config.AppConfig) bool {
 	if cfg == nil || cfg.Defense.Enabled == nil {
 		return true
@@ -213,6 +219,10 @@ func proxyDefenseEnabled(cfg *config.AppConfig) bool {
 	return *cfg.Defense.Enabled
 }
 
+// applyDefenseCandidatePolicy 限制候选 provider 数量。
+// 注意：本函数当前不检查 Defense.Enabled，始终只保留首选候选。
+// 这是设计决策——new-api/sub2api 等上游网关内部负责渠道轮换，
+// 代理层跨 provider 自动兜底会掩盖真实 provider 错误、放大请求与计费。
 func applyDefenseCandidatePolicy(cfg *config.AppConfig, candidates []provider.Candidate) []provider.Candidate {
 	// VS Stable 默认只执行首选候选：new-api/sub2api 这类上游网关内部本身负责渠道轮换。
 	// 代理层跨 provider 自动兜底会掩盖真实 provider 错误、放大请求与计费，
@@ -363,9 +373,6 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		ww.finalizeRequestStatus(reqWithID)
 
 		elapsed := time.Since(start).Seconds() * 1000
-		if s.logger != nil && shouldWarnLargeChatRequest(reqWithID.URL.Path, reqWithID.ContentLength, ww.upstreamBytes) {
-			s.logger.Warn("大请求体: path=%s request_id=%s request_bytes=%s upstream_bytes=%s action=减少会话历史/附件或切换更稳定渠道", reqWithID.URL.Path, requestID, humanBytes(reqWithID.ContentLength), humanBytes(ww.upstreamBytes))
-		}
 
 		// 优先使用 responseWriter 上 handler 直接设置的字段，
 		// 兜底从响应头读取（兼容测试代码等不走 handler 直接设置头部的路径）。
@@ -380,6 +387,12 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		upstream := ww.upstream
 		if upstream == "" {
 			upstream = firstNonEmptyHeader(ww.Header(), "X-Proxy-Upstream-Model", "X-Proxy-Primary-Upstream")
+		}
+		// 大包 WARN 放在 provider/model 解析之后，便于日志与管理页 recent_stability 对齐排查。
+		// 只观测不阻断；阈值见 largeRequestWarnBytes（约 400KB）。
+		if s.logger != nil && shouldWarnLargeChatRequest(reqWithID.URL.Path, reqWithID.ContentLength, ww.upstreamBytes) {
+			s.logger.Warn("大请求体: path=%s request_id=%s provider=%s model=%s upstream=%s request_bytes=%s upstream_bytes=%s note=中转站大包易等头失败 action=减少会话历史/附件或切换更稳定渠道",
+				reqWithID.URL.Path, requestID, provider, model, upstream, humanBytes(reqWithID.ContentLength), humanBytes(ww.upstreamBytes))
 		}
 		errorCode := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Code")
 		errorMessage := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Message")
@@ -424,7 +437,9 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if logErrorCode == "" && ww.statusCode >= http.StatusBadRequest {
 			logErrorCode = fallbackLogErrorCode(ww.statusCode)
 		}
-		diagSummary := summarizeLogDiagnostic(logErrorCode, ww.statusCode, elapsed, r.ContentLength, ww.upstreamBytes, networkPeer, streamState, requestTools, responseTools)
+		// 观测用体量：Content-Length 缺失（-1/0）时用上游序列化体量兜底，避免 recent_stability 的 p95 与大包 WARN 漏报。
+		observedRequestBytes := observedRequestBytes(r.ContentLength, ww.upstreamBytes)
+		diagSummary := summarizeLogDiagnostic(logErrorCode, ww.statusCode, elapsed, observedRequestBytes, ww.upstreamBytes, networkPeer, streamState, requestTools, responseTools)
 
 		s.store.AddLog(store.RequestLog{
 			RequestID:                requestID,
@@ -433,7 +448,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			Provider:                 provider,
 			Model:                    model,
 			Upstream:                 upstream,
-			RequestBytes:             r.ContentLength,
+			RequestBytes:             observedRequestBytes,
 			UpstreamBytes:            ww.upstreamBytes,
 			ConfiguredTimeoutSeconds: configuredTimeout,
 			EffectiveTimeoutSeconds:  effectiveTimeout,
@@ -892,6 +907,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			err := s.handleStream(streamWriter, streamReq, prov, req, provider.ApiFormatOpenAi)
 			cancel()
 			if err != nil {
+				if isClientGoneError(err) {
+					return
+				}
 				lastErr = err
 				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 				attempts = append(attempts, attempt)
@@ -952,6 +970,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						err = alternateChatModeFailure(err, fallbackErr)
 					}
 					cancel()
+					if isClientGoneError(err) {
+						return
+					}
 					lastErr = err
 					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 					attempts = append(attempts, attempt)
@@ -1046,6 +1067,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				err = alternateChatModeFailure(err, fallbackErr)
 			}
 			cancel()
+			if isClientGoneError(err) {
+				return
+			}
 			lastErr = err
 			attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 			attempts = append(attempts, attempt)
@@ -1265,6 +1289,9 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 				body, err := rawProvider.ChatRaw(ctx, req)
 				cancel()
 				if err != nil {
+					if isClientGoneError(err) {
+						return
+					}
 					lastErr = err
 					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
 					attempts = append(attempts, attempt)
@@ -1978,6 +2005,11 @@ func buildOllamaStreamChunk(model, content string, toolCalls []any, done bool, d
 	return json.Marshal(chunk)
 }
 
+// modelTimeoutSeconds 计算模型的配置超时和有效超时。
+//
+// 返回两个值：
+//   - configuredTimeout：模型配置的 timeout_seconds，或 profile 中的值，或默认 180 秒；
+//   - effectiveTimeout：防御开启时裁剪到 client_timeout_budget_seconds，关闭时等于 configuredTimeout。
 func modelTimeoutSeconds(
 	cfg *config.AppConfig,
 	requestedModel string,
@@ -1996,15 +2028,24 @@ func modelTimeoutSeconds(
 	return configuredTimeout, effectiveClientBoundTimeoutSeconds(cfg, configuredTimeout)
 }
 
+// effectiveClientBoundTimeoutSeconds 返回有效上游超时（秒），
+// 在防御开启时把模型 timeout_seconds 裁剪到 client_timeout_budget_seconds，
+// 避免 VS/Copilot 客户端在 ~100 秒超时后代理才收到上游响应。
+// 防御关闭时直接透传 configuredTimeout，不做裁剪。
 func effectiveClientBoundTimeoutSeconds(cfg *config.AppConfig, configuredTimeout int) int {
 	if configuredTimeout <= 0 {
 		return 0
 	}
+	// 防御关闭时，不裁剪上游超时，直接透传模型 timeout_seconds，
+	// 让用户自行决定超时策略（由模型配置或 profile 默认值决定）。
+	if cfg != nil && !proxyDefenseEnabled(cfg) {
+		return configuredTimeout
+	}
 	// VS/Copilot 实测会在约 100 秒取消 /v1/chat/completions。
 	// 如果代理允许 180/300 秒上游超时，用户只能等到客户端断开并看到 499，
 	// 上游网关也没有机会在客户端预算内完成失败切换。因此默认把有效上游预算
-	// 压到 client_timeout_budget_seconds：保留配置中“更短”的超时，但不让
-	// “更长”的 profile 超过客户端可等待窗口。
+	// 压到 client_timeout_budget_seconds：保留配置中"更短"的超时，但不让
+	// "更长"的 profile 超过客户端可等待窗口。
 	budget := config.DefaultClientTimeoutBudgetSeconds
 	if cfg != nil && cfg.Defense.ClientTimeoutBudgetSeconds != nil && *cfg.Defense.ClientTimeoutBudgetSeconds > 0 {
 		budget = *cfg.Defense.ClientTimeoutBudgetSeconds
@@ -2063,6 +2104,12 @@ func requestContextWithTimeout(parent context.Context, timeoutSeconds int) (cont
 	return context.WithTimeout(parent, time.Duration(timeoutSeconds)*time.Second)
 }
 
+// alternateChatModeFailure 包装初始模式失败和备用模式也失败两个错误。
+//
+// 双重 Unwrap() 设计（Go 1.20+ errors.As / errors.Is 支持 []error Unwrap）：
+// 同时暴露 initialErr 和 fallbackErr 的错误链，确保 provider.UpstreamAttempts(err)
+// 能从 initialErr 中提取上游尝试明细（httptrace 阶段、HTTP 状态码等），
+// 而不是因为 %v 格式化丢失诊断关键信息。
 func alternateChatModeFailure(initialErr, fallbackErr error) error {
 	if fallbackErr == nil {
 		return initialErr
@@ -2070,7 +2117,27 @@ func alternateChatModeFailure(initialErr, fallbackErr error) error {
 	if initialErr == nil {
 		return fallbackErr
 	}
-	return fmt.Errorf("备用聊天模式失败: %w（初始模式错误: %v）", fallbackErr, initialErr)
+	return &alternateChatModeError{initial: initialErr, fallback: fallbackErr}
+}
+
+type alternateChatModeError struct {
+	initial  error
+	fallback error
+}
+
+func (e *alternateChatModeError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("备用聊天模式失败: %v（初始模式错误: %v）", e.fallback, e.initial)
+}
+
+// Unwrap 返回两个错误链，errors.As / errors.Is 会按 initial → fallback 顺序搜索。
+func (e *alternateChatModeError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	return []error{e.initial, e.fallback}
 }
 
 func (s *Server) logProviderAttemptFailureForRequest(ctx context.Context, requestedModel, modelID, providerName string, attempt attemptDiagnostic) {

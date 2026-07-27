@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -966,13 +967,17 @@ func withUpstreamAttempts(err error, attempts []UpstreamAttempt) error {
 
 // newUpstreamAttempt 将一次 provider 内部尝试的最终错误转换为结构化摘要。
 // HTTP 错误优先保存状态码；传输错误优先保存 httptrace 阶段。
+//
+// 预脱敏：Error 文本在存入选前就移除 API Key / Token，防止未来新增代码
+// 绕过 proxy 层脱敏直接读取 UpstreamAttempt.Error 导致凭据泄露。
+// proxy 层仍会通过 sanitizeDiagnosticMessage 做第二次脱敏（防御纵深）。
 func newUpstreamAttempt(err error, elapsed time.Duration) UpstreamAttempt {
 	attempt := UpstreamAttempt{
 		Elapsed: elapsed,
 		Error:   "",
 	}
 	if err != nil {
-		attempt.Error = err.Error()
+		attempt.Error = sanitizeUpstreamErrorText(err.Error())
 	}
 	var httpErr *providerHTTPError
 	if errors.As(err, &httpErr) {
@@ -984,6 +989,24 @@ func newUpstreamAttempt(err error, elapsed time.Duration) UpstreamAttempt {
 	}
 	return attempt
 }
+
+// sanitizeUpstreamErrorText 移除错误文本中的 API Key 和 Bearer Token。
+// 这是 provider 层的防御性脱敏；proxy 层会做更全面的脱敏（sanitizeDiagnosticMessage）。
+func sanitizeUpstreamErrorText(text string) string {
+	// Bearer token: "Bearer sk-xxx" → "Bearer <redacted>"
+	text = upstreamBearerTokenPattern.ReplaceAllString(text, "${1}<redacted>")
+	// OpenAI key: "sk-xxx" → "sk-<redacted>"
+	text = upstreamOpenAIKeyPattern.ReplaceAllString(text, "sk-<redacted>")
+	// API key in assignment contexts: "api_key=xxx" / "api-key: xxx" → masked
+	text = upstreamAPIKeyAssignmentPattern.ReplaceAllString(text, "${1}<redacted>")
+	return text
+}
+
+var (
+	upstreamBearerTokenPattern    = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}`)
+	upstreamOpenAIKeyPattern      = regexp.MustCompile(`sk-[A-Za-z0-9_-]{12,}`)
+	upstreamAPIKeyAssignmentPattern = regexp.MustCompile(`(?i)(api[_-]?key["'\s:=]+)[A-Za-z0-9._~+/=-]{12,}`)
+)
 
 const openAIProviderMaxAttempts = 3
 
@@ -1059,13 +1082,33 @@ func isRetryableConnectionBreak(err error) bool {
 	if err == nil {
 		return false
 	}
+	// 标准库哨兵错误：这些错误明确表示连接级断开，不是业务错误。
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
+	// *net.DNSError 和 *net.OpError 必须放在 net.Error 接口检查之前。
+	// 它们都实现了 net.Error（Timeout/Temporary），若不先做具体类型匹配，
+	// 会被 net.Error 分支捕获并因为 IsTimeout==false 而错误地返回 false。
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if isRetryableOpError(opErr) {
+			return true
+		}
+	}
+	// net.Error.Timeout：网络超时，仅用于未被上述具体类型匹配的错误。
+	// 拨号超时 = 连接未建立，安全重试；
+	// 读写超时 = 可能在已提交后发生，交给阶段机判断（调用方控制）。
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return netErr.Timeout()
 	}
+	// 字符串启发式兜底：仅用于错误文本无法被类型系统覆盖的平台/驱动场景。
+	// 该分支的 blast radius 已由调用方（isRetryableUpstreamTransportError）的
+	// 阶段门禁限制在连接建立前阶段。
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, "empty reply") ||
 		strings.Contains(lower, "connection reset") ||
@@ -1076,6 +1119,37 @@ func isRetryableConnectionBreak(err error) bool {
 		strings.Contains(lower, "network is unreachable") ||
 		strings.Contains(lower, "use of closed network connection") ||
 		strings.Contains(lower, "eof")
+}
+
+// isRetryableOpError 基于 *net.OpError 的结构化字段判断是否是连接建立阶段的瞬态错误。
+func isRetryableOpError(opErr *net.OpError) bool {
+	if opErr == nil || opErr.Err == nil {
+		return false
+	}
+	// context 取消/超时不应重试，调用方已有独立检查。
+	if errors.Is(opErr.Err, context.Canceled) || errors.Is(opErr.Err, context.DeadlineExceeded) {
+		return false
+	}
+	// "dial" 操作：连接尚未建立，安全重试。
+	// "read" / "write" 操作：连接已建立，调用方的阶段机决定是否安全。
+	if opErr.Op == "dial" {
+		return true
+	}
+	// 探测底层 syscall 错误类型。dial 之外的 op 也可能由连接重置导致。
+	if isRetryableSyscallError(opErr.Err) {
+		return true
+	}
+	return false
+}
+
+// isRetryableSyscallError 判断底层系统调用错误是否是连接建立阶段的瞬态错误。
+func isRetryableSyscallError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "broken pipe")
 }
 
 // ShouldAttemptAlternateChatMode 判断流式与非流式之间是否值得做一次协议兜底。

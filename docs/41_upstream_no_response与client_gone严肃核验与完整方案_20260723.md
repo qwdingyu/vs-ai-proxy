@@ -42,7 +42,7 @@
 - `internal/proxy/server.go`（候选策略、超时预算、`finalizeRequestStatus`、`shouldStopCandidateFallback`）
 - `internal/config/config.go`（Defense 默认值）
 - `internal/store/store.go` / `internal/api/api.go`（`recent_stability` 仅观测）
-- `docs/15_*`、`docs/17_*`、`docs/38_*`、`docs/39_*`、`docs/40_*`
+- `docs/15_*`、`docs/17_*`、`docs/38_*`、`docs/39_*`、`docs/40_*`、`docs/42_*`（UseAI 50 轮 400KB long soak 当次实测）
 - 相关回归测试名（见第 9 节）
 
 `go test ./internal/provider ./internal/proxy ./internal/store -count=0` 在本轮核验时可通过（仅编译/装载，不代表跑全量用例）。

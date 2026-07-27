@@ -369,6 +369,19 @@ type runtimeStatusResponse struct {
 	UpdateArtifacts runtimeUpdateArtifacts `json:"update_artifacts"`
 }
 
+// recentStabilitySampleLimit 是 /diagnostics/summary 聚合 recent_stability 时扫描的最近日志条数。
+// 与 store 保留窗口无关的“观测窗口”上限；只读，不参与路由/熔断。
+const recentStabilitySampleLimit = 200
+
+// diagnosticsObservation 是管理页/复制摘要共用的观测元数据。
+// 阈值与窗口只在服务端定义一次，前端禁止再写魔法数，避免与代理 WARN 分叉。
+type diagnosticsObservation struct {
+	ReadOnly              bool  `json:"read_only"`
+	RecentStabilityLimit  int   `json:"recent_stability_limit"`
+	LargeRequestWarnBytes int64 `json:"large_request_warn_bytes"`
+	LargePacketGroupCount int   `json:"large_packet_group_count"`
+}
+
 type diagnosticsSummaryResponse struct {
 	Runtime          runtimeStatusResponse    `json:"runtime"`
 	Statistics       store.Statistics         `json:"statistics"`
@@ -376,6 +389,7 @@ type diagnosticsSummaryResponse struct {
 	RecentStability  []store.StabilitySummary `json:"recent_stability"`
 	ProviderHealth   []providerHealthResponse `json:"provider_health"`
 	ProblemProviders []providerHealthResponse `json:"problem_providers"`
+	Observation      diagnosticsObservation   `json:"observation"`
 	CopySummary      string                   `json:"copy_summary"`
 }
 
@@ -406,7 +420,7 @@ func (s *Server) getDiagnosticsSummary(c *gin.Context) {
 	if item, ok := s.store.GetLatestFailure(); ok {
 		latestFailure = item
 	}
-	recentStability := s.store.GetRecentStabilitySummary(200)
+	recentStability := s.store.GetRecentStabilitySummary(recentStabilitySampleLimit)
 	providerHealth := s.providerHealthSnapshotResponse()
 	problemProviders := []providerHealthResponse{}
 	for _, item := range providerHealth {
@@ -414,6 +428,7 @@ func (s *Server) getDiagnosticsSummary(c *gin.Context) {
 			problemProviders = append(problemProviders, item)
 		}
 	}
+	observation := buildDiagnosticsObservation(recentStability)
 
 	c.JSON(http.StatusOK, diagnosticsSummaryResponse{
 		Runtime:          s.runtimeStatusPayload(),
@@ -422,8 +437,31 @@ func (s *Server) getDiagnosticsSummary(c *gin.Context) {
 		RecentStability:  recentStability,
 		ProviderHealth:   providerHealth,
 		ProblemProviders: problemProviders,
-		CopySummary:      buildDiagnosticsCopySummary(stats, latestFailure, recentStability, problemProviders),
+		Observation:      observation,
+		CopySummary:      buildDiagnosticsCopySummary(stats, latestFailure, recentStability, problemProviders, observation),
 	})
+}
+
+func buildDiagnosticsObservation(recentStability []store.StabilitySummary) diagnosticsObservation {
+	return diagnosticsObservation{
+		ReadOnly:              true,
+		RecentStabilityLimit:  recentStabilitySampleLimit,
+		LargeRequestWarnBytes: proxy.LargeRequestWarnBytes,
+		LargePacketGroupCount: countLargePacketStabilityGroups(recentStability, proxy.LargeRequestWarnBytes),
+	}
+}
+
+func countLargePacketStabilityGroups(recentStability []store.StabilitySummary, warnBytes int64) int {
+	if warnBytes <= 0 {
+		return 0
+	}
+	n := 0
+	for _, item := range recentStability {
+		if item.RequestBytesP95 >= warnBytes {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *Server) runtimeStatusPayload() runtimeStatusResponse {
@@ -546,7 +584,7 @@ func (s *Server) providerHealthSnapshotResponse() []providerHealthResponse {
 	return out
 }
 
-func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.RequestLog, recentStability []store.StabilitySummary, problemProviders []providerHealthResponse) string {
+func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.RequestLog, recentStability []store.StabilitySummary, problemProviders []providerHealthResponse, observation diagnosticsObservation) string {
 	lines := []string{
 		fmt.Sprintf("请求统计: total=%d success=%d failure=%d avg=%.0fms", stats.TotalRequests, stats.SuccessCount, stats.FailureCount, stats.AvgLatencyMs),
 	}
@@ -562,6 +600,9 @@ func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.Req
 		}
 		if strings.TrimSpace(latestFailure.DiagnosticSummary) != "" {
 			lines = append(lines, "摘要: "+latestFailure.DiagnosticSummary)
+		}
+		if isUpstreamConnectivityMisreadCode(latestFailure.ErrorCode) {
+			lines = append(lines, upstreamConnectivityMisreadNote)
 		}
 	}
 	if len(problemProviders) > 0 {
@@ -581,16 +622,39 @@ func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.Req
 			item := recentStability[i]
 			parts = append(parts, fmt.Sprintf("%s/%s/%s runs=%d ok=%d fail=%d rate=%.0f%%", item.Provider, item.Model, item.Upstream, item.Runs, item.Successes, item.Failures, item.SuccessRate*100))
 		}
-		lines = append(lines, "近期稳定性: "+strings.Join(parts, " | "))
+		lines = append(lines, "近期稳定性(只读观测,不参与熔断): "+strings.Join(parts, " | "))
+		warnKB := observation.LargeRequestWarnBytes / 1024
+		if warnKB <= 0 {
+			warnKB = proxy.LargeRequestWarnBytes / 1024
+		}
+		if observation.LargePacketGroupCount > 0 {
+			lines = append(lines, fmt.Sprintf("大包预警: %d 组 provider/model 近窗 request_bytes_p95≥%dKB（中转站易出现 upstream_no_response，≠本机未联网）", observation.LargePacketGroupCount, warnKB))
+		}
 		if recentStability[0].LatestFailure != nil {
 			failure := recentStability[0].LatestFailure
 			lines = append(lines, fmt.Sprintf("近期最新失败: request_id=%s status=%d code=%s stream=%s cancel=%s", failure.RequestID, failure.StatusCode, failure.ErrorCode, failure.StreamState, failure.CancelReason))
 			if strings.TrimSpace(failure.ErrorReason) != "" {
 				lines = append(lines, "近期失败原因: "+failure.ErrorReason)
 			}
+			// 若全局 latest_failure 已写过同说明，避免 copy_summary 重复两行。
+			if isUpstreamConnectivityMisreadCode(failure.ErrorCode) && !isUpstreamConnectivityMisreadCode(latestFailure.ErrorCode) {
+				lines = append(lines, upstreamConnectivityMisreadNote)
+			}
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// upstreamConnectivityMisreadNote 供诊断复制摘要使用：把“等头/半截流”与本机断网区分开。
+const upstreamConnectivityMisreadNote = "说明: upstream_no_response/stream_interrupted 表示上游或中转链路问题，不是本机断网；请减上下文或换官方/更稳渠道。"
+
+func isUpstreamConnectivityMisreadCode(code string) bool {
+	switch strings.TrimSpace(code) {
+	case "upstream_no_response", "upstream_stream_interrupted":
+		return true
+	default:
+		return false
+	}
 }
 
 // getConfig 获取当前配置快照

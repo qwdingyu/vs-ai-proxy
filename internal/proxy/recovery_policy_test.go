@@ -86,17 +86,33 @@ func TestRequestLogIsSuccessRequiresEmptyErrorCode(t *testing.T) {
 
 func TestShouldWarnLargeChatRequestThreshold(t *testing.T) {
 	t.Parallel()
-	if shouldWarnLargeChatRequest("/health", largeRequestWarnBytes, 0) {
+	if shouldWarnLargeChatRequest("/health", LargeRequestWarnBytes, 0) {
 		t.Fatal("non-chat path must not warn")
 	}
-	if shouldWarnLargeChatRequest("/v1/chat/completions", largeRequestWarnBytes-1, largeRequestWarnBytes-1) {
+	if shouldWarnLargeChatRequest("/v1/chat/completions", LargeRequestWarnBytes-1, LargeRequestWarnBytes-1) {
 		t.Fatal("below threshold must not warn")
 	}
-	if !shouldWarnLargeChatRequest("/v1/chat/completions", largeRequestWarnBytes, 0) {
+	if !shouldWarnLargeChatRequest("/v1/chat/completions", LargeRequestWarnBytes, 0) {
 		t.Fatal("request bytes at threshold must warn")
 	}
-	if !shouldWarnLargeChatRequest("/api/chat", 0, largeRequestWarnBytes) {
+	if !shouldWarnLargeChatRequest("/api/chat", 0, LargeRequestWarnBytes) {
 		t.Fatal("upstream bytes at threshold must warn")
+	}
+}
+
+func TestObservedRequestBytesFallsBackToUpstreamSize(t *testing.T) {
+	t.Parallel()
+	if got := observedRequestBytes(1234, 9999); got != 1234 {
+		t.Fatalf("prefer content-length: got %d", got)
+	}
+	if got := observedRequestBytes(-1, LargeRequestWarnBytes); got != LargeRequestWarnBytes {
+		t.Fatalf("unknown content-length should use upstream bytes: got %d", got)
+	}
+	if got := observedRequestBytes(0, 512); got != 512 {
+		t.Fatalf("zero content-length should use upstream bytes: got %d", got)
+	}
+	if got := observedRequestBytes(-1, 0); got != 0 {
+		t.Fatalf("no sizes available should stay 0: got %d", got)
 	}
 }
 
@@ -121,5 +137,50 @@ func TestCanAttemptAlternateChatModeRequiresDefenseAndLiveClient(t *testing.T) {
 	cancel()
 	if canAttemptAlternateChatMode(cfgOn, canceled, err5xx) {
 		t.Fatal("canceled client must never allow alternate chat mode")
+	}
+}
+
+
+func TestAlternateChatModeFailureExposesBothErrorChains(t *testing.T) {
+	t.Parallel()
+
+	// 构造两个错误，各带不同的自定义标记类型，
+	// 验证 errors.As 能从 alternateChatModeError.Unwrap() 的两个链中分别找到它们。
+	type initialMarker struct{ error }
+	type fallbackMarker struct{ error }
+
+	initialErr := &initialMarker{errors.New("初始模式网络错误")}
+	fallbackErr := &fallbackMarker{errors.New("备用模式超时")}
+
+	wrapped := alternateChatModeFailure(initialErr, fallbackErr)
+	if wrapped == nil {
+		t.Fatal("alternateChatModeFailure must not return nil when both errors are non-nil")
+	}
+	if wrapped.Error() == "" {
+		t.Fatal("alternateChatModeFailure Error() must not be empty")
+	}
+
+	// 验证 errors.As 能从 initial 链找到 initialMarker。
+	var im *initialMarker
+	if !errors.As(wrapped, &im) {
+		t.Fatal("errors.As must find initialMarker from alternateChatModeError")
+	}
+	// 验证 errors.As 能从 fallback 链找到 fallbackMarker。
+	var fm *fallbackMarker
+	if !errors.As(wrapped, &fm) {
+		t.Fatal("errors.As must find fallbackMarker from alternateChatModeError")
+	}
+
+	// 验证 nil fallback 只返回 initial。
+	if got := alternateChatModeFailure(initialErr, nil); got != initialErr {
+		t.Fatalf("alternateChatModeFailure(initialErr, nil) = %v, want initialErr", got)
+	}
+	// 验证 nil initial 只返回 fallback。
+	if got := alternateChatModeFailure(nil, fallbackErr); got != fallbackErr {
+		t.Fatalf("alternateChatModeFailure(nil, fallbackErr) = %v, want fallbackErr", got)
+	}
+	// 验证两个都 nil 返回 nil。
+	if got := alternateChatModeFailure(nil, nil); got != nil {
+		t.Fatalf("alternateChatModeFailure(nil, nil) = %v, want nil", got)
 	}
 }

@@ -349,6 +349,81 @@ func TestLoggingMiddlewareKeepsLargeRequestErrorConcise(t *testing.T) {
 	}
 }
 
+func TestLoggingMiddlewareFallsBackRequestBytesWhenContentLengthUnknown(t *testing.T) {
+	st := store.New(10)
+	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setResponseLogFields(w, "useai", "deepseek-v4-flash", "deepseek-v4-flash")
+		if rw, ok := w.(*responseWriter); ok {
+			rw.upstreamBytes = LargeRequestWarnBytes + 1024
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// ContentLength=-1 模拟 chunked / 未知长度；观测体量应回退到 upstream_bytes。
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"deepseek-v4-flash"}`))
+	req.ContentLength = -1
+	req.Header.Set("X-Request-ID", "req-cl-unknown")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	logs := st.GetLogs(1)
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if logs[0].RequestBytes != LargeRequestWarnBytes+1024 {
+		t.Fatalf("RequestBytes = %d, want fallback upstream size %d", logs[0].RequestBytes, LargeRequestWarnBytes+1024)
+	}
+	if logs[0].UpstreamBytes != LargeRequestWarnBytes+1024 {
+		t.Fatalf("UpstreamBytes = %d", logs[0].UpstreamBytes)
+	}
+}
+
+func TestLoggingMiddlewareWarnsLargeChatRequestWithProviderModel(t *testing.T) {
+	var buf strings.Builder
+	st := store.New(10)
+	// WARN 必须可输出：使用 LevelWarn 或更低阈值日志级别。
+	server := &Server{store: st, logger: log.New(&buf, log.LevelWarn, false)}
+	handler := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setResponseLogFields(w, "useai", "UseAI - deepseek-v4-flash", "deepseek-v4-flash")
+		if rw, ok := w.(*responseWriter); ok {
+			rw.upstreamBytes = LargeRequestWarnBytes
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	body := strings.Repeat("y", int(LargeRequestWarnBytes))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("X-Request-ID", "req-large-warn")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	out := buf.String()
+	for _, want := range []string{
+		"大请求体",
+		"request_id=req-large-warn",
+		"provider=useai",
+		"model=UseAI - deepseek-v4-flash",
+		"upstream=deepseek-v4-flash",
+		"note=中转站大包易等头失败",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("WARN log = %q, want contains %q", out, want)
+		}
+	}
+	// 非 chat 路径不应触发大包 WARN（阈值函数已有单测；此处防 middleware 误用）。
+	buf.Reset()
+	handler2 := server.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req2 := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req2.ContentLength = LargeRequestWarnBytes
+	handler2.ServeHTTP(httptest.NewRecorder(), req2)
+	if strings.Contains(buf.String(), "大请求体") {
+		t.Fatalf("non-chat path must not emit large-body WARN: %q", buf.String())
+	}
+}
+
 func TestLoggingMiddlewareCapturesReportedUsageThroughStreamWriter(t *testing.T) {
 	st := store.New(10)
 	server := &Server{store: st, logger: log.New(nil, log.LevelError, false)}
@@ -834,6 +909,21 @@ func TestModelTimeoutSecondsUsesConfiguredClientBudget(t *testing.T) {
 	configured, effective := modelTimeoutSeconds(cfg, "gpt-5.5", "gpt-5.5", "useai", provider.ModelProfile{}, false)
 	if configured != defaultModelTimeoutSeconds || effective != budget {
 		t.Fatalf("timeout = configured:%d effective:%d, want configured:%d effective:%d", configured, effective, defaultModelTimeoutSeconds, budget)
+	}
+}
+
+func TestModelTimeoutSecondsSkipsBudgetWhenDefenseDisabled(t *testing.T) {
+	disabled := false
+	budget := 300
+	cfg := &config.AppConfig{
+		Defense: config.DefenseConfig{Enabled: &disabled, ClientTimeoutBudgetSeconds: &budget},
+	}
+	profile := provider.ModelProfile{TimeoutSeconds: &budget}
+
+	configured, effective := modelTimeoutSeconds(cfg, "gpt-5.5", "gpt-5.5", "useai", profile, true)
+	// 防御关闭时，effective 应等于 configured（300），不裁剪到 budget（300 超过 MaxClientTimeoutBudgetSeconds=95 也不裁剪）
+	if configured != budget || effective != budget {
+		t.Fatalf("defense disabled: timeout = configured:%d effective:%d, want configured:%d effective:%d (no budget cap)", configured, effective, budget, budget)
 	}
 }
 
