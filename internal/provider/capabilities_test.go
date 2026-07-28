@@ -13,8 +13,8 @@ func TestCompatibilityProfileForXiaomiMiMo(t *testing.T) {
 	if profile.Capability != "xiaomimimo" {
 		t.Fatalf("capability = %q, want xiaomimimo", profile.Capability)
 	}
-	if profile.ChatPath != "v1/chat/completions" {
-		t.Fatalf("chat_path = %q, want v1/chat/completions", profile.ChatPath)
+	if profile.ChatPath != "chat/completions" {
+		t.Fatalf("chat_path = %q, want chat/completions", profile.ChatPath)
 	}
 	if profile.OutputTokenParam != "max_completion_tokens" {
 		t.Fatalf("output_token_param = %q, want max_completion_tokens", profile.OutputTokenParam)
