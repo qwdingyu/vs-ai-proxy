@@ -48,7 +48,7 @@ func TestOpenAIProviderUsesCapabilityPaths(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	prov := NewOpenAIProvider("google", "test-key", upstream.URL, true, time.Second)
+	prov := NewOpenAIProvider("google", "test-key", upstream.URL+"/v1beta/openai", true, time.Second)
 
 	models, err := prov.ListModels(context.Background())
 	if err != nil {
@@ -77,6 +77,48 @@ func TestOpenAIProviderUsesCapabilityPaths(t *testing.T) {
 	}
 	if seen["/v1beta/openai/chat/completions"] != 1 {
 		t.Fatalf("chat path was not used, seen=%#v", seen)
+	}
+}
+
+func TestOpenAIProviderTransportPathsDecoupleURLFromCapabilityName(t *testing.T) {
+	seen := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Path]++
+		switch r.URL.Path {
+		case "/api/paas/v4/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"glm-test"}]}`))
+		case "/api/paas/v4/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	prov := NewOpenAIProviderWithTransport(
+		"zp",
+		"",
+		"sk-test",
+		upstream.URL+"/api/paas/v4",
+		"chat/completions",
+		"models",
+		true,
+		time.Second,
+	)
+
+	if _, err := prov.ListModels(context.Background()); err != nil {
+		t.Fatalf("ListModels returned error: %v", err)
+	}
+	if _, err := prov.Chat(context.Background(), &ChatRequest{
+		Model:    "glm-test",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if seen["/api/paas/v4/models"] != 1 || seen["/api/paas/v4/chat/completions"] != 1 {
+		t.Fatalf("transport paths were not used, seen=%#v", seen)
 	}
 }
 
@@ -1387,7 +1429,7 @@ func TestCompatibilityProfileForKnownProviders(t *testing.T) {
 	}{
 		{name: "zhipu", id: "zhipu", providerTy: "openai", wantCap: "zhipu", wantPath: "chat/completions", wantReason: false},
 		{name: "kimi", id: "kimi", providerTy: "openai", wantCap: "kimi", wantPath: "chat/completions", wantReason: false},
-		{name: "openai", id: "openai", providerTy: "openai", wantCap: "openai", wantPath: "v1/chat/completions", wantReason: true},
+		{name: "openai", id: "openai", providerTy: "openai", wantCap: "openai", wantPath: "chat/completions", wantReason: true},
 	}
 
 	for _, tt := range tests {
@@ -1423,7 +1465,7 @@ func TestCompatibilityProfileForCustomProviderUsesConfiguredBaseURL(t *testing.T
 	if profile.ApiFormat != ApiFormatOpenAi {
 		t.Fatalf("api format = %q, want openai", profile.ApiFormat)
 	}
-	if profile.ChatPath != "v1/chat/completions" || profile.ModelsPath != "v1/models" {
+	if profile.ChatPath != "chat/completions" || profile.ModelsPath != "models" {
 		t.Fatalf("paths = (%q, %q), want OpenAI-compatible defaults", profile.ChatPath, profile.ModelsPath)
 	}
 	if profile.DefaultBaseURL != "https://token.sensenova.cn/v1" {
