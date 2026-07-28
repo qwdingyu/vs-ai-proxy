@@ -175,10 +175,10 @@ func CompatibilityProfileFor(id, name, baseURL, providerType string) Compatibili
 			}
 		} else {
 			if chatPath == "" {
-				chatPath = "v1/chat/completions"
+				chatPath = "chat/completions"
 			}
 			if modelsPath == "" {
-				modelsPath = "v1/models"
+				modelsPath = "models"
 			}
 		}
 	}
@@ -260,9 +260,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: true,
 		SupportsTopK:            false,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
-		DefaultBaseUrl:          "https://api.deepseek.com",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://api.deepseek.com/v1",
 		EnvPrefix:               "DEEPSEEK",
 	},
 	"openai": {
@@ -270,9 +270,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: true,
 		SupportsTopK:            false,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
-		DefaultBaseUrl:          "https://api.openai.com",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://api.openai.com/v1",
 		EnvPrefix:               "OPENAI",
 	},
 	"zhipu": {
@@ -290,9 +290,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: false,
 		SupportsTopK:            false,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
-		DefaultBaseUrl:          "https://api.moonshot.ai",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://api.moonshot.ai/v1",
 		EnvPrefix:               "MOONSHOT",
 	},
 	// Kimi coding endpoint 的默认 base URL 已经带 /coding/v1，因此 ChatPath/ModelsPath
@@ -316,8 +316,8 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: false,
 		SupportsTopK:            false,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
 		OutputTokenParam:        "max_completion_tokens",
 		DefaultBaseUrl:          "https://api.xiaomimimo.com/v1",
 		EnvPrefix:               "XIAOMIMIMO",
@@ -327,9 +327,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: true,
 		SupportsTopK:            false,
-		ChatPath:                "v1beta/openai/chat/completions",
-		ModelsPath:              "v1beta/openai/models",
-		DefaultBaseUrl:          "https://generativelanguage.googleapis.com",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://generativelanguage.googleapis.com/v1beta/openai",
 		EnvPrefix:               "GOOGLE",
 	},
 	"cerebras": {
@@ -337,9 +337,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: false,
 		SupportsTopK:            false,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
-		DefaultBaseUrl:          "https://api.cerebras.ai",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://api.cerebras.ai/v1",
 		EnvPrefix:               "CEREBRAS",
 	},
 	"nvidia": {
@@ -347,9 +347,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: false,
 		SupportsTopK:            true,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
-		DefaultBaseUrl:          "https://integrate.api.nvidia.com",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://integrate.api.nvidia.com/v1",
 		EnvPrefix:               "NVIDIA",
 	},
 	"openrouter": {
@@ -357,9 +357,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: false,
 		SupportsTopK:            true,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
-		DefaultBaseUrl:          "https://openrouter.ai/api",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://openrouter.ai/api/v1",
 		EnvPrefix:               "OPENROUTER",
 	},
 	"groq": {
@@ -367,9 +367,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: false,
 		SupportsTopK:            true,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
-		DefaultBaseUrl:          "https://api.groq.com/openai",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://api.groq.com/openai/v1",
 		EnvPrefix:               "GROQ",
 	},
 	"zenmux": {
@@ -377,9 +377,9 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		ApiFormat:               ApiFormatOpenAi,
 		SupportsReasoningEffort: false,
 		SupportsTopK:            false,
-		ChatPath:                "v1/chat/completions",
-		ModelsPath:              "v1/models",
-		DefaultBaseUrl:          "https://zenmux.ai/api",
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://zenmux.ai/api/v1",
 		EnvPrefix:               "ZENMUX",
 	},
 	"ollama": {
