@@ -20,7 +20,7 @@ func newSyntheticToolCallID() string {
 }
 
 // normalizeRawToolCalls 统一修正所有 raw JSON/SSE 工具调用的名称与参数类型。
-// OpenAI wire contract 要求 arguments 是“包含 JSON 的字符串”；部分 Ollama/New API
+// OpenAI wire contract 要求 arguments 是“包含 JSON 的字符串”；部分 Ollama/提供商
 // 实现会直接返回 object。这里用 encoding/json 生成稳定 JSON，禁止 fmt.Sprint(map)。
 func normalizeRawToolCalls(calls []any, allowedTools map[string]struct{}) (changed bool, complete bool) {
 	complete = len(calls) > 0

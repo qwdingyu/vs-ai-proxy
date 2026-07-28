@@ -82,7 +82,7 @@ type AppConfig struct {
 	ConfigVersion int              `json:"config_version"` // 配置格式版本号，用于自动迁移；缺失或为 0 视为 v1
 	Port          int              `json:"port"`           // 代理端口，供 Visual Studio / Ollama 客户端访问
 	DefaultModel  string           `json:"default_model"`  // 默认模型，请求未提供 model 时回退使用
-	Defense       DefenseConfig    `json:"defense"`        // 上游网关防御策略，默认开启以兼容 new-api/sub2api 等网关抖动
+	Defense       DefenseConfig    `json:"defense"`        // 上游网关防御策略，默认开启以兼容提供商等网关抖动
 	Providers     []ProviderConfig `json:"providers"`      // 提供商列表，启动时按此注册到代理服务
 	Models        []ModelConfig    `json:"models"`         // 模型配置，用于前端展示和默认参数兜底
 }

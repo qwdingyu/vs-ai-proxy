@@ -523,9 +523,9 @@ func TestDiagnosticsSummaryOmitsLargePacketWarningWhenBelowThreshold(t *testing.
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	var got struct {
-		Observation diagnosticsObservation    `json:"observation"`
-		CopySummary string                    `json:"copy_summary"`
-		Stability   []store.StabilitySummary  `json:"recent_stability"`
+		Observation diagnosticsObservation   `json:"observation"`
+		CopySummary string                   `json:"copy_summary"`
+		Stability   []store.StabilitySummary `json:"recent_stability"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -1331,6 +1331,43 @@ func TestProviderProbeOpenAICorrectsBaseURL(t *testing.T) {
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"models":["model-a","model-b"]`)) {
 		t.Fatalf("probe should include full models for Web import: %s", rec.Body.String())
+	}
+}
+
+func TestProviderProbeOpenAIUsesTransportForArbitraryVersionedBase(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/paas/v4/models" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"glm-test"}]}`))
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/providers/probe", mustJSONBody(t, map[string]any{
+		"provider": config.ProviderConfig{
+			ID:      "zp",
+			Name:    "team-a-bigmodel",
+			Type:    "openai",
+			BaseURL: upstream.URL + "/api/paas/v4",
+			Enabled: true,
+		},
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers/probe status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"reachable":true`)) {
+		t.Fatalf("probe should be reachable: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"corrected_base_url":"`+upstream.URL+`/api/paas/v4"`)) {
+		t.Fatalf("probe should preserve versioned base URL: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"transport":{"chat_path":"chat/completions","models_path":"models"}`)) {
+		t.Fatalf("probe should return savable transport: %s", rec.Body.String())
 	}
 }
 

@@ -405,7 +405,7 @@ func TestLoggingMiddlewareWarnsLargeChatRequestWithProviderModel(t *testing.T) {
 		"provider=useai",
 		"model=UseAI - deepseek-v4-flash",
 		"upstream=deepseek-v4-flash",
-		"note=中转站大包易等头失败",
+		"note=提供商大包易等头失败",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("WARN log = %q, want contains %q", out, want)
@@ -613,7 +613,7 @@ func TestLoggingMiddlewareStoresStructuredDiagnostics(t *testing.T) {
 		w.Header().Set("X-Proxy-Upstream-Model", "gpt-5.5")
 		w.Header().Set("X-Proxy-Error-Code", "upstream_server_error")
 		w.Header().Set("X-Proxy-Error-Message", "当前提供商请求失败")
-		w.Header().Set("X-Proxy-Error-Hint", "检查 new-api/sub2api 渠道健康度。")
+		w.Header().Set("X-Proxy-Error-Hint", "检查提供商渠道健康度。")
 		w.Header().Set("X-Proxy-Attempts-Summary", "useai/gpt-5.5 13s upstream_server_error")
 		w.WriteHeader(http.StatusBadGateway)
 	}))

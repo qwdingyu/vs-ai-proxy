@@ -628,7 +628,7 @@ func buildDiagnosticsCopySummary(stats store.Statistics, latestFailure store.Req
 			warnKB = proxy.LargeRequestWarnBytes / 1024
 		}
 		if observation.LargePacketGroupCount > 0 {
-			lines = append(lines, fmt.Sprintf("大包预警: %d 组 provider/model 近窗 request_bytes_p95≥%dKB（中转站易出现 upstream_no_response，≠本机未联网）", observation.LargePacketGroupCount, warnKB))
+			lines = append(lines, fmt.Sprintf("大包预警: %d 组 provider/model 近窗 request_bytes_p95≥%dKB（提供商易出现 upstream_no_response，≠本机未联网）", observation.LargePacketGroupCount, warnKB))
 		}
 		if recentStability[0].LatestFailure != nil {
 			failure := recentStability[0].LatestFailure

@@ -35,7 +35,7 @@ func shouldInjectCachedReasoning(prov provider.Provider) bool {
 		return false
 	}
 	caps := provider.GetCapabilities(provider.CapabilityNameOf(prov))
-	// reasoning_content 是模型/厂商私有语义，不应无条件注入到 new-api/sub2api
+	// reasoning_content 是模型/厂商私有语义，不应无条件注入到提供商
 	// 这类多模型聚合网关。聚合网关不同渠道的 body/context 限制不一致，
 	// 隐式注入可能把 VS/Copilot 的大工具请求放大到 413，且排障时看不到来源。
 	return caps.Category == provider.ProviderCategoryDirect && caps.SupportsReasoningEffort

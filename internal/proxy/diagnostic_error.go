@@ -564,7 +564,7 @@ func userFacingDiagnosticFor(category string) userFacingDiagnostic {
 	case "upstream_server_error":
 		return userFacingDiagnostic{Reason: "上游服务暂不可用", Action: "稍后重试，或切换模型。"}
 	case "upstream_no_response":
-		// 明确区分「上游/中转已收请求但未回响应头」与本机断网，避免用户误查本地网络。
+		// 明确区分「上游/提供商已收请求但未回响应头」与本机断网，避免用户误查本地网络。
 		return userFacingDiagnostic{Reason: "上游接收后未响应", Action: "非本机断网。减上下文后重试，或换更稳同模型渠道。"}
 	case "upstream_stream_interrupted":
 		return userFacingDiagnostic{Reason: "上游响应流中断", Action: "非本机断网。减上下文后重试，或换更稳同模型渠道。"}
