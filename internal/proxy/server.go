@@ -193,14 +193,22 @@ func (s *Server) providerFromConfig(cfg *config.AppConfig, p config.ProviderConf
 	defenseEnabled := proxyDefenseEnabled(cfg)
 	id := config.ProviderKey(p)
 	// id 是 provider 实例名，参与日志/路由/model@provider_id；
-	// capability 是能力注册表名，决定 OpenAI/Ollama 路径、header 和参数过滤。
-	// 例如 useai-paid 的 id 不在能力表中，但 capability 应归一到 useai。
+	// capability 只决定行为预设（header/参数治理），URL path 使用实例 transport。
 	capability := providerCapabilityNameFromConfig(p)
 	switch p.Type {
 	case "ollama":
 		return provider.NewOllamaProviderWithCapability(id, capability, p.BaseURL, p.Enabled, timeout)
 	case "openai", "custom":
-		prov := provider.NewOpenAIProviderWithCapability(id, capability, p.APIKey, p.BaseURL, p.Enabled, timeout)
+		prov := provider.NewOpenAIProviderWithTransport(
+			id,
+			capability,
+			p.APIKey,
+			p.BaseURL,
+			p.Transport.ChatPath,
+			p.Transport.ModelsPath,
+			p.Enabled,
+			timeout,
+		)
 		prov.SetDefenseEnabled(defenseEnabled)
 		return prov
 	default:
@@ -221,10 +229,10 @@ func proxyDefenseEnabled(cfg *config.AppConfig) bool {
 
 // applyDefenseCandidatePolicy 限制候选 provider 数量。
 // 注意：本函数当前不检查 Defense.Enabled，始终只保留首选候选。
-// 这是设计决策——new-api/sub2api 等上游网关内部负责渠道轮换，
+// 这是设计决策——提供商等上游网关内部负责渠道轮换，
 // 代理层跨 provider 自动兜底会掩盖真实 provider 错误、放大请求与计费。
 func applyDefenseCandidatePolicy(cfg *config.AppConfig, candidates []provider.Candidate) []provider.Candidate {
-	// VS Stable 默认只执行首选候选：new-api/sub2api 这类上游网关内部本身负责渠道轮换。
+	// VS Stable 默认只执行首选候选：提供商这类上游网关内部本身负责渠道轮换。
 	// 代理层跨 provider 自动兜底会掩盖真实 provider 错误、放大请求与计费，
 	// 还可能把“绑定 provider 的模型”悄悄路由到另一个 provider。
 	// 防御开关仍控制 provider 内短重试、稳定 UA、协议兜底与冷却；不再代表跨 provider fallback。
@@ -391,7 +399,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		// 大包 WARN 放在 provider/model 解析之后，便于日志与管理页 recent_stability 对齐排查。
 		// 只观测不阻断；阈值见 largeRequestWarnBytes（约 400KB）。
 		if s.logger != nil && shouldWarnLargeChatRequest(reqWithID.URL.Path, reqWithID.ContentLength, ww.upstreamBytes) {
-			s.logger.Warn("大请求体: path=%s request_id=%s provider=%s model=%s upstream=%s request_bytes=%s upstream_bytes=%s note=中转站大包易等头失败 action=减少会话历史/附件或切换更稳定渠道",
+			s.logger.Warn("大请求体: path=%s request_id=%s provider=%s model=%s upstream=%s request_bytes=%s upstream_bytes=%s note=提供商大包易等头失败 action=减少会话历史/附件或切换更稳定渠道",
 				reqWithID.URL.Path, requestID, provider, model, upstream, humanBytes(reqWithID.ContentLength), humanBytes(ww.upstreamBytes))
 		}
 		errorCode := firstNonEmptyHeader(ww.Header(), "X-Proxy-Error-Code")
@@ -1456,7 +1464,7 @@ func (s *Server) streamOpenAI(w http.ResponseWriter, r *http.Request, prov provi
 	setProxyStreamState(w, "upstream_connecting")
 	stream, err := prov.ChatStream(r.Context(), req)
 	if err != nil {
-		// VS Copilot 的 /v1/chat/completions stream=true 真实路径中，UseAI/New API
+		// VS Copilot 的 /v1/chat/completions stream=true 真实路径中，UseAI/提供商
 		// 可能流式 503，但非流式同模型可用。尚未向下游写出 SSE 时，
 		// 尝试反向兜底：非流式拿到结果后合成为 OpenAI SSE，避免直接 502。
 		cfg, _, _ := s.snapshot()
