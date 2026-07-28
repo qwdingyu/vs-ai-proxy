@@ -812,7 +812,9 @@ func (s *Server) listProviders(c *gin.Context) {
 
 func providerCompatibilityProfileFromConfig(p config.ProviderConfig) providerCompatibilityProfileResponse {
 	// API 层保持薄封装：provider 包是能力事实来源，API 只负责稳定 JSON 形状。
-	profile := provider.CompatibilityProfileFor(config.ProviderKey(p), p.Name, p.BaseURL, p.Type)
+	key := config.ProviderKey(p)
+	profile := provider.CompatibilityProfileFor(key, p.Name, p.BaseURL, p.Type)
+	println("[DEBUG] CompatibilityProfileFor key=" + key + " name=" + p.Name + " baseURL=" + p.BaseURL + " type=" + p.Type + " -> chat_path=" + profile.ChatPath + " models_path=" + profile.ModelsPath)
 	return providerCompatibilityProfileResponse{
 		Capability:              profile.Capability,
 		Category:                profile.Category,
