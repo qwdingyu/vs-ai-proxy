@@ -133,6 +133,40 @@ func TestNormalizeProviderAndModelAddsStableIDs(t *testing.T) {
 	}
 }
 
+func TestNormalizeProviderTransportDefaultsForVersionedOpenAIBase(t *testing.T) {
+	provider := NormalizeProvider(ProviderConfig{
+		ID:      "zp",
+		Name:    "智谱2",
+		Type:    "openai",
+		BaseURL: "https://open.bigmodel.cn/api/paas/v4/",
+	})
+
+	if provider.BaseURL != "https://open.bigmodel.cn/api/paas/v4" {
+		t.Fatalf("BaseURL = %q, want trimmed versioned root", provider.BaseURL)
+	}
+	if provider.Transport.ChatPath != "chat/completions" {
+		t.Fatalf("chat_path = %q, want resource relative path", provider.Transport.ChatPath)
+	}
+	if provider.Transport.ModelsPath != "models" {
+		t.Fatalf("models_path = %q, want resource relative path", provider.Transport.ModelsPath)
+	}
+}
+
+func TestNormalizeProviderTransportPreservesLegacyBareHostOpenAIBase(t *testing.T) {
+	provider := NormalizeProvider(ProviderConfig{
+		ID:      "legacy",
+		Type:    "openai",
+		BaseURL: "https://api.deepseek.com",
+	})
+
+	if provider.Transport.ChatPath != "v1/chat/completions" {
+		t.Fatalf("chat_path = %q, want legacy v1 path", provider.Transport.ChatPath)
+	}
+	if provider.Transport.ModelsPath != "v1/models" {
+		t.Fatalf("models_path = %q, want legacy v1 path", provider.Transport.ModelsPath)
+	}
+}
+
 func TestApplyEnvOverridesUsesPort(t *testing.T) {
 	t.Setenv("PORT", "18080")
 	t.Setenv("PROXY_PORT", "19090")
@@ -374,5 +408,397 @@ func TestManagerSaveWritesValidConfigAndCleansTempFile(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary config files left behind: %#v", matches)
+	}
+}
+
+func TestNormalizeForRuntimeMigratesConfigVersion(t *testing.T) {
+	// 模拟 v1 配置（无 config_version 字段）
+	cfg := &AppConfig{
+		Providers: []ProviderConfig{DefaultUseAIProvider()},
+	}
+	cfg.ConfigVersion = 0 // JSON 反序列化时缺失字段的自然值
+
+	migrated := NormalizeForRuntime(cfg)
+
+	if !migrated {
+		t.Fatalf("NormalizeForRuntime should return true for v1→v2 migration")
+	}
+	if cfg.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("config_version = %d, want %d after migration", cfg.ConfigVersion, CurrentConfigVersion)
+	}
+}
+
+func TestNormalizeForRuntimeSkipsMigrationWhenVersionCurrent(t *testing.T) {
+	cfg := &AppConfig{
+		ConfigVersion: CurrentConfigVersion,
+		Providers:     []ProviderConfig{DefaultUseAIProvider()},
+	}
+
+	migrated := NormalizeForRuntime(cfg)
+
+	if migrated {
+		t.Fatalf("NormalizeForRuntime should return false when version is already current")
+	}
+	if cfg.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("config_version should remain %d, got %d", CurrentConfigVersion, cfg.ConfigVersion)
+	}
+}
+
+func TestNewManagerWritesCurrentConfigVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	cfg := mgr.Get()
+	if cfg.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("new config_version = %d, want %d", cfg.ConfigVersion, CurrentConfigVersion)
+	}
+
+	// 验证写入磁盘的 JSON 包含 config_version
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var saved AppConfig
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+	if saved.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("saved config_version = %d, want %d", saved.ConfigVersion, CurrentConfigVersion)
+	}
+}
+
+func TestManagerReloadMigratesOldConfigVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	// 写一个 v1 格式的配置（无 config_version, 使用 provider 旧字段）
+	old := &AppConfig{
+		Port:    18888,
+		Defense: DefenseConfig{Enabled: boolPtr(true)},
+		Providers: []ProviderConfig{
+			{ID: "usecpa", Name: "UseCpa", Type: "openai", BaseURL: "https://cpa.example/v1", Enabled: true, Priority: 10},
+		},
+		Models: []ModelConfig{
+			{Name: "gpt-5.5", Provider: "UseCpa", Enabled: true},
+		},
+	}
+	old.ConfigVersion = 0
+
+	data, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reloaded, err := mgr.Reload()
+	if err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if reloaded.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("reloaded config_version = %d, want %d", reloaded.ConfigVersion, CurrentConfigVersion)
+	}
+	if len(reloaded.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(reloaded.Models))
+	}
+	if reloaded.Models[0].ProviderID != "usecpa" {
+		t.Fatalf("model provider_id = %q, want usecpa (migrated from provider field)", reloaded.Models[0].ProviderID)
+	}
+
+	// Reload 归一化后应写回磁盘（与 NewManager 行为一致）
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var diskCfg AppConfig
+	if err := json.Unmarshal(disk, &diskCfg); err != nil {
+		t.Fatalf("unmarshal disk config: %v", err)
+	}
+	if diskCfg.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("Reload should write normalized config back to disk; disk config_version = %d, want %d", diskCfg.ConfigVersion, CurrentConfigVersion)
+	}
+}
+
+func TestNewManagerMigratedReturnsTrueForOldConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	// 写一个 v1 配置
+	old := &AppConfig{
+		Port:    18080,
+		Defense: DefenseConfig{Enabled: boolPtr(true)},
+		Providers: []ProviderConfig{
+			{Name: "custom", Type: "openai", BaseURL: "https://api.example.com/v1", Enabled: true},
+		},
+	}
+	old.ConfigVersion = 0
+	data, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	if !mgr.Migrated() {
+		t.Fatalf("Migrated() should be true for old config")
+	}
+
+	// 磁盘已写回归一化结果，config_version 应已更新
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var diskCfg AppConfig
+	if err := json.Unmarshal(disk, &diskCfg); err != nil {
+		t.Fatalf("unmarshal disk config: %v", err)
+	}
+	if diskCfg.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("disk config_version = %d, want %d", diskCfg.ConfigVersion, CurrentConfigVersion)
+	}
+}
+
+func TestNewManagerMigratedReturnsFalseForCurrentConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	// 写一个已是最新版本的配置
+	cfg := DefaultConfig()
+	cfg.ConfigVersion = CurrentConfigVersion
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	if mgr.Migrated() {
+		t.Fatalf("Migrated() should be false for current-version config")
+	}
+}
+
+func TestNewManagerMigratedWritesNormalizedTransportToDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	// 写一个缺少 transport 的配置
+	old := &AppConfig{
+		Port: 18080,
+		Providers: []ProviderConfig{
+			{
+				ID:      "zp",
+				Name:    "智谱2",
+				Type:    "openai",
+				BaseURL: "https://open.bigmodel.cn/api/paas/v4/",
+				Enabled: true,
+			},
+		},
+	}
+	data, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	if !mgr.Migrated() {
+		t.Fatalf("Migrated() should be true: transport paths were added")
+	}
+
+	// 磁盘应包含归一化后的 transport
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var diskCfg AppConfig
+	if err := json.Unmarshal(disk, &diskCfg); err != nil {
+		t.Fatalf("unmarshal disk config: %v", err)
+	}
+	if len(diskCfg.Providers) == 0 {
+		t.Fatalf("providers should not be empty")
+	}
+	// EnsureBuiltInProviders 会把 UseAI 插到第一位，按 ID 查找自定义 provider
+	var p ProviderConfig
+	for _, prov := range diskCfg.Providers {
+		if prov.ID == "zp" {
+			p = prov
+			break
+		}
+	}
+	if p.ID == "" {
+		t.Fatalf("provider zp not found in saved config: %#v", diskCfg.Providers)
+	}
+	if p.Transport.ChatPath != "chat/completions" {
+		t.Fatalf("transport chat_path = %q, want chat/completions", p.Transport.ChatPath)
+	}
+	if p.Transport.ModelsPath != "models" {
+		t.Fatalf("transport models_path = %q, want models", p.Transport.ModelsPath)
+	}
+}
+
+func TestNewManagerEnvPortOverrideDoesNotTriggerMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	// 写一个当前版本的配置，PORT 不同于环境变量
+	cfg := DefaultConfig()
+	cfg.ConfigVersion = CurrentConfigVersion
+	cfg.Port = 12345
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("PORT", "18080")
+
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	// 环境变量 PORT 不应触发迁移写回
+	if mgr.Migrated() {
+		t.Fatalf("Migrated() should be false: PORT env override must not trigger write-back")
+	}
+
+	// 磁盘端口应保持不变
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var diskCfg AppConfig
+	if err := json.Unmarshal(disk, &diskCfg); err != nil {
+		t.Fatalf("unmarshal disk config: %v", err)
+	}
+	if diskCfg.Port != 12345 {
+		t.Fatalf("disk port = %d, want 12345 (env override must not be persisted)", diskCfg.Port)
+	}
+
+	// 但运行时配置应反映环境变量
+	runtime := mgr.Get()
+	if runtime.Port != 18080 {
+		t.Fatalf("runtime port = %d, want 18080 (env should take effect at runtime)", runtime.Port)
+	}
+}
+
+func TestManagerReloadMigratedReturnsTrueForOldConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	// 写一个旧格式配置并触发 Reload
+	old := &AppConfig{
+		Port: 18080,
+		Providers: []ProviderConfig{
+			{Name: "custom", Type: "openai", BaseURL: "https://api.example.com/v1", Enabled: true},
+		},
+	}
+	old.ConfigVersion = 0
+	data, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err = mgr.Reload()
+	if err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+
+	if !mgr.Migrated() {
+		t.Fatalf("Migrated() should be true after Reload of old config")
+	}
+}
+
+func TestManagerReloadMigratedReturnsFalseForCurrentConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	// 写一个已是当前版本的配置
+	cfg := DefaultConfig()
+	cfg.ConfigVersion = CurrentConfigVersion
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err = mgr.Reload()
+	if err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+
+	if mgr.Migrated() {
+		t.Fatalf("Migrated() should be false after Reload of current-version config")
+	}
+}
+
+func TestManagerReloadMigratedClearsOnSubsequentCurrentConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	// 第一次 Reload：旧配置 → migrated = true
+	old := &AppConfig{
+		Port: 18080,
+		Providers: []ProviderConfig{
+			{Name: "custom", Type: "openai", BaseURL: "https://api.example.com/v1", Enabled: true},
+		},
+	}
+	old.ConfigVersion = 0
+	data, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err = mgr.Reload()
+	if err != nil {
+		t.Fatalf("first Reload() error = %v", err)
+	}
+	if !mgr.Migrated() {
+		t.Fatalf("Migrated() should be true after first Reload of old config")
+	}
+
+	// 第二次 Reload：已归一化的配置 → migrated = false
+	// 第一次 Reload 已写回磁盘，第二次应无变化
+	_, err = mgr.Reload()
+	if err != nil {
+		t.Fatalf("second Reload() error = %v", err)
+	}
+	if mgr.Migrated() {
+		t.Fatalf("Migrated() should be false after second Reload (config already normalized)")
 	}
 }

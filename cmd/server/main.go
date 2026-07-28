@@ -79,6 +79,9 @@ func main() {
 	cfg := configMgr.Get()
 	storePath := resolveStorePath(configMgr.ConfigPath(), os.Getenv("STORE_PATH"))
 	logger.Info("运行配置文件: %s", configMgr.ConfigPath())
+	if configMgr.Migrated() {
+		logger.Info("配置已自动升级并写回磁盘: provider 字段已迁移为 provider_id，transport 路径已固化，defense 已默认开启")
+	}
 	logger.Info("请求日志文件: %s", storePath)
 	st := store.New(1000)
 	if err := st.LoadFromFile(storePath); err != nil {
@@ -829,6 +832,9 @@ func watchConfigLoop(ctx context.Context, configMgr *config.Manager, proxySrv *p
 		lastMod = mod
 		lastHash = hash
 		proxySrv.Reconfigure(cfg)
+		if configMgr.Migrated() {
+			logger.Info("热加载时配置已自动升级并写回磁盘: %s", path)
+		}
 		if cfg.Port != oldPort {
 			logger.Warn("配置文件端口已变更为 %d；当前监听端口仍为 %d，端口变更需要重启进程", cfg.Port, oldPort)
 		}
