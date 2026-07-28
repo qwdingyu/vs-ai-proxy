@@ -190,6 +190,8 @@ type OpenAIProvider struct {
 	CapabilityName string
 	APIKey         string
 	BaseURL        string
+	ChatPath       string
+	ModelsPath     string
 	Enabled        bool
 	DefenseEnabled bool
 	Client         *http.Client
@@ -331,14 +333,29 @@ func NewOpenAIProvider(name, apiKey, baseURL string, enabled bool, timeout time.
 }
 
 func NewOpenAIProviderWithCapability(name, capabilityName, apiKey, baseURL string, enabled bool, timeout time.Duration) *OpenAIProvider {
+	return NewOpenAIProviderWithTransport(name, capabilityName, apiKey, baseURL, "", "", enabled, timeout)
+}
+
+func NewOpenAIProviderWithTransport(name, capabilityName, apiKey, baseURL, chatPath, modelsPath string, enabled bool, timeout time.Duration) *OpenAIProvider {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	chatPath = normalizeProviderResourcePath(chatPath)
+	modelsPath = normalizeProviderResourcePath(modelsPath)
+	if chatPath == "" {
+		chatPath = defaultOpenAIChatPathForBaseURL(baseURL)
+	}
+	if modelsPath == "" {
+		modelsPath = defaultOpenAIModelsPathForBaseURL(baseURL)
 	}
 	return &OpenAIProvider{
 		NameStr:        name,
 		CapabilityName: capabilityName,
 		APIKey:         apiKey,
-		BaseURL:        strings.TrimRight(baseURL, "/"),
+		BaseURL:        baseURL,
+		ChatPath:       chatPath,
+		ModelsPath:     modelsPath,
 		Enabled:        enabled,
 		DefenseEnabled: true,
 		Client:         newProviderHTTPClient(timeout),
@@ -365,7 +382,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	}
 	var chatResp ChatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		// New API / 部分 OpenAI-compatible 网关存在一个协议坑：
+		// 部分 OpenAI-compatible 提供商存在一个协议坑：
 		// 客户端明确 stream=false 时，上游仍可能以 text/event-stream 返回 data: chunk。
 		// 这里把可聚合的 SSE 转为普通 ChatResponse，避免下游非流式 JSON 解析失败。
 		if sseResp, sseErr := parseOpenAIChatSSEAsResponse(respBody, req.Model); sseErr == nil {
@@ -880,7 +897,7 @@ func (p *OpenAIProvider) ChatRaw(ctx context.Context, req *ChatRequest) ([]byte,
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	// New API / sub2api 内部可能配置多个渠道，但实测单渠道 5xx/EOF 有时会直接透出。
+	// 提供商内部可能配置多个渠道，但实测单渠道 5xx/EOF 有时会直接透出。
 	// 防御开启时，代理侧只对瞬态错误做短重试，给上游网关重新选择渠道的机会；4xx 不重试，避免放大参数/鉴权错误。
 	var lastErr error
 	attempts := []UpstreamAttempt{}
@@ -1003,8 +1020,8 @@ func sanitizeUpstreamErrorText(text string) string {
 }
 
 var (
-	upstreamBearerTokenPattern    = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}`)
-	upstreamOpenAIKeyPattern      = regexp.MustCompile(`sk-[A-Za-z0-9_-]{12,}`)
+	upstreamBearerTokenPattern      = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}`)
+	upstreamOpenAIKeyPattern        = regexp.MustCompile(`sk-[A-Za-z0-9_-]{12,}`)
 	upstreamAPIKeyAssignmentPattern = regexp.MustCompile(`(?i)(api[_-]?key["'\s:=]+)[A-Za-z0-9._~+/=-]{12,}`)
 )
 
@@ -1020,7 +1037,7 @@ func (p *OpenAIProvider) openAIProviderMaxAttempts() int {
 	if p == nil || !p.DefenseEnabled {
 		return 1
 	}
-	// 防御开启时最多 3 次 provider 内部尝试，用于覆盖 New API/sub2api
+	// 防御开启时最多 3 次 provider 内部尝试，用于覆盖提供商
 	// 偶发 5xx 或连接建立前失败。该重试不是跨 provider fallback，也不应突破
 	// providerOperationContext 给整次请求设置的总预算。
 	return openAIProviderMaxAttempts
@@ -1041,7 +1058,7 @@ func (p *OpenAIProvider) shouldRetryOpenAIProviderError(err error) bool {
 	var httpErr *providerHTTPError
 	if errors.As(err, &httpErr) {
 		// 保留历史防御行为：上游明确返回 5xx 时允许短重试，主要用于
-		// new-api/sub2api 单个失败渠道直接透出 503 的场景。它会产生第二次
+		// 提供商单个失败渠道直接透出 503 的场景。它会产生第二次
 		// 上游请求，因此受 DefenseEnabled 控制；4xx/429 不在这里盲目重试。
 		return httpErr.StatusCode >= http.StatusInternalServerError
 	}
@@ -1237,7 +1254,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (io.R
 	}
 
 	// 流式路径同样要短重试。管理测试页和 VS 流式下游都会走这里，
-	// 若首个 New API 渠道短暂 503，重试可避免用户看到一次性失败。
+	// 若首个提供商渠道短暂 503，重试可避免用户看到一次性失败。
 	var lastErr error
 	attempts := []UpstreamAttempt{}
 	for attempt := 0; attempt < p.openAIProviderMaxAttempts(); attempt++ {
@@ -1294,7 +1311,7 @@ func normalizeOpenAIChatCompletionsRequestBody(body []byte, outputTokenParam str
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
-	// OpenAI-compatible 网关（New API、sub2api 等）普遍以 /v1/chat/completions
+	// OpenAI-compatible 网关（提供商等）普遍以 /v1/chat/completions
 	// 接收请求，最稳妥的输出 token 字段是 max_tokens。VS / Copilot 或
 	// 新式 Responses 风格客户端可能发送 max_output_tokens / max_completion_tokens；
 	// 这些别名必须在出 provider 前统一收敛，否则 strict 上游会直接 400。
@@ -1539,7 +1556,7 @@ func newProviderHTTPClient(timeout time.Duration) *http.Client {
 }
 
 func (p *OpenAIProvider) applyOpenAIRequestHeaders(req *http.Request, accept string) {
-	// 部分 new-api / sub2api 部署前面有 WAF，默认 Go/Python UA 可能被拦。
+	// 部分提供商部署前面有 WAF，默认 Go/Python UA 可能被拦。
 	// 防御模式下统一发送稳定 UA；关闭防御时保留 Go 默认行为，便于复现原始问题。
 	if p == nil || p.DefenseEnabled {
 		req.Header.Set("User-Agent", providerUserAgent())
@@ -1624,24 +1641,28 @@ func firstEnv(keys ...string) string {
 }
 
 func (p *OpenAIProvider) chatURL() string {
-	return p.capabilityURL("chat", "v1/chat/completions")
+	return p.capabilityURL("chat", "chat/completions")
 }
 
 func (p *OpenAIProvider) modelsURL() string {
-	return p.capabilityURL("models", "v1/models")
+	return p.capabilityURL("models", "models")
 }
 
 func (p *OpenAIProvider) capabilityURL(kind, fallbackPath string) string {
-	// 已知 provider 使用能力注册表里的路径；未知 OpenAI-compatible provider 使用标准 fallback。
+	// 实例 transport 是 URL 事实源；capability 只在旧调用方未传 transport 时提供预设兼容。
 	caps := GetCapabilities(p.capabilityName())
 	path := fallbackPath
 	switch kind {
 	case "chat":
-		if strings.TrimSpace(caps.ChatPath) != "" {
+		if strings.TrimSpace(p.ChatPath) != "" {
+			path = p.ChatPath
+		} else if strings.TrimSpace(caps.ChatPath) != "" {
 			path = caps.ChatPath
 		}
 	case "models":
-		if strings.TrimSpace(caps.ModelsPath) != "" {
+		if strings.TrimSpace(p.ModelsPath) != "" {
+			path = p.ModelsPath
+		} else if strings.TrimSpace(caps.ModelsPath) != "" {
 			path = caps.ModelsPath
 		}
 	}
@@ -1693,6 +1714,51 @@ func trimOverlappingPathSegments(baseURL, path string) string {
 		}
 	}
 	return strings.Join(pathParts, "/")
+}
+
+func normalizeProviderResourcePath(path string) string {
+	return strings.Trim(strings.TrimSpace(path), "/")
+}
+
+func defaultOpenAIChatPathForBaseURL(baseURL string) string {
+	if shouldPreserveLegacyV1Path(baseURL) {
+		return "v1/chat/completions"
+	}
+	return "chat/completions"
+}
+
+func defaultOpenAIModelsPathForBaseURL(baseURL string) string {
+	if shouldPreserveLegacyV1Path(baseURL) {
+		return "v1/models"
+	}
+	return "models"
+}
+
+func shouldPreserveLegacyV1Path(baseURL string) bool {
+	path := baseURLPath(baseURL)
+	return path == "" || path == "/"
+}
+
+func baseURLPath(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	schemeSep := strings.Index(baseURL, "://")
+	if schemeSep >= 0 {
+		rest := baseURL[schemeSep+3:]
+		slash := strings.Index(rest, "/")
+		if slash < 0 {
+			return ""
+		}
+		path := rest[slash:]
+		if q := strings.IndexAny(path, "?#"); q >= 0 {
+			path = path[:q]
+		}
+		return strings.TrimRight(path, "/")
+	}
+	slash := strings.Index(baseURL, "/")
+	if slash < 0 {
+		return ""
+	}
+	return strings.TrimRight(baseURL[slash:], "/")
 }
 
 // OllamaProvider Ollama 提供商
@@ -1912,7 +1978,7 @@ func (p *OllamaProvider) buildChatRequest(req *ChatRequest, stream bool) map[str
 		ollamaReq["tools"] = req.Tools
 	} else if tools := legacyFunctionsToTools(req.Extra["functions"]); len(tools) > 0 {
 		// Visual Studio 仍可能发送 legacy functions；Ollama 原生接口只接受
-		// tools，因此在 provider 边界做一次结构化转换，避免声明在中转时消失。
+		// tools，因此在 provider 边界做一次结构化转换，避免声明在提供商时消失。
 		ollamaReq["tools"] = tools
 	}
 	for _, field := range []string{"tool_choice", "parallel_tool_calls", "function_call"} {
