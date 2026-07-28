@@ -38,6 +38,61 @@ func TestIndexHTMLHasNoDuplicateIDsAndScriptReferencesExist(t *testing.T) {
 	}
 }
 
+func TestMonitorPageWiresRecentStabilityAndLargePacketWarning(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	for _, marker := range []string{
+		`id="recentStabilityTable"`,
+		`id="stabilityLargePacketBanner"`,
+		`id="stabilityLargePacketText"`,
+		`renderRecentStability(diagnosticsSummary?.recent_stability || [], diagnosticsSummary?.observation || null)`,
+		`resolveLargeRequestWarnBytes`,
+		`observation?.large_request_warn_bytes`,
+		`observation?.large_packet_group_count`,
+		`data-i18n="monitor.stability.label"`,
+		`data-i18n="monitor.stability.largePacketLabel"`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("monitor recent_stability UI missing %q", marker)
+		}
+	}
+	// 禁止前端把 400*1024 作为主路径阈值；只允许 FALLBACK_ 兜底常量。
+	if strings.Contains(html, "const LARGE_PACKET_WARN_BYTES = 400 * 1024") {
+		t.Fatal("frontend must not hardcode primary large-packet threshold; use diagnostics.observation")
+	}
+	if !strings.Contains(html, "FALLBACK_LARGE_REQUEST_WARN_BYTES") {
+		t.Fatal("expected offline-compatible fallback constant name")
+	}
+	// 失败路径须清空 stability，避免陈旧数据；loadMonitor 必须传入 observation。
+	if !strings.Contains(html, "renderRecentStability([], null)") {
+		t.Fatal("loadMonitor error path must clear recent stability table")
+	}
+	if !strings.Contains(html, "stability-table-wrap") || !strings.Contains(html, "stability-table") {
+		t.Fatal("stability table should be horizontally scrollable on narrow screens")
+	}
+	zh := readI18nCatalog(t, "i18n/zh.js")
+	en := readI18nCatalog(t, "i18n/en.js")
+	for _, key := range []string{
+		"monitor.stability.label",
+		"monitor.stability.hint",
+		"monitor.stability.largePacketLabel",
+		"monitor.stability.largePacketSummary",
+		"monitor.stability.largePacketNoNames",
+		"monitor.diagnostics.upstreamNotLocalNote",
+		"table.empty.stability",
+	} {
+		if strings.TrimSpace(zh[key]) == "" {
+			t.Fatalf("zh missing i18n key %q", key)
+		}
+		if strings.TrimSpace(en[key]) == "" {
+			t.Fatalf("en missing i18n key %q", key)
+		}
+	}
+}
+
 func TestDashboardTokenUsageIsWiredWithoutTreatingUnknownAsZero(t *testing.T) {
 	data, err := fs.ReadFile(MustSubFS(), "index.html")
 	if err != nil {

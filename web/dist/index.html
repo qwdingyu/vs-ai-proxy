@@ -55,6 +55,10 @@
     .logs-table .col-action { width: 86px; }
     .logs-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .logs-table td.col-tools { white-space: normal; }
+    .stability-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .stability-table { min-width: 960px; }
+    .stability-table td { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stability-table td:last-child { max-width: 280px; white-space: normal; }
     .ok { color: #3fb950; }
     .warn { color: #d29922; }
     .err { color: #f85149; }
@@ -434,10 +438,10 @@
             <label><span data-i18n="config.form.port">代理端口</span> <input type="number" id="cfgPort" /></label>
             <label><span data-i18n="config.form.defaultModel">默认模型</span> <input id="cfgDefaultModel" /></label>
             <label class="checkbox"><input type="checkbox" id="cfgDefenseEnabled" /> <span data-i18n="config.form.defenseEnabled">启用上游防御模式</span></label>
-            <label><span data-i18n="config.form.clientTimeoutBudget">客户端超时预算（秒）</span> <input type="number" id="cfgClientTimeoutBudget" min="15" max="95" step="1" /></label>
+            <label><span data-i18n="config.form.clientTimeoutBudget">客户端超时预算（秒）</span> <input type="number" id="cfgClientTimeoutBudget" min="0" step="1" /></label>
             <div class="hint" data-i18n="config.hint.portRestart">端口变更保存后仍需重启进程生效；其它配置会立即热更新代理路由。</div>
-            <div class="hint" data-i18n="config.hint.defenseMode">上游防御模式用于 new-api / sub2api 等网关：开启后会启用稳定 User-Agent、5xx/网络瞬断短重试、429 冷却和流式/非流式协议兜底。</div>
-            <div class="hint" data-i18n="config.hint.clientTimeoutBudget">客户端超时预算用于 VS/Copilot：代理会把更长的模型 timeout_seconds 裁剪到该值，默认 90 秒，建议保持 15-95 秒。</div>
+            <div class="hint" data-i18n="config.hint.defenseMode">上游防御模式用于提供商：开启后会启用稳定 User-Agent、5xx/网络瞬断短重试、429 冷却和流式/非流式协议兜底；关闭后超时预算也不再生效，模型 timeout_seconds 直接透传。</div>
+            <div class="hint" data-i18n="config.hint.clientTimeoutBudget">客户端超时预算仅在防御模式开启时生效，用于 VS/Copilot 场景：代理会把更长的模型 timeout_seconds 裁剪到该值，默认 90 秒。防御关闭时该值无效。</div>
             <div class="hint" data-i18n="config.hint.adminPath">管理面板与代理共用同一端口；Web 管理路径固定为 `/admin`，端口变更保存后需重启进程生效。</div>
             <div class="hint" data-i18n="config.hint.storePath">请求日志持久化路径由 `CONFIG_PATH` / `STORE_PATH` 环境变量控制，不在此页保存。</div>
             <div class="actions">
@@ -592,6 +596,37 @@
           <div class="stat">
             <div class="label" data-i18n="monitor.health.models">可见模型数</div>
             <div class="value" id="healthModels">-</div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:12px;">
+          <div class="label" data-i18n="monitor.stability.label">近期稳定性（只读观测）</div>
+          <div class="hint" style="margin-bottom:10px;" data-i18n="monitor.stability.hint">按 provider/model/upstream 汇总当前保留日志；不参与自动熔断或路由。upstream_no_response 表示上游/提供商问题，不是本机未联网。</div>
+          <div class="diagnostic-banner" id="stabilityLargePacketBanner" style="grid-template-columns:1fr; display:none;">
+            <div class="diagnostic-card">
+              <div class="label warn" data-i18n="monitor.stability.largePacketLabel">大包预警</div>
+              <div class="value" id="stabilityLargePacketText">-</div>
+              <div class="hint" data-i18n="monitor.stability.largePacketHint">近窗 request_bytes_p95 ≥ 400KB 时，提供商更容易出现等响应头失败。请减少会话历史/附件，或切换更稳定渠道。</div>
+            </div>
+          </div>
+          <div class="stability-table-wrap">
+            <table class="table stability-table">
+              <thead>
+                <tr>
+                  <th data-i18n="monitor.stability.col.provider">Provider</th>
+                  <th data-i18n="monitor.stability.col.model">模型</th>
+                  <th data-i18n="monitor.stability.col.upstream">上游</th>
+                  <th data-i18n="monitor.stability.col.runs">样本</th>
+                  <th data-i18n="monitor.table.successRate">成功率</th>
+                  <th data-i18n="monitor.stability.col.errors">主错误</th>
+                  <th data-i18n="monitor.stability.col.bytes">请求体 p50/p95</th>
+                  <th data-i18n="monitor.stability.col.latency">耗时 p50/p95</th>
+                  <th data-i18n="monitor.stability.col.latest">最近失败</th>
+                </tr>
+              </thead>
+              <tbody id="recentStabilityTable">
+                <tr><td colspan="9" class="empty" data-i18n="table.empty.stability">暂无近期稳定性数据</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
         <div class="grid-2" style="margin-top: 12px;">
@@ -1556,6 +1591,96 @@
       }
     };
 
+    // 大包阈值默认值仅作 observation 缺失时的兜底；正常路径一律读 diagnostics.observation.large_request_warn_bytes。
+    const FALLBACK_LARGE_REQUEST_WARN_BYTES = 400 * 1024;
+
+    const resolveLargeRequestWarnBytes = (observation) => {
+      const n = Number(observation?.large_request_warn_bytes);
+      if (Number.isFinite(n) && n > 0) return n;
+      return FALLBACK_LARGE_REQUEST_WARN_BYTES;
+    };
+
+    const formatStabilityTopKey = (items) => {
+      if (!Array.isArray(items) || !items.length) return '-';
+      const top = items[0];
+      const key = escapeHTML(top.key || '-');
+      const count = Number(top.count || 0);
+      return count > 0 ? `${key} ×${count}` : key;
+    };
+
+    const formatStabilityLatestFailure = (item) => {
+      const failure = item?.latest_failure;
+      if (!failure) return '-';
+      const code = failure.error_code || '-';
+      const reason = failure.error_reason || '';
+      const stream = failure.stream_state ? ` · ${failure.stream_state}` : '';
+      const text = `${code}${reason ? ' · ' + reason : ''}${stream}`;
+      const title = [
+        failure.request_id ? `request_id=${failure.request_id}` : '',
+        failure.diagnostic_summary || '',
+        Number(failure.request_bytes || 0) > 0 ? `request_bytes=${formatBytes(failure.request_bytes)}` : '',
+      ].filter(Boolean).join(' | ');
+      const cls = (code === 'upstream_no_response' || code === 'upstream_stream_interrupted') ? 'warn' : 'err';
+      return `<span class="${cls}" title="${escapeAttr(title)}">${escapeHTML(text)}</span>`;
+    };
+
+    const renderRecentStability = (items, observation) => {
+      const tbody = $('recentStabilityTable');
+      const banner = $('stabilityLargePacketBanner');
+      const bannerText = $('stabilityLargePacketText');
+      const rows = Array.isArray(items) ? items : [];
+      const warnBytes = resolveLargeRequestWarnBytes(observation);
+      const largeGroups = rows.filter((item) => Number(item.request_bytes_p95 || 0) >= warnBytes);
+      if (banner && bannerText) {
+        // 优先用服务端已聚合的 large_packet_group_count，避免前后端阈值短暂不一致时横幅与计数打架。
+        const serverCount = Number(observation?.large_packet_group_count);
+        const showBanner = Number.isFinite(serverCount) ? serverCount > 0 : largeGroups.length > 0;
+        if (showBanner) {
+          banner.style.display = 'grid';
+          const names = largeGroups.slice(0, 3).map((item) => {
+            const provider = item.provider || '-';
+            const model = item.model || '-';
+            return `${provider}/${model} p95=${formatBytes(item.request_bytes_p95)}`;
+          }).join('；');
+          const count = Number.isFinite(serverCount) && serverCount > 0 ? serverCount : largeGroups.length;
+          bannerText.textContent = t('monitor.stability.largePacketSummary', count, names || t('monitor.stability.largePacketNoNames'));
+        } else {
+          banner.style.display = 'none';
+          bannerText.textContent = '-';
+        }
+      }
+      if (!tbody) return;
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="empty">' + t('table.empty.stability') + '</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((item) => {
+        const rateCls = Number(item.success_rate || 0) < 0.8 && Number(item.failures || 0) > 0 ? 'warn' : 'ok';
+        const bytesCls = Number(item.request_bytes_p95 || 0) >= warnBytes ? 'warn' : '';
+        const bytes = [
+          Number(item.request_bytes_p50 || 0) > 0 ? formatBytes(item.request_bytes_p50) : '-',
+          Number(item.request_bytes_p95 || 0) > 0 ? formatBytes(item.request_bytes_p95) : '-',
+        ].join(' / ');
+        const latency = [
+          Number(item.elapsed_ms_p50 || 0) > 0 ? formatCompactLatency(item.elapsed_ms_p50) : '-',
+          Number(item.elapsed_ms_p95 || 0) > 0 ? formatCompactLatency(item.elapsed_ms_p95) : '-',
+        ].join(' / ');
+        return `
+          <tr>
+            <td>${escapeHTML(item.provider || '-')}</td>
+            <td title="${escapeAttr(item.model || '')}">${escapeHTML(item.model || '-')}</td>
+            <td title="${escapeAttr(item.upstream || '')}">${escapeHTML(item.upstream || '-')}</td>
+            <td>${Number(item.runs || 0)} <span class="badge">${Number(item.successes || 0)}/${Number(item.failures || 0)}</span></td>
+            <td class="${rateCls}">${formatPercent(item.success_rate)}</td>
+            <td>${formatStabilityTopKey(item.top_error_codes)}</td>
+            <td class="${bytesCls}">${bytes}</td>
+            <td>${latency}</td>
+            <td>${formatStabilityLatestFailure(item)}</td>
+          </tr>
+        `;
+      }).join('');
+    };
+
     const renderProviderHealth = (items) => {
       const tbody = $('providerHealthTable');
       if (!items || !items.length) {
@@ -1612,6 +1737,20 @@
         lines.push(`${t('monitor.diagnostics.requestId')}: ${summary.latest_failure.request_id || '-'}`);
         lines.push(`${t('monitor.diagnostics.provider')}: ${summary.latest_failure.provider || '-'} / ${summary.latest_failure.model || '-'} -> ${summary.latest_failure.upstream || '-'}`);
         lines.push(`${t('monitor.diagnostics.status')}: ${summary.latest_failure.status_code || '-'}`);
+        const code = summary.latest_failure.error_code || '';
+        if (code === 'upstream_no_response' || code === 'upstream_stream_interrupted') {
+          lines.push(t('monitor.diagnostics.upstreamNotLocalNote'));
+        }
+      }
+      if (Array.isArray(summary.recent_stability) && summary.recent_stability.length > 0) {
+        lines.push('');
+        lines.push(t('monitor.diagnostics.recentStability'));
+        summary.recent_stability.slice(0, 5).forEach((item) => {
+          const top = Array.isArray(item.top_error_codes) && item.top_error_codes[0]
+            ? `${item.top_error_codes[0].key}×${item.top_error_codes[0].count}`
+            : '-';
+          lines.push(`- ${item.provider || '-'}/${item.model || '-'}/${item.upstream || '-'}: ${formatPercent(item.success_rate)} (${item.successes || 0}/${item.runs || 0}) ${t('monitor.diagnostics.topError')}=${top}`);
+        });
       }
       if (Array.isArray(summary.problem_providers) && summary.problem_providers.length > 0) {
         lines.push('');
@@ -1644,6 +1783,7 @@
         $('healthProviders').textContent = (health.providers || []).length;
         $('healthModels').textContent = (health.available_models || []).length;
         renderProviderHealth(providerHealth);
+        renderRecentStability(diagnosticsSummary?.recent_stability || [], diagnosticsSummary?.observation || null);
         $('healthOutput').textContent = JSON.stringify({
           ...health,
           provider_health: providerHealth
@@ -1656,6 +1796,13 @@
         };
       } catch (e) {
         console.error(e);
+        // 避免半截渲染后表格仍显示陈旧成功数据；失败时回落到空态。
+        try {
+          renderRecentStability([], null);
+          if ($('diagnosticsSummaryOutput')) {
+            $('diagnosticsSummaryOutput').textContent = t('error.requestFailed') + ': ' + (e?.message || e);
+          }
+        } catch (_) { /* ignore secondary UI errors */ }
       }
     };
 

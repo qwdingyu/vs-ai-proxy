@@ -97,7 +97,7 @@
     'advanced.card.models.hint': 'Manually tune model bindings, context length and max output.',
     'advanced.card.monitor.label': 'Monitoring',
     'advanced.card.monitor.value': 'Monitor',
-    'advanced.card.monitor.hint': 'Health status, request stats and provider status.',
+    'advanced.card.monitor.hint': 'Health, recent stability, large-payload warnings and provider status.',
 
     // ── Config ──────────────────────────────────────────
     'config.title': 'System config',
@@ -106,8 +106,8 @@
     'config.form.defenseEnabled': 'Enable upstream defense mode',
     'config.form.clientTimeoutBudget': 'Client timeout budget (seconds)',
     'config.hint.portRestart': 'Port changes still require a restart; other settings take effect immediately via hot reload.',
-    'config.hint.defenseMode': 'Upstream defense mode is for gateways like new-api / sub2api: it enables stable User-Agent, short retry on 5xx / transient network errors, 429 cooldown, and streaming / non-streaming protocol fallback.',
-    'config.hint.clientTimeoutBudget': 'Client timeout budget is for VS/Copilot: the proxy clamps longer model timeout_seconds to this value. Default is 90s; recommended range is 15-95s.',
+    'config.hint.defenseMode': 'Upstream defense mode is for providers: it enables stable User-Agent, short retry on 5xx / transient network errors, 429 cooldown, and streaming / non-streaming protocol fallback. When disabled, the timeout budget is also bypassed and model timeout_seconds passes through directly.',
+    'config.hint.clientTimeoutBudget': 'Client timeout budget only applies when defense mode is enabled, for VS/Copilot scenarios: the proxy clamps longer model timeout_seconds to this value. Default is 90s. Ignored when defense is disabled.',
     'config.hint.adminPath': 'Admin panel shares the same port; admin path is fixed at /admin. Port changes require restart.',
     'config.hint.storePath': 'Request log persistence path is controlled by CONFIG_PATH / STORE_PATH env vars; it is not saved here.',
     'config.reloadBtn': 'Reload',
@@ -259,6 +259,20 @@
     'monitor.diagnostics.label': 'Unified diagnostics summary',
     'monitor.copyDiagnosticsBtn': 'Copy diagnostics summary',
     'monitor.metrics.label': 'Metrics',
+    'monitor.stability.label': 'Recent stability (read-only)',
+    'monitor.stability.hint': 'Aggregated from retained logs by provider/model/upstream. Not used for auto failover. upstream_no_response means upstream/gateway issues, not that this machine is offline.',
+    'monitor.stability.largePacketLabel': 'Large payload warning',
+    'monitor.stability.largePacketHint': 'When request_bytes_p95 ≥ 400KB in the recent window, gateway no-response failures are more likely. Trim session history/attachments or switch to a more stable channel.',
+    'monitor.stability.largePacketSummary': '{0} provider/model group(s) are large: {1}',
+    'monitor.stability.largePacketNoNames': 'see highlighted p95 rows below',
+    'monitor.stability.col.provider': 'Provider',
+    'monitor.stability.col.model': 'Model',
+    'monitor.stability.col.upstream': 'Upstream',
+    'monitor.stability.col.runs': 'Samples',
+    'monitor.stability.col.errors': 'Top error',
+    'monitor.stability.col.bytes': 'Body p50/p95',
+    'monitor.stability.col.latency': 'Latency p50/p95',
+    'monitor.stability.col.latest': 'Latest failure',
 
     // ── Logs ────────────────────────────────────────────
     'logs.title': 'Logs',
@@ -342,6 +356,7 @@
     'table.empty.health': 'No runtime data',
     'table.empty.providerHealth': 'No provider health data',
     'table.empty.modelUsage': 'No token details',
+    'table.empty.stability': 'No recent stability data',
     'table.loading': 'Loading...',
 
     // ── Table headers ───────────────────────────────────
@@ -417,6 +432,9 @@
     'monitor.diagnostics.provider': 'Provider:',
     'monitor.diagnostics.status': 'Status:',
     'monitor.diagnostics.http': 'HTTP',
+    'monitor.diagnostics.recentStability': 'Recent stability:',
+    'monitor.diagnostics.topError': 'top error',
+    'monitor.diagnostics.upstreamNotLocalNote': 'Note: upstream_no_response / stream_interrupted means upstream or gateway issues, not that this machine is offline. Trim context or switch channels.',
 
     // ── Common actions ──────────────────────────────────
     'action.copyQQ': 'Copy QQ group ID',

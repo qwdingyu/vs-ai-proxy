@@ -97,7 +97,7 @@
     'advanced.card.models.hint': '手工调整模型绑定、上下文长度和最大输出。',
     'advanced.card.monitor.label': '运行观测',
     'advanced.card.monitor.value': '监控',
-    'advanced.card.monitor.hint': '查看健康状态、请求统计和 provider 状态。',
+    'advanced.card.monitor.hint': '健康状态、近期稳定性、大包预警与 provider 状态。',
 
     // ── 系统配置 ────────────────────────────────────────
     'config.title': '系统配置',
@@ -106,8 +106,8 @@
     'config.form.defenseEnabled': '启用上游防御模式',
     'config.form.clientTimeoutBudget': '客户端超时预算（秒）',
     'config.hint.portRestart': '端口变更保存后仍需重启进程生效；其它配置会立即热更新代理路由。',
-    'config.hint.defenseMode': '上游防御模式用于 new-api / sub2api 等网关：开启后会启用稳定 User-Agent、5xx/网络瞬断短重试、429 冷却和流式/非流式协议兜底。',
-    'config.hint.clientTimeoutBudget': '客户端超时预算用于 VS/Copilot：代理会把更长的模型 timeout_seconds 裁剪到该值，默认 90 秒，建议保持 15-95 秒。',
+    'config.hint.defenseMode': '上游防御模式用于提供商：开启后会启用稳定 User-Agent、5xx/网络瞬断短重试、429 冷却和流式/非流式协议兜底；关闭后超时预算也不再生效，模型 timeout_seconds 直接透传。',
+    'config.hint.clientTimeoutBudget': '客户端超时预算仅在防御模式开启时生效，用于 VS/Copilot 场景：代理会把更长的模型 timeout_seconds 裁剪到该值，默认 90 秒。防御关闭时该值无效。',
     'config.hint.adminPath': '管理面板与代理共用同一端口；Web 管理路径固定为 /admin，端口变更保存后需重启进程生效。',
     'config.hint.storePath': '请求日志持久化路径由 CONFIG_PATH / STORE_PATH 环境变量控制，不在此页保存。',
     'config.reloadBtn': '重新加载',
@@ -259,6 +259,20 @@
     'monitor.diagnostics.label': '统一诊断摘要',
     'monitor.copyDiagnosticsBtn': '复制诊断摘要',
     'monitor.metrics.label': 'Metrics',
+    'monitor.stability.label': '近期稳定性（只读观测）',
+    'monitor.stability.hint': '按 provider/model/upstream 汇总当前保留日志；不参与自动熔断或路由。upstream_no_response 表示上游/提供商问题，不是本机未联网。',
+    'monitor.stability.largePacketLabel': '大包预警',
+    'monitor.stability.largePacketHint': '近窗 request_bytes_p95 ≥ 400KB 时，提供商更容易出现等响应头失败。请减少会话历史/附件，或切换更稳定渠道。',
+    'monitor.stability.largePacketSummary': '{0} 组 provider/model 近窗偏大：{1}',
+    'monitor.stability.largePacketNoNames': '见下表 p95 高亮行',
+    'monitor.stability.col.provider': 'Provider',
+    'monitor.stability.col.model': '模型',
+    'monitor.stability.col.upstream': '上游',
+    'monitor.stability.col.runs': '样本',
+    'monitor.stability.col.errors': '主错误',
+    'monitor.stability.col.bytes': '请求体 p50/p95',
+    'monitor.stability.col.latency': '耗时 p50/p95',
+    'monitor.stability.col.latest': '最近失败',
 
     // ── 日志 ────────────────────────────────────────────
     'logs.title': '日志',
@@ -342,6 +356,7 @@
     'table.empty.health': '暂无运行数据',
     'table.empty.providerHealth': '暂无 provider 健康数据',
     'table.empty.modelUsage': '暂无 Token 明细',
+    'table.empty.stability': '暂无近期稳定性数据',
     'table.loading': '加载中...',
 
     // ── 表格列头 ────────────────────────────────────────
@@ -417,6 +432,9 @@
     'monitor.diagnostics.provider': 'Provider:',
     'monitor.diagnostics.status': '状态:',
     'monitor.diagnostics.http': 'HTTP',
+    'monitor.diagnostics.recentStability': '近期稳定性:',
+    'monitor.diagnostics.topError': '主错误',
+    'monitor.diagnostics.upstreamNotLocalNote': '说明: upstream_no_response / stream_interrupted 表示上游或提供商链路问题，不是本机断网；请减上下文或换更稳渠道。',
 
     // ── 通用动作 ────────────────────────────────────────
     'action.copyQQ': '复制 QQ 群号',

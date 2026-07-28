@@ -228,15 +228,15 @@ tests/useai_large_request_diagnostic.sh
 - `direct=413/502` 且 `proxy=502`，同时 `delta_bytes` 很小：优先判定为上游链路限制，不是代理体积膨胀。
 - `direct=200` 但 `proxy!=200`：重点排查代理路由、参数转换、模型名映射、stream 处理。
 - `upstream_bytes` 明显大于 `request_bytes`：重点排查 request transformer、reasoning 注入、参数覆盖。
-- `error_code=client_deadline_reached` 且耗时接近 100 秒：优先排查上游首 token、new-api 渠道排队/重试和客户端等待上限。
-- `error_code=network_error` 且 `network_peer` 是 CDN IP：优先排查客户端到 CDN、CDN 到源站、Cloudflare/WAF 或边缘连接关闭，不要直接当成 new-api 源站 IP。
+- `error_code=client_deadline_reached` 且耗时接近 100 秒：优先排查上游首 token、提供商渠道排队/重试和客户端等待上限。
+- `error_code=network_error` 且 `network_peer` 是 CDN IP：优先排查客户端到 CDN、CDN 到源站、Cloudflare/WAF 或边缘连接关闭，不要直接当成提供商源站 IP。
 - `direct_elapsed_ms` 和 `proxy_elapsed_ms` 都接近 100 秒：优先查上游/客户端等待上限；只有 proxy 明显更慢时才优先怀疑代理。
 - `stream_state=upstream_connecting`：尚未收到上游 HTTP 响应头/可读流；可能包含上传、连接、TLS、CDN/WAF、网关排队和首 token 等待，不能只凭该字段归因 DNS/TCP。
 - `upstream_stage=waiting_response_headers`：请求已经写完但没有收到响应头首字节；优先查网关排队、渠道选择、模型首响应和大上下文能力，不再优先怀疑本地上传。
 - `upstream_stage=preparing_request`：请求尚未进入可观测网络阶段，优先检查 URL 解析、请求构造或极短预算。
 - `upstream_stage=receiving_response_headers`：已经收到响应头首字节但响应建立未完成，优先查重定向、代理中间层和连接关闭。
 - `upstream_stage=resolving_dns/connecting/tls_handshake`：优先查 Windows DNS、系统代理、安全软件、证书链和 CDN 网络。
-- `stream_state=upstream_connected`：已连上上游但未向 VS 写出首个 chunk；优先查上游首 token 或 new-api 渠道排队。
+- `stream_state=upstream_connected`：已连上上游但未向 VS 写出首个 chunk；优先查上游首 token 或提供商渠道排队。
 - `stream_state=downstream_started`：已经向 VS 写出过 chunk；后续失败不能安全自动重试。
 
 ### 2.6 `large_request_matrix_diagnostic.sh`
@@ -490,7 +490,7 @@ vs-ai-proxy 一定会比直连多一层本地 HTTP 转发和 JSON 处理，因�
 客观评判：
 
 - 如果只是普通 OpenAI-compatible 单 provider、小请求聊天，直连最轻，代理不是必要路径。
-- 如果目标是 Visual Studio Copilot BYOM、工具调用、多 provider、new-api/sub2api 兼容、错误可观测，代理带来的收益明显大于本地转发开销。
+- 如果目标是 Visual Studio Copilot BYOM、工具调用、多 provider、提供商兼容、错误可观测，代理带来的收益明显大于本地转发开销。
 - 当前已观测的主要失败点不是代理性能开销，而是上游 provider/channel 的大请求限制、超时、网关波动和模型参数兼容。
 - 对用户体验来说，代理最重要的职责不是“零开销”，而是“稳定、可诊断、少误路由、工具调用正确”。
 
