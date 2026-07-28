@@ -934,6 +934,7 @@ type providerProbeResult struct {
 	Reachable        bool                   `json:"reachable"`
 	DetectedType     string                 `json:"detected_type,omitempty"`
 	CorrectedBaseURL string                 `json:"corrected_base_url,omitempty"`
+	Transport        config.TransportConfig `json:"transport,omitempty"`
 	ModelsCount      int                    `json:"models_count"`
 	Models           []string               `json:"models,omitempty"`
 	ModelsPreview    []string               `json:"models_preview,omitempty"`
@@ -972,17 +973,21 @@ func probeProviderConfig(ctx context.Context, providerCfg config.ProviderConfig)
 func probeOpenAIProvider(ctx context.Context, providerCfg config.ProviderConfig) providerProbeResult {
 	attempts := []providerProbeAttempt{}
 	for _, baseURL := range openAIProbeBaseURLs(providerCfg.BaseURL) {
+		attemptCfg := config.NormalizeProvider(providerCfg)
+		attemptCfg.BaseURL = baseURL
+		attemptCfg.Transport = config.TransportConfig{}
+		attemptCfg = config.NormalizeProvider(attemptCfg)
 		prov := provider.NewOpenAIProviderWithCapability(
-			config.ProviderKey(providerCfg),
-			providerCapabilityNameFromConfig(providerCfg),
-			providerCfg.APIKey,
+			config.ProviderKey(attemptCfg),
+			providerCapabilityNameFromConfig(attemptCfg),
+			attemptCfg.APIKey,
 			baseURL,
 			true,
 			10*time.Second,
 		)
 		models, err := prov.ListModels(ctx)
 		if err == nil && len(models) > 0 {
-			return successfulProbeResult("openai", baseURL, models, attempts)
+			return successfulProbeResult("openai", baseURL, attemptCfg.Transport, models, attempts)
 		}
 		attempts = append(attempts, providerProbeAttempt{
 			Type:    "openai",
@@ -996,16 +1001,20 @@ func probeOpenAIProvider(ctx context.Context, providerCfg config.ProviderConfig)
 func probeOllamaProvider(ctx context.Context, providerCfg config.ProviderConfig) providerProbeResult {
 	attempts := []providerProbeAttempt{}
 	for _, baseURL := range ollamaProbeBaseURLs(providerCfg.BaseURL) {
+		attemptCfg := config.NormalizeProvider(providerCfg)
+		attemptCfg.BaseURL = baseURL
+		attemptCfg.Transport = config.TransportConfig{}
+		attemptCfg = config.NormalizeProvider(attemptCfg)
 		prov := provider.NewOllamaProviderWithCapability(
-			config.ProviderKey(providerCfg),
-			providerCapabilityNameFromConfig(providerCfg),
+			config.ProviderKey(attemptCfg),
+			providerCapabilityNameFromConfig(attemptCfg),
 			baseURL,
 			true,
 			10*time.Second,
 		)
 		models, err := prov.ListModels(ctx)
 		if err == nil && len(models) > 0 {
-			return successfulProbeResult("ollama", baseURL, models, attempts)
+			return successfulProbeResult("ollama", baseURL, attemptCfg.Transport, models, attempts)
 		}
 		attempts = append(attempts, providerProbeAttempt{
 			Type:    "ollama",
@@ -1016,7 +1025,7 @@ func probeOllamaProvider(ctx context.Context, providerCfg config.ProviderConfig)
 	return failedProbeResult("Ollama endpoint 探测失败", attempts)
 }
 
-func successfulProbeResult(providerType, baseURL string, models []string, attempts []providerProbeAttempt) providerProbeResult {
+func successfulProbeResult(providerType, baseURL string, transport config.TransportConfig, models []string, attempts []providerProbeAttempt) providerProbeResult {
 	preview := models
 	if len(preview) > 10 {
 		preview = preview[:10]
@@ -1025,6 +1034,7 @@ func successfulProbeResult(providerType, baseURL string, models []string, attemp
 		Reachable:        true,
 		DetectedType:     providerType,
 		CorrectedBaseURL: baseURL,
+		Transport:        transport,
 		ModelsCount:      len(models),
 		Models:           append([]string(nil), models...),
 		ModelsPreview:    append([]string(nil), preview...),
