@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dingyuwang/vs-ai-proxy/internal/config"
 	"github.com/dingyuwang/vs-ai-proxy/internal/provider"
 )
 
@@ -671,6 +674,20 @@ func buildAnthropicMessages(messages []provider.Message) []anthropicMessage {
 	return result
 }
 
+// getProviderTypeFromConfig 从配置中查找 provider 的类型。
+// 用于 anthropic 类型 provider 的直通转发判断。
+func getProviderTypeFromConfig(cfg *config.AppConfig, providerName string) string {
+	if cfg == nil {
+		return ""
+	}
+	for _, p := range cfg.Providers {
+		if p.ID == providerName || p.Name == providerName {
+			return strings.ToLower(strings.TrimSpace(p.Type))
+		}
+	}
+	return ""
+}
+
 // Ensure handler_anthropic.go implements the required interfaces.
 var _ io.Writer = (*anthropicStreamWriter)(nil)
 
@@ -697,6 +714,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+
+	// 保存原始请求体，用于 anthropic 类型 provider 的直通转发
+	originalBody := make([]byte, len(body))
+	copy(originalBody, body)
 
 	// Anthropic 官方客户端要求 anthropic-version 头，但不做严格校验
 	_ = r.Header.Get("anthropic-version")
@@ -783,6 +804,60 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			r.Context(),
 			effectiveTimeout,
 		)
+
+		// anthropic 类型 provider 直通转发：
+		// 将原始 Anthropic 请求直接发送到上游的 {base_url}/v1/messages，
+		// 不经过 OpenAI 格式转换，避免上游 Anthropic 端点收到 OpenAI 格式请求而报 404。
+		providerType := getProviderTypeFromConfig(cfg, prov.Name())
+		if providerType == "anthropic" {
+			streamReq := anthropicReq.Stream
+			if streamReq {
+				streamWriter := &streamAttemptWriter{ResponseWriter: w}
+				err := s.handleAnthropicPassthroughStream(streamWriter, r, prov, originalBody, modelName)
+				cancel()
+				if err != nil {
+					if isClientGoneError(err) {
+						return
+					}
+					lastErr = err
+					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
+					attempts = append(attempts, attempt)
+					s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
+					if streamWriter.HasWritten() {
+						markWrittenStreamFailure(w, attempt)
+						registry.RecordCandidateFailure(prov.Name(), err)
+						return
+					}
+					registry.RecordCandidateFailure(prov.Name(), err)
+					if shouldStopCandidateFallback(attempt.Category) {
+						break
+					}
+					continue
+				}
+				registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+				return
+			}
+
+			// 非流式直通转发
+			err := s.forwardAnthropicRequest(ctx, w, r, prov, originalBody, modelName)
+			cancel()
+			if err != nil {
+				if isClientGoneError(err) {
+					return
+				}
+				lastErr = err
+				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
+				attempts = append(attempts, attempt)
+				s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
+				registry.RecordCandidateFailure(prov.Name(), err)
+				if shouldStopCandidateFallback(attempt.Category) {
+					break
+				}
+				continue
+			}
+			registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+			return
+		}
 
 		// 流式处理
 		if req.Stream {
@@ -1000,5 +1075,142 @@ func (s *Server) handleAnthropicStream(
 
 	// 写出 Anthropic 流结束事件
 	anthropicWriter.finish()
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// anthropic 类型 provider 直通转发
+//
+// 当 provider 类型为 "anthropic" 时，不经过 OpenAI 格式转换，
+// 直接将原始 Anthropic 请求转发到上游的 {base_url}/v1/messages。
+// 这适用于上游只提供 Anthropic 原生协议的情况（如 Anthropic 官方 API）。
+// ---------------------------------------------------------------------------
+
+// forwardAnthropicRequest 非流式直通转发：将原始 Anthropic 请求体 POST 到上游 {base_url}/v1/messages。
+func (s *Server) forwardAnthropicRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, prov provider.Provider, originalBody []byte, modelName string) error {
+	// 从 config 查找 provider 的 base_url
+	upstreamBase := ""
+	if s.config != nil {
+		for _, p := range s.config.Providers {
+			if p.ID == prov.Name() || p.Name == prov.Name() {
+				upstreamBase = strings.TrimRight(p.BaseURL, "/")
+				break
+			}
+		}
+	}
+	if upstreamBase == "" {
+		return fmt.Errorf("anthropic passthrough: 无法找到 provider %q 的 base_url", prov.Name())
+	}
+
+	upstreamURL := upstreamBase + "/v1/messages"
+	bodyReader := bytes.NewReader(originalBody)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bodyReader)
+	if err != nil {
+		return fmt.Errorf("anthropic passthrough: 创建请求失败: %w", err)
+	}
+
+	// 复制认证头
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", r.Header.Get("Authorization"))
+	httpReq.Header.Set("x-api-key", r.Header.Get("x-api-key"))
+	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("anthropic passthrough: 上游请求失败: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return fmt.Errorf("anthropic passthrough: 读取响应失败: %w", err)
+	}
+
+	if httpResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("anthropic passthrough: 上游返回 %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	// 直接透传 Anthropic 响应
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respBody)
+	return nil
+}
+
+// handleAnthropicPassthroughStream 流式直通转发：将原始 Anthropic 流式请求转发到上游。
+func (s *Server) handleAnthropicPassthroughStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	prov provider.Provider,
+	originalBody []byte,
+	modelName string,
+) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return fmt.Errorf("response writer does not support flushing")
+	}
+
+	// 查找 base_url
+	upstreamBase := ""
+	if s.config != nil {
+		for _, p := range s.config.Providers {
+			if p.ID == prov.Name() || p.Name == prov.Name() {
+				upstreamBase = strings.TrimRight(p.BaseURL, "/")
+				break
+			}
+		}
+	}
+	if upstreamBase == "" {
+		return fmt.Errorf("anthropic passthrough stream: 无法找到 provider %q 的 base_url", prov.Name())
+	}
+
+	upstreamURL := upstreamBase + "/v1/messages"
+	bodyReader := bytes.NewReader(originalBody)
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bodyReader)
+	if err != nil {
+		return fmt.Errorf("anthropic passthrough stream: 创建请求失败: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", r.Header.Get("Authorization"))
+	httpReq.Header.Set("x-api-key", r.Header.Get("x-api-key"))
+	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("anthropic passthrough stream: 上游请求失败: %w", err)
+	}
+
+	if httpResp.StatusCode != http.StatusOK {
+		defer httpResp.Body.Close()
+		respBody, _ := io.ReadAll(httpResp.Body)
+		return fmt.Errorf("anthropic passthrough stream: 上游返回 %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	// 流式透传 Anthropic 事件流
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher.Flush()
+
+	defer httpResp.Body.Close()
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := httpResp.Body.Read(buf)
+		if n > 0 {
+			_, writeErr := w.Write(buf[:n])
+			if writeErr != nil {
+				return fmt.Errorf("anthropic passthrough stream: 写入响应失败: %w", writeErr)
+			}
+			flusher.Flush()
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return fmt.Errorf("anthropic passthrough stream: 读取上游流失败: %w", readErr)
+		}
+	}
 	return nil
 }
