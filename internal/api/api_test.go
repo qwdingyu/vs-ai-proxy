@@ -2228,6 +2228,107 @@ func TestManagementTestChatFallsBackToStreamWhenNonStreamFails(t *testing.T) {
 	}
 }
 
+func TestManagementTestChatWithAnthropicProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/messages":
+			var reqBody map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			// 验证请求为 Anthropic 格式
+			if _, ok := reqBody["max_tokens"]; !ok {
+				t.Error("max_tokens should be present in Anthropic request")
+			}
+			if _, ok := reqBody["messages"]; !ok {
+				t.Error("messages should be present in Anthropic request")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","model":"LongCat-2.0","content":[{"type":"text","text":"Anthropic response"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":10}}`))
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":[{"id":"LongCat-2.0"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	providerCfg := config.ProviderConfig{
+		ID:      "longcat2",
+		Name:    "longcat2",
+		Type:    "anthropic",
+		BaseURL: upstream.URL,
+		APIKey:  "sk-test",
+		Enabled: true,
+		Transport: config.TransportConfig{
+			ChatPath:   "v1/messages",
+			ModelsPath: "v1/models",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": providerCfg,
+		"message":  "hello",
+		"model":    "LongCat-2.0",
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"success":true`)) {
+		t.Fatalf("anthropic chat test should succeed: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"content":"Anthropic response"`)) {
+		t.Fatalf("response should contain Anthropic response: %s", rec.Body.String())
+	}
+}
+
+func TestManagementTestConnectionWithAnthropicProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":[{"id":"LongCat-2.0"},{"id":"LongCat-3.0"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	providerCfg := config.ProviderConfig{
+		ID:      "longcat2",
+		Name:    "longcat2",
+		Type:    "anthropic",
+		BaseURL: upstream.URL,
+		APIKey:  "sk-test",
+		Enabled: true,
+		Transport: config.TransportConfig{
+			ChatPath:   "v1/messages",
+			ModelsPath: "v1/models",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/connection", mustJSONBody(t, map[string]any{
+		"provider": providerCfg,
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"success":true`)) {
+		t.Fatalf("anthropic connection test should succeed: %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"models":["LongCat-2.0","LongCat-3.0"]`)) {
+		t.Fatalf("should return models from anthropic provider: %s", rec.Body.String())
+	}
+}
+
 func newAPITestHarness(t *testing.T) (*Server, *proxy.Server) {
 	return newAPITestHarnessWithStaticFSAndStoreMax(t, nil, 50)
 }

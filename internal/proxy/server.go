@@ -945,6 +945,72 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// anthropic 类型 provider 非流式处理：
+		// 将 OpenAI 格式请求转换为 Anthropic 格式，
+		// 发送到上游 {base_url}/v1/messages，再将响应转回 OpenAI 格式。
+		providerType := getProviderTypeFromConfig(cfg, prov.Name())
+		if providerType == "anthropic" {
+			provCfg := findProviderConfig(cfg, prov.Name())
+			var anthropicBaseURL, anthropicAPIKey string
+			if provCfg != nil {
+				anthropicBaseURL = provCfg.BaseURL
+				anthropicAPIKey = provCfg.APIKey
+			}
+			// 发送 Anthropic 格式请求到上游，返回 OpenAI 格式的 ChatResponse
+			anthropicResp, anthropicErr := SendAnthropicChatRequest(ctx, anthropicBaseURL, anthropicAPIKey, req)
+			cancel()
+			if anthropicErr != nil {
+				if isClientGoneError(anthropicErr) {
+					return
+				}
+				lastErr = anthropicErr
+				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, anthropicErr)
+				attempts = append(attempts, attempt)
+				s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
+				registry.RecordCandidateFailure(prov.Name(), anthropicErr)
+				if shouldStopCandidateFallback(attempt.Category) {
+					break
+				}
+				continue
+			}
+			// 将 ChatResponse 序列化为 OpenAI 格式 JSON
+			body, marshalErr := json.Marshal(anthropicResp)
+			if marshalErr != nil {
+				lastErr = fmt.Errorf("anthropic 响应序列化失败: %w", marshalErr)
+				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, lastErr)
+				attempts = append(attempts, attempt)
+				s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
+				registry.RecordCandidateFailure(prov.Name(), lastErr)
+				if shouldStopCandidateFallback(attempt.Category) {
+					break
+				}
+				continue
+			}
+			// 应用标准 OpenAI 响应归一化，与 ChatRaw 路径行为一致
+			body = normalizeOpenAIChatResponseForVisualStudio(body)
+			body = normalizeProviderSpecificToolCallsInOpenAIJSON(body, allowedToolNames(req))
+			if validationErr := validateOpenAIChatResponseBody(body); validationErr != nil {
+				lastErr = validationErr
+				attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, validationErr)
+				attempts = append(attempts, attempt)
+				s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
+				registry.RecordCandidateFailure(prov.Name(), validationErr)
+				if shouldStopCandidateFallback(attempt.Category) {
+					break
+				}
+				continue
+			}
+			setRawResponseToolDiagnosticHeader(w, body)
+			setRawToolOutcomeDiagnosticHeader(w, req, body)
+			setRawOpenAIResponseUsage(w, body)
+			s.cacheRawOpenAIChatResponse(body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(body)
+			registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+			return
+		}
+
 		if provider.ResolveApiFormat(prov) == provider.ApiFormatOpenAi {
 			if rawProvider, ok := prov.(rawOpenAIChatProvider); ok {
 				body, err := rawProvider.ChatRaw(ctx, req)

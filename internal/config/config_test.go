@@ -167,6 +167,42 @@ func TestNormalizeProviderTransportPreservesLegacyBareHostOpenAIBase(t *testing.
 	}
 }
 
+func TestNormalizeProviderTransportForAnthropicType(t *testing.T) {
+	provider := NormalizeProvider(ProviderConfig{
+		ID:      "longcat",
+		Name:    "LongCat",
+		Type:    "anthropic",
+		BaseURL: "https://api.longcat.chat/anthropic/",
+	})
+
+	if provider.Transport.ChatPath != "v1/messages" {
+		t.Fatalf("anthropic chat_path = %q, want v1/messages", provider.Transport.ChatPath)
+	}
+	if provider.Transport.ModelsPath != "v1/models" {
+		t.Fatalf("anthropic models_path = %q, want v1/models", provider.Transport.ModelsPath)
+	}
+}
+
+func TestNormalizeProviderTransportForAnthropicTypePreservesUserOverride(t *testing.T) {
+	// 用户显式设置的 transport 路径应被保留
+	provider := NormalizeProvider(ProviderConfig{
+		ID:      "custom-anthropic",
+		Type:    "anthropic",
+		BaseURL: "https://custom.anthropic.com",
+		Transport: TransportConfig{
+			ChatPath:   "custom/messages",
+			ModelsPath: "custom/models",
+		},
+	})
+
+	if provider.Transport.ChatPath != "custom/messages" {
+		t.Fatalf("anthropic custom chat_path = %q, want custom/messages", provider.Transport.ChatPath)
+	}
+	if provider.Transport.ModelsPath != "custom/models" {
+		t.Fatalf("anthropic custom models_path = %q, want custom/models", provider.Transport.ModelsPath)
+	}
+}
+
 func TestApplyEnvOverridesUsesPort(t *testing.T) {
 	t.Setenv("PORT", "18080")
 	t.Setenv("PROXY_PORT", "19090")

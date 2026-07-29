@@ -977,11 +977,13 @@ func probeOpenAIProvider(ctx context.Context, providerCfg config.ProviderConfig)
 		attemptCfg.BaseURL = baseURL
 		attemptCfg.Transport = config.TransportConfig{}
 		attemptCfg = config.NormalizeProvider(attemptCfg)
-		prov := provider.NewOpenAIProviderWithCapability(
+		prov := provider.NewOpenAIProviderWithTransport(
 			config.ProviderKey(attemptCfg),
 			providerCapabilityNameFromConfig(attemptCfg),
 			attemptCfg.APIKey,
 			baseURL,
+			attemptCfg.Transport.ChatPath,
+			attemptCfg.Transport.ModelsPath,
 			true,
 			10*time.Second,
 		)
@@ -1574,7 +1576,16 @@ func (s *Server) testConnection(c *gin.Context) {
 		prov = provider.NewOllamaProviderWithCapability(config.ProviderKey(cfg), providerCapabilityNameFromConfig(cfg), cfg.BaseURL, true, 30*time.Second)
 	} else {
 		cfg := config.NormalizeProvider(req.Provider)
-		prov = provider.NewOpenAIProviderWithCapability(config.ProviderKey(cfg), providerCapabilityNameFromConfig(cfg), cfg.APIKey, cfg.BaseURL, true, 30*time.Second)
+		prov = provider.NewOpenAIProviderWithTransport(
+			config.ProviderKey(cfg),
+			providerCapabilityNameFromConfig(cfg),
+			cfg.APIKey,
+			cfg.BaseURL,
+			cfg.Transport.ChatPath,
+			cfg.Transport.ModelsPath,
+			true,
+			30*time.Second,
+		)
 	}
 
 	models, err := prov.ListModels(c.Request.Context())
@@ -1616,7 +1627,17 @@ func (s *Server) testChat(c *gin.Context) {
 	if providerCfg.Type == "ollama" {
 		prov = provider.NewOllamaProviderWithCapability(config.ProviderKey(providerCfg), providerCapabilityNameFromConfig(providerCfg), providerCfg.BaseURL, true, 60*time.Second)
 	} else {
-		prov = provider.NewOpenAIProviderWithCapability(config.ProviderKey(providerCfg), providerCapabilityNameFromConfig(providerCfg), providerCfg.APIKey, providerCfg.BaseURL, true, 60*time.Second)
+		// 使用归一化后的 transport 路径创建 provider，确保 chat_path/models_path 正确
+		prov = provider.NewOpenAIProviderWithTransport(
+			config.ProviderKey(providerCfg),
+			providerCapabilityNameFromConfig(providerCfg),
+			providerCfg.APIKey,
+			providerCfg.BaseURL,
+			providerCfg.Transport.ChatPath,
+			providerCfg.Transport.ModelsPath,
+			true,
+			60*time.Second,
+		)
 	}
 
 	if message := s.validateManagementTestModel(c.Request.Context(), prov, providerCfg, req.Model); message != "" {
@@ -1630,7 +1651,14 @@ func (s *Server) testChat(c *gin.Context) {
 		Stream:   false,
 	}
 
-	resp, err := prov.Chat(c.Request.Context(), chatReq)
+	var resp *provider.ChatResponse
+	var err error
+	if providerCfg.Type == "anthropic" {
+		// anthropic 类型 provider：使用 Anthropic Messages API 协议直通
+		resp, err = proxy.SendAnthropicChatRequest(c.Request.Context(), providerCfg.BaseURL, providerCfg.APIKey, chatReq)
+	} else {
+		resp, err = prov.Chat(c.Request.Context(), chatReq)
+	}
 	if err != nil {
 		// 管理测试页的目标是帮助用户判断“当前 provider + 当前模型是否实际可对话”。
 		// 某些上游非流式链路不稳定但流式可用，因此这里自动做一次流式兜底，

@@ -237,12 +237,16 @@ func normalizeProviderTransport(p ProviderConfig) TransportConfig {
 		ChatPath:   normalizeResourcePath(p.Transport.ChatPath),
 		ModelsPath: normalizeResourcePath(p.Transport.ModelsPath),
 	}
+	// 用户显式设置了 transport 路径，直接返回，不做推导
 	if transport.ChatPath != "" && transport.ModelsPath != "" {
 		return transport
 	}
 
+	// 根据 provider 类型推导默认 transport 路径
 	providerType := strings.ToLower(strings.TrimSpace(p.Type))
-	if providerType == "ollama" {
+	switch providerType {
+	case "ollama":
+		// Ollama 类型：chat 走 /api/chat，models 走 /api/tags
 		if transport.ChatPath == "" {
 			transport.ChatPath = "api/chat"
 		}
@@ -250,8 +254,17 @@ func normalizeProviderTransport(p ProviderConfig) TransportConfig {
 			transport.ModelsPath = "api/tags"
 		}
 		return transport
+	case "anthropic":
+		// Anthropic Messages API 类型：chat 走 /v1/messages，models 走 /v1/models
+		if transport.ChatPath == "" {
+			transport.ChatPath = "v1/messages"
+		}
+		if transport.ModelsPath == "" {
+			transport.ModelsPath = "v1/models"
+		}
+		return transport
 	}
-
+	// openai 及其他类型：走标准 OpenAI 兼容路径推导
 	if transport.ChatPath == "" {
 		transport.ChatPath = defaultOpenAIChatPathForBaseURL(p.BaseURL)
 	}

@@ -37,6 +37,7 @@ type anthropicMessage struct {
 type anthropicContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
+	Content   string          `json:"content,omitempty"`
 	Thinking  string          `json:"thinking,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	ID        string          `json:"id,omitempty"`
@@ -171,8 +172,11 @@ func anthropicRequestToChatRequest(anthropicReq *anthropicRequest) *provider.Cha
 					case "tool_result":
 						// tool_result 块 → tool_call_id + content
 						// tool_result 使用 tool_use_id 字段（不是 id）
+						// content 字段（不是 text）存放结果文本
 						pm.ToolCallID = block.ToolUseID
-						textParts = append(textParts, block.Text)
+						if block.Content != "" {
+							textParts = append(textParts, block.Content)
+						}
 					}
 				}
 				pm.Content = strings.Join(textParts, "")
@@ -300,6 +304,223 @@ func chatResponseToAnthropicResponse(resp *provider.ChatResponse, baseModel stri
 	}
 
 	return anthropicResp
+}
+
+// ---------------------------------------------------------------------------
+// 反向转换：内部 ChatRequest → Anthropic 请求体（用于 anthropic 类型 provider 直通）
+// ---------------------------------------------------------------------------
+
+// chatRequestToAnthropicRequest 将内部 ChatRequest 转换为 Anthropic 格式的请求体。
+// 这是 anthropicRequestToChatRequest 的逆操作，用于 OpenAI 客户端 → Anthropic 上游的场景。
+func chatRequestToAnthropicRequest(req *provider.ChatRequest) *anthropicRequest {
+	anthropicReq := &anthropicRequest{
+		Model:    req.Model,
+		Messages: make([]anthropicMessage, 0),
+		Stream:   req.Stream,
+	}
+
+	if req.MaxTokens != nil && *req.MaxTokens > 0 {
+		anthropicReq.MaxTokens = *req.MaxTokens
+	} else {
+		anthropicReq.MaxTokens = 4096 // Anthropic 要求 max_tokens 必填
+	}
+
+	if req.Temperature != nil {
+		anthropicReq.Temperature = req.Temperature
+	}
+	if req.TopP != nil {
+		anthropicReq.TopP = req.TopP
+	}
+	if req.TopK != nil {
+		anthropicReq.TopK = req.TopK
+	}
+	if len(req.Stop) > 0 {
+		anthropicReq.StopSequences = req.Stop
+	}
+
+	// 转换消息：system 角色提到顶层，user/assistant 放到 messages 数组
+	for _, msg := range req.Messages {
+		if msg.Role == "system" {
+			if anthropicReq.System == "" {
+				anthropicReq.System = msg.Content
+			}
+			continue
+		}
+		contentJSON, _ := json.Marshal(msg.Content)
+		am := anthropicMessage{
+			Role:    msg.Role,
+			Content: contentJSON,
+		}
+
+		// 处理 tool_calls 消息
+		if len(msg.ToolCalls) > 0 {
+			blocks := make([]anthropicContentBlock, 0)
+			// 先加 text 块（如果有 content）
+			if msg.Content != "" {
+				blocks = append(blocks, anthropicContentBlock{
+					Type: "text",
+					Text: msg.Content,
+				})
+			}
+			// 再加 tool_use 块
+			for _, tc := range msg.ToolCalls {
+				blocks = append(blocks, anthropicContentBlock{
+					Type:  "tool_use",
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Input: json.RawMessage(tc.Function.Arguments),
+				})
+			}
+			blocksJSON, _ := json.Marshal(blocks)
+			am.Content = blocksJSON
+		}
+
+		// 处理 tool_result 消息
+		if msg.ToolCallID != "" {
+			blocks := []anthropicContentBlock{
+				{
+					Type:      "tool_result",
+					ToolUseID: msg.ToolCallID,
+					Content:   msg.Content,
+				},
+			}
+			blocksJSON, _ := json.Marshal(blocks)
+			am.Content = blocksJSON
+		}
+
+		anthropicReq.Messages = append(anthropicReq.Messages, am)
+	}
+
+	// 工具定义转换
+	if len(req.Tools) > 0 {
+		tools := make([]anthropicTool, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			paramsJSON, _ := json.Marshal(t.Function.Parameters)
+			tools = append(tools, anthropicTool{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				InputSchema: paramsJSON,
+			})
+		}
+		anthropicReq.Tools = tools
+	}
+
+	return anthropicReq
+}
+
+// anthropicResponseToChatResponse 将 Anthropic 格式的响应转换为内部 ChatResponse。
+// 这是 chatResponseToAnthropicResponse 的逆操作，用于 OpenAI 客户端 → Anthropic 上游的场景。
+func anthropicResponseToChatResponse(anthropicResp *anthropicResponse) *provider.ChatResponse {
+	resp := &provider.ChatResponse{
+		ID:     strings.TrimPrefix(anthropicResp.ID, "msg_"),
+		Object: "chat.completion",
+		Model:  anthropicResp.Model,
+	}
+
+	// stop_reason 映射
+	finishReason := "stop"
+	switch anthropicResp.StopReason {
+	case "end_turn":
+		finishReason = "stop"
+	case "max_tokens":
+		finishReason = "length"
+	case "tool_use":
+		finishReason = "tool_calls"
+	default:
+		if anthropicResp.StopReason != "" {
+			finishReason = anthropicResp.StopReason
+		}
+	}
+
+	// content 数组 → 消息
+	message := provider.Message{
+		Role: anthropicResp.Role,
+	}
+	var textParts []string
+	for _, block := range anthropicResp.Content {
+		switch block.Type {
+		case "text":
+			textParts = append(textParts, block.Text)
+		case "thinking":
+			message.Reasoning += block.Thinking
+		case "tool_use":
+			argsJSON, _ := json.Marshal(block.Input)
+			message.ToolCalls = append(message.ToolCalls, provider.ToolCall{
+				ID:   block.ID,
+				Type: "function",
+				Function: provider.FunctionCall{
+					Name:      block.Name,
+					Arguments: string(argsJSON),
+				},
+			})
+		}
+	}
+	message.Content = strings.Join(textParts, "")
+
+	resp.Choices = []provider.Choice{
+		{
+			Index:        0,
+			Message:      message,
+			FinishReason: finishReason,
+		},
+	}
+
+	// usage 映射
+	if anthropicResp.Usage != nil {
+		resp.Usage = &provider.Usage{
+			PromptTokens:     anthropicResp.Usage.InputTokens,
+			CompletionTokens: anthropicResp.Usage.OutputTokens,
+			TotalTokens:      anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens,
+		}
+	}
+
+	return resp
+}
+
+// ---------------------------------------------------------------------------
+// 直通 HTTP 请求：发送 Anthropic 格式请求到上游 {base_url}/v1/messages
+// ---------------------------------------------------------------------------
+
+// SendAnthropicChatRequest 将内部 ChatRequest 转换为 Anthropic 格式后发送到上游。
+// 返回 OpenAI 格式的 ChatResponse，供 handleChatCompletions 等下游使用。
+func SendAnthropicChatRequest(ctx context.Context, upstreamBase string, apiKey string, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	anthropicReq := chatRequestToAnthropicRequest(req)
+	body, err := json.Marshal(anthropicReq)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic 请求序列化失败: %w", err)
+	}
+
+	upstreamURL := strings.TrimRight(upstreamBase, "/") + "/v1/messages"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("anthropic 请求创建失败: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic 上游请求失败: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic 响应读取失败: %w", err)
+	}
+
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("anthropic 上游返回 %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	var anthropicResp anthropicResponse
+	if err := json.Unmarshal(respBody, &anthropicResp); err != nil {
+		return nil, fmt.Errorf("anthropic 响应解析失败: %w", err)
+	}
+
+	return anthropicResponseToChatResponse(&anthropicResp), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +907,19 @@ func getProviderTypeFromConfig(cfg *config.AppConfig, providerName string) strin
 		}
 	}
 	return ""
+}
+
+// findProviderConfig 从配置中查找 provider 的配置信息。
+func findProviderConfig(cfg *config.AppConfig, providerName string) *config.ProviderConfig {
+	if cfg == nil {
+		return nil
+	}
+	for _, p := range cfg.Providers {
+		if p.ID == providerName || p.Name == providerName {
+			return &p
+		}
+	}
+	return nil
 }
 
 // Ensure handler_anthropic.go implements the required interfaces.
@@ -1087,6 +1321,8 @@ func (s *Server) handleAnthropicStream(
 // ---------------------------------------------------------------------------
 
 // forwardAnthropicRequest 非流式直通转发：将原始 Anthropic 请求体 POST 到上游 {base_url}/v1/messages。
+// 注意：原始请求体中的 model 可能包含 @provider 后缀（如 LongCat-2.0@longcat2），
+// 需要清理后再发送给上游，因为上游不认识这个后缀。
 func (s *Server) forwardAnthropicRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, prov provider.Provider, originalBody []byte, modelName string) error {
 	// 从 config 查找 provider 的 base_url
 	upstreamBase := ""
@@ -1102,18 +1338,47 @@ func (s *Server) forwardAnthropicRequest(ctx context.Context, w http.ResponseWri
 		return fmt.Errorf("anthropic passthrough: 无法找到 provider %q 的 base_url", prov.Name())
 	}
 
+	// 清理模型名：去掉 @provider 后缀和 :latest 后缀
+	// StripModelTag 只处理 :latest，不处理 @provider，需要手动清理
+	cleanModel := modelName
+	if idx := strings.Index(cleanModel, "@"); idx >= 0 {
+		cleanModel = cleanModel[:idx]
+	}
+	cleanModel = provider.StripModelTag(cleanModel)
+	if cleanModel == "" {
+		cleanModel = modelName
+	}
+
+	// 替换请求体中的 model 字段
+	var bodyMap map[string]interface{}
+	if err := json.Unmarshal(originalBody, &bodyMap); err != nil {
+		return fmt.Errorf("anthropic passthrough: 解析请求体失败: %w", err)
+	}
+	bodyMap["model"] = cleanModel
+	modifiedBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		return fmt.Errorf("anthropic passthrough: 序列化请求体失败: %w", err)
+	}
+
 	upstreamURL := upstreamBase + "/v1/messages"
-	bodyReader := bytes.NewReader(originalBody)
+	bodyReader := bytes.NewReader(modifiedBody)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bodyReader)
 	if err != nil {
 		return fmt.Errorf("anthropic passthrough: 创建请求失败: %w", err)
 	}
 
-	// 复制认证头
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", r.Header.Get("Authorization"))
-	httpReq.Header.Set("x-api-key", r.Header.Get("x-api-key"))
+	// 复制认证头：优先使用 Authorization，否则从 x-api-key 转换为 Bearer 格式
+	auth := r.Header.Get("Authorization")
+	apiKey := r.Header.Get("x-api-key")
+	if auth != "" {
+		httpReq.Header.Set("Authorization", auth)
+	} else if apiKey != "" {
+		// Anthropic 官方客户端使用 x-api-key 头，但上游可能只接受 Authorization: Bearer
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
+	httpReq.Header.Set("Content-Type", "application/json")
 
 	httpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
@@ -1166,16 +1431,44 @@ func (s *Server) handleAnthropicPassthroughStream(
 	}
 
 	upstreamURL := upstreamBase + "/v1/messages"
-	bodyReader := bytes.NewReader(originalBody)
+
+	// 清理模型名：去掉 @provider 后缀和 :latest 后缀
+	// StripModelTag 只处理 :latest，不处理 @provider，需要手动清理
+	cleanModel := modelName
+	if idx := strings.Index(cleanModel, "@"); idx >= 0 {
+		cleanModel = cleanModel[:idx]
+	}
+	cleanModel = provider.StripModelTag(cleanModel)
+	if cleanModel == "" {
+		cleanModel = modelName
+	}
+	var bodyMap map[string]interface{}
+	if err := json.Unmarshal(originalBody, &bodyMap); err != nil {
+		return fmt.Errorf("anthropic passthrough stream: 解析请求体失败: %w", err)
+	}
+	bodyMap["model"] = cleanModel
+	modifiedBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		return fmt.Errorf("anthropic passthrough stream: 序列化请求体失败: %w", err)
+	}
+
+	bodyReader := bytes.NewReader(modifiedBody)
 	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bodyReader)
 	if err != nil {
 		return fmt.Errorf("anthropic passthrough stream: 创建请求失败: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", r.Header.Get("Authorization"))
-	httpReq.Header.Set("x-api-key", r.Header.Get("x-api-key"))
+	// 复制认证头：优先使用 Authorization，否则从 x-api-key 转换为 Bearer 格式
+	auth := r.Header.Get("Authorization")
+	apiKey := r.Header.Get("x-api-key")
+	if auth != "" {
+		httpReq.Header.Set("Authorization", auth)
+	} else if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
+	httpReq.Header.Set("Content-Type", "application/json")
 
 	httpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
