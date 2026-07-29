@@ -1275,9 +1275,12 @@ func TestSendAnthropicChatRequest_Success(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		// 验证请求头
+		// 验证请求头：同时支持 x-api-key（官方 Anthropic）和 Authorization: Bearer（New API 网关）
 		if r.Header.Get("x-api-key") != "sk-test" {
 			t.Errorf("x-api-key = %q, want sk-test", r.Header.Get("x-api-key"))
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-test" {
+			t.Errorf("Authorization = %q, want Bearer sk-test", r.Header.Get("Authorization"))
 		}
 		if r.Header.Get("anthropic-version") != "2023-06-01" {
 			t.Errorf("anthropic-version = %q, want 2023-06-01", r.Header.Get("anthropic-version"))
@@ -1577,9 +1580,12 @@ func TestHandleAnthropicMessages_PassthroughNonStream(t *testing.T) {
 		if reqBody["model"] == "LongCat-2.0@longcat2" {
 			t.Error("model should not contain @provider suffix")
 		}
-		// 验证认证头
+		// 验证认证头：同时支持 x-api-key（官方 Anthropic）和 Authorization: Bearer（New API 网关）
 		if r.Header.Get("x-api-key") != "sk-test" {
 			t.Errorf("x-api-key = %q, want sk-test", r.Header.Get("x-api-key"))
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-test" {
+			t.Errorf("Authorization = %q, want Bearer sk-test", r.Header.Get("Authorization"))
 		}
 
 		w.Header().Set("Content-Type", "application/json")

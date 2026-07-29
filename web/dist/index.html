@@ -49,6 +49,7 @@
     .logs-table .col-model { width: 220px; }
     .logs-table .col-tokens { width: 104px; text-align: right; }
     .logs-table .col-tools { width: auto; }
+    .col-profile { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .logs-table .col-error { width: 190px; }
     .logs-table .col-status { width: 58px; }
     .logs-table .col-latency { width: 68px; text-align: right; }
@@ -475,7 +476,7 @@
               <th data-i18n="providers.form.name">名称</th>
               <th data-i18n="providers.form.type">类型</th>
               <th data-i18n="providers.form.baseUrl">Base URL</th>
-              <th data-i18n="providers.form.compatibilityProfile">兼容档案</th>
+              <th class="col-profile" data-i18n="providers.form.compatibilityProfile">兼容档案</th>
               <th data-i18n="table.header.model">模型</th>
               <th data-i18n="providers.form.priority">优先级</th>
               <th data-i18n="providers.form.enabled">启用</th>
@@ -1403,12 +1404,13 @@
             <td>${escapeHTML(item.display_name || item.name)}</td>
             <td>${escapeHTML(item.type)}</td>
             <td>${escapeHTML(item.base_url)}</td>
-            <td title="${escapeAttr(providerCompatibilityTitle(item))}">${escapeHTML(providerCompatibilityLabel(item))}</td>
+            <td class="col-profile" title="${escapeAttr(providerCompatibilityTitle(item))}">${escapeHTML(providerCompatibilityLabel(item))}</td>
             <td>${escapeHTML(modelCounts.get(key.toLowerCase()) || 0)}</td>
             <td>${escapeHTML(item.priority ?? 0)}</td>
             <td>${item.enabled ? t('table.boolean.yes') : t('table.boolean.no')}</td>
             <td>
               <button class="btn" data-action="edit-provider" data-name="${escapeAttr(key)}">${t('providers.table.edit')}</button>
+              <button class="btn" data-action="copy-provider" data-name="${escapeAttr(key)}">${t('providers.table.copy')}</button>
               ${isBuiltInUseAI(item) ? '' : `<button class="btn danger" data-action="delete-provider" data-name="${escapeAttr(key)}">${t('providers.table.delete')}</button>`}
               <button class="btn" data-action="test-provider" data-name="${escapeAttr(key)}">${t('providers.table.test')}</button>
             </td>
@@ -2309,6 +2311,28 @@
           await loadModels();
           await loadTestLab();
         }
+      }
+      if (action === 'copy-provider') {
+        editingProviderName = null;
+        $('providerModalTitle').textContent = t('providers.modal.copyTitle');
+        $('pId').disabled = false;
+        const res = await fetchJSON('/providers');
+        const item = (res.providers || []).find((x) => providerKey(x) === name || x.name === name);
+        if (!item) return;
+        $('pId').value = '';
+        $('pName').value = item.name;
+        $('pDisplay').value = item.display_name || '';
+        $('pType').value = item.type;
+        $('pBase').value = item.base_url;
+        $('pKey').value = item.api_key || '';
+        $('pKey').type = 'password';
+        $('btnToggleProviderKey').textContent = '👁';
+        $('btnToggleProviderKey').setAttribute('aria-label', t('providers.form.showKey'));
+        $('btnToggleProviderKey').setAttribute('title', t('providers.form.showKey'));
+        $('pPriority').value = item.priority ?? 0;
+        $('pEnabled').checked = item.enabled;
+        lastProviderProbe = null;
+        $('providerModal').classList.remove('hidden');
       }
       if (action === 'edit-provider') {
         editingProviderName = name;

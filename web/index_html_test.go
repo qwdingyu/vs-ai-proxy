@@ -412,10 +412,14 @@ func TestProviderListShowsBoundModelCount(t *testing.T) {
 		"const providerCompatibilityLabel = (provider) => {",
 		"const countModelsByProvider = (models) =>",
 		"const modelCounts = countModelsByProvider(modelRes.models || [])",
-		"<td title=\"${escapeAttr(providerCompatibilityTitle(item))}\">${escapeHTML(providerCompatibilityLabel(item))}</td>",
+		"<td class=\"col-profile\" title=\"${escapeAttr(providerCompatibilityTitle(item))}\">${escapeHTML(providerCompatibilityLabel(item))}</td>",
 		"<td>${escapeHTML(modelCounts.get(key.toLowerCase()) || 0)}</td>",
 		`<tr><td colspan="9" class="empty" data-i18n="table.loading">加载中...</td></tr>`,
 		`colspan="9"`,
+		`data-action="copy-provider"`,
+		`${t('providers.table.copy')}`,
+		`t('providers.modal.copyTitle')`,
+		`$('pId').disabled = false;`,
 	}
 	for _, check := range checks {
 		if !strings.Contains(html, check) {

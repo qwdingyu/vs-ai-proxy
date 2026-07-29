@@ -497,6 +497,10 @@ func SendAnthropicChatRequest(ctx context.Context, upstreamBase string, apiKey s
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	// 同时设置 Authorization: Bearer 和 x-api-key，兼容以下两种场景：
+	// 1. 官方 Anthropic API 使用 x-api-key
+	// 2. New API / One API 等网关使用 Authorization: Bearer（如 LongCat、OpenRouter）
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
