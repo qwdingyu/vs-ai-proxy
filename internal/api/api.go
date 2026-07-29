@@ -1529,9 +1529,9 @@ func validateProviderConfig(p config.ProviderConfig) error {
 		return errors.New("UseAI 是内置提供商，ID 必须为 useai")
 	}
 	switch strings.ToLower(strings.TrimSpace(p.Type)) {
-	case "openai", "ollama", "custom":
+	case "openai", "ollama", "custom", "anthropic":
 	default:
-		return errors.New("提供商类型必须是 openai、ollama 或 custom")
+		return errors.New("提供商类型必须是 openai、ollama、custom 或 anthropic")
 	}
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return errors.New("提供商 Base URL 不能为空")

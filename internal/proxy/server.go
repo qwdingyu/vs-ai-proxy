@@ -198,7 +198,7 @@ func (s *Server) providerFromConfig(cfg *config.AppConfig, p config.ProviderConf
 	switch p.Type {
 	case "ollama":
 		return provider.NewOllamaProviderWithCapability(id, capability, p.BaseURL, p.Enabled, timeout)
-	case "openai", "custom":
+	case "openai", "custom", "anthropic":
 		prov := provider.NewOpenAIProviderWithTransport(
 			id,
 			capability,
@@ -326,6 +326,9 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// OpenAI-compatible endpoints used by Visual Studio / Copilot clients.
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/v1/models", s.handleListModels)
+
+	// Anthropic-compatible endpoint used by Anthropic native clients (Claude Code CLI, etc.).
+	mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
 
 	// Ollama-compatible endpoints used by BYOM model discovery and chat.
 	mux.HandleFunc("/api/chat", s.handleOllamaChat)

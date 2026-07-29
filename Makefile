@@ -5,6 +5,8 @@
 #   make install       构建所有平台便携包（可执行文件）
 #   make release       构建并打包所有平台（压缩包）
 #   make release-notes 生成当前 tag 的 GitHub Release 正文
+#   make test           运行全部测试
+#   make test-anthropic 运行 Anthropic 协议转换器专项测试
 #   make tool-check    工具调用专项核查
 #   make i18n-check    Web 国际化专项核查
 #   make release-check 发布前完整核查
@@ -101,6 +103,14 @@ release:
 # ─── 生成规范 Release 说明 ─────────────────────────────
 release-notes:
 	@bash .bin/release-notes.sh
+
+# ─── 测试 ────────────────────────────────────────────────
+test:
+	go test ./... -count=1
+
+# ─── Anthropic 协议转换器专项测试 ──────────────────────
+test-anthropic:
+	go test ./internal/proxy -run "TestAnthropic|TestCountTokens|TestBuildAnthropic|TestReadAnthropic|TestWriteAnthropic|TestValidateAnthropic|TestHandleAnthropic" -v
 
 # ─── 工具调用专项核查 ──────────────────────────────────
 tool-check:

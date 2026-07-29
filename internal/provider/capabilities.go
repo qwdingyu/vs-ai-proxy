@@ -149,6 +149,8 @@ func CompatibilityProfileFor(id, name, baseURL, providerType string) Compatibili
 		switch strings.ToLower(strings.TrimSpace(providerType)) {
 		case string(ApiFormatOllama):
 			apiFormat = ApiFormatOllama
+		case "anthropic":
+			apiFormat = "anthropic"
 		default:
 			apiFormat = ApiFormatOpenAi
 		}

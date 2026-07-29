@@ -494,9 +494,8 @@
             <label><span data-i18n="providers.form.displayName">显示名称</span> <input id="pDisplay" data-i18n-placeholder="providers.form.displayName.placeholder" placeholder="留空则使用名称" /></label>
             <label><span data-i18n="providers.form.type">类型</span>
               <select id="pType">
-                <option value="openai">OpenAI</option>
-                <!-- <option value="ollama">Ollama</option> -->
-                <!-- <option value="custom">Custom</option> -->
+                <option value="openai">OpenAI 兼容</option>
+                <option value="anthropic">Anthropic 兼容</option>
               </select>
             </label>
             <label><span data-i18n="providers.form.baseUrl">Base URL</span> <input id="pBase" /></label>
@@ -1165,7 +1164,9 @@
         ? t('providers.profile.ollama')
         : apiFormat === 'openai'
           ? t('providers.profile.openai')
-          : t('providers.profile.custom');
+          : apiFormat === 'anthropic'
+            ? t('providers.profile.anthropic')
+            : t('providers.profile.custom');
       const parts = [formatLabel];
       if (profile.chat_path) parts.push(String(profile.chat_path));
       parts.push(
@@ -2060,7 +2061,7 @@
         if (result.corrected_base_url && result.corrected_base_url !== provider.base_url) {
           if (window.confirm(t('providers.probe.suggestBaseUrl'))) {
             $('pBase').value = result.corrected_base_url;
-            if (result.detected_type === 'openai') $('pType').value = result.detected_type;
+            if (result.detected_type && result.detected_type !== '') $('pType').value = result.detected_type;
           }
           return;
         }
@@ -2114,7 +2115,6 @@
       try {
         if (!payload.id) return alert(t('error.idRequired'));
         if (!payload.name) return alert(t('error.nameRequired'));
-        if (payload.type !== 'openai') return alert(t('error.typeMustBeOpenAI'));
         if (!payload.base_url) return alert(t('error.baseUrlRequired'));
         if (currentProviders.some((p) => providerKey(p).toLowerCase() === payload.id.toLowerCase() && providerKey(p) !== editingProviderName)) {
           return alert(t('error.providerIdExists'));
