@@ -159,6 +159,8 @@ func TestDashboardShowsVerifiedModelCoverageWithoutClaimingEveryModelIsTested(t 
 		`glm-5.2 / z-ai/glm-5.2`,
 		`kimi-for-coding`,
 		`mimo-v2.5 / mimo-v2.5-pro`,
+		`LongCat-2.0`,
+		`Anthropic Messages API`,
 		`“系列兼容”不等于每个型号均已逐一实测`,
 	} {
 		if !strings.Contains(html, marker) {

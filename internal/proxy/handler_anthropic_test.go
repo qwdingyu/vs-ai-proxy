@@ -316,7 +316,8 @@ func TestChatResponseToAnthropicResponse_FinishReasonMapping(t *testing.T) {
 		{"stop", "end_turn"},
 		{"length", "max_tokens"},
 		{"tool_calls", "tool_use"},
-		{"content_filter", "content_filter"},
+		{"function_call", "tool_use"},
+		{"content_filter", "refusal"},
 	}
 
 	for _, tt := range tests {
@@ -328,6 +329,43 @@ func TestChatResponseToAnthropicResponse_FinishReasonMapping(t *testing.T) {
 		if anthropicResp.StopReason != tt.wantAnthropic {
 			t.Errorf("finish_reason %q → stop_reason %q, want %q", tt.openAIReason, anthropicResp.StopReason, tt.wantAnthropic)
 		}
+	}
+}
+
+func TestMarshalAnthropicRequestBody_WhitelistedExtra(t *testing.T) {
+	req := &anthropicRequest{
+		Model:     "LongCat-2.0",
+		MaxTokens: 100,
+		Messages:  []anthropicMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	}
+	body, err := marshalAnthropicRequestBody(req, map[string]json.RawMessage{
+		"thinking":     json.RawMessage(`{"type":"enabled","budget_tokens":1024}`),
+		"service_tier": json.RawMessage(`"auto"`),
+		"tool_choice":  json.RawMessage(`{"type":"function","function":{"name":"get_weather"}}`),
+		"seed":         json.RawMessage(`123`),
+	})
+	if err != nil {
+		t.Fatalf("marshalAnthropicRequestBody failed: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal body failed: %v", err)
+	}
+	if string(got["thinking"]) != `{"type":"enabled","budget_tokens":1024}` {
+		t.Fatalf("thinking extra not preserved: %s", got["thinking"])
+	}
+	if string(got["service_tier"]) != `"auto"` {
+		t.Fatalf("service_tier extra not preserved: %s", got["service_tier"])
+	}
+	if _, leaked := got["seed"]; leaked {
+		t.Fatalf("non-Anthropic extra should not be forwarded: %s", body)
+	}
+	var choice anthropicToolChoice
+	if err := json.Unmarshal(got["tool_choice"], &choice); err != nil {
+		t.Fatalf("unmarshal tool_choice failed: %v", err)
+	}
+	if choice.Type != "tool" || choice.Name != "get_weather" {
+		t.Fatalf("tool_choice = %+v, want tool get_weather", choice)
 	}
 }
 
@@ -467,6 +505,47 @@ func TestAnthropicStreamWriter_ToolCalls(t *testing.T) {
 	}
 }
 
+func TestAnthropicStreamWriter_ToolCallsMultiChunkArguments(t *testing.T) {
+	rec := httptest.NewRecorder()
+	flusher := &testFlusher{rec}
+	writer := &anthropicStreamWriter{
+		writer:  rec,
+		flusher: flusher,
+		model:   "LongCat-2.0",
+	}
+
+	events := []string{
+		`data: {"id":"cmpl-tool","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_01","type":"function","function":{"name":"get_weather","arguments":"{\"city\""}}]},"finish_reason":null}]}`,
+		`data: {"id":"cmpl-tool","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"Bei"}}]},"finish_reason":null}]}`,
+		`data: {"id":"cmpl-tool","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"jing\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	}
+	for _, event := range events {
+		if _, err := writer.Write([]byte(event + "\n\n")); err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+	}
+	writer.finish()
+
+	body := rec.Body.String()
+	if strings.Count(body, "event: content_block_start") != 1 {
+		t.Fatalf("content_block_start count = %d, want 1; body=%s", strings.Count(body, "event: content_block_start"), body)
+	}
+	if strings.Count(body, "event: content_block_stop") != 1 {
+		t.Fatalf("content_block_stop count = %d, want 1; body=%s", strings.Count(body, "event: content_block_stop"), body)
+	}
+	if !strings.Contains(body, `"id":"call_01"`) || !strings.Contains(body, `"name":"get_weather"`) {
+		t.Fatalf("tool_use start should preserve id/name, body=%s", body)
+	}
+	for _, part := range []string{`{\"city\"`, `:\"Bei`, `jing\"}`} {
+		if !strings.Contains(body, part) {
+			t.Fatalf("missing arguments delta %q in body=%s", part, body)
+		}
+	}
+	if !strings.Contains(body, `"stop_reason":"tool_use"`) {
+		t.Fatalf("missing tool_use stop reason, body=%s", body)
+	}
+}
+
 func TestAnthropicStreamWriter_FinishReasonMapping(t *testing.T) {
 	rec := httptest.NewRecorder()
 	flusher := &testFlusher{rec}
@@ -549,6 +628,9 @@ func TestWriteAnthropicErrorResponse(t *testing.T) {
 	}
 	if errObj["message"] != "test error" {
 		t.Errorf("error message = %q, want test error", errObj["message"])
+	}
+	if errObj["type"] != "invalid_request_error" {
+		t.Errorf("error type = %q, want invalid_request_error", errObj["type"])
 	}
 }
 
@@ -1211,7 +1293,10 @@ func TestAnthropicResponseToChatResponse_StopReasonMapping(t *testing.T) {
 		{"end_turn", "stop"},
 		{"max_tokens", "length"},
 		{"tool_use", "tool_calls"},
-		{"stop_sequence", "stop_sequence"},
+		{"stop_sequence", "stop"},
+		{"pause_turn", "stop"},
+		{"refusal", "content_filter"},
+		{"model_context_window_exceeded", "length"},
 		{"", "stop"},
 	}
 
@@ -1323,6 +1408,44 @@ func TestSendAnthropicChatRequest_Success(t *testing.T) {
 	}
 }
 
+func TestSendAnthropicChatRequest_ForwardsWhitelistedExtra(t *testing.T) {
+	var reqBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request body failed: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"msg_extra","type":"message","role":"assistant","model":"LongCat-2.0","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	chatReq := &provider.ChatRequest{
+		Model:     "LongCat-2.0",
+		MaxTokens: intPtr(100),
+		Messages:  []provider.Message{{Role: "user", Content: "Hi"}},
+		Extra: map[string]json.RawMessage{
+			"thinking":    json.RawMessage(`{"type":"enabled","budget_tokens":1024}`),
+			"tool_choice": json.RawMessage(`{"type":"function","function":{"name":"get_weather"}}`),
+			"seed":        json.RawMessage(`123`),
+		},
+	}
+
+	if _, err := SendAnthropicChatRequest(context.Background(), upstream.URL, "sk-test", chatReq); err != nil {
+		t.Fatalf("SendAnthropicChatRequest failed: %v", err)
+	}
+	thinking, ok := reqBody["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "enabled" || thinking["budget_tokens"] != float64(1024) {
+		t.Fatalf("thinking extra not forwarded correctly: %#v", reqBody["thinking"])
+	}
+	toolChoice, ok := reqBody["tool_choice"].(map[string]any)
+	if !ok || toolChoice["type"] != "tool" || toolChoice["name"] != "get_weather" {
+		t.Fatalf("tool_choice not converted to Anthropic format: %#v", reqBody["tool_choice"])
+	}
+	if _, leaked := reqBody["seed"]; leaked {
+		t.Fatalf("non-Anthropic extra leaked to upstream: %#v", reqBody)
+	}
+}
+
 func TestSendAnthropicChatRequest_UpstreamError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -1358,6 +1481,32 @@ func TestSendAnthropicChatRequest_ConnectionError(t *testing.T) {
 	_, err := SendAnthropicChatRequest(context.Background(), "http://127.0.0.1:1", "sk-test", chatReq)
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
+	}
+}
+
+func TestSendAnthropicChatStreamContent_ErrorEvent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(strings.Join([]string{
+			`event: error`,
+			`data: {"type":"error","error":{"type":"overloaded_error","message":"temporarily overloaded"}}`,
+			``,
+		}, "\n")))
+	}))
+	defer upstream.Close()
+
+	chatReq := &provider.ChatRequest{
+		Model:     "LongCat-2.0",
+		MaxTokens: intPtr(100),
+		Messages:  []provider.Message{{Role: "user", Content: "Hi"}},
+	}
+
+	_, err := SendAnthropicChatStreamContent(context.Background(), upstream.URL, "v1/messages", "sk-test", chatReq)
+	if err == nil {
+		t.Fatal("expected stream error event, got nil")
+	}
+	if !strings.Contains(err.Error(), "overloaded_error") || !strings.Contains(err.Error(), "temporarily overloaded") {
+		t.Fatalf("error should include Anthropic error type and message, got: %v", err)
 	}
 }
 
@@ -2083,7 +2232,7 @@ func TestForwardAnthropicRequest_ModelNameCleaning(t *testing.T) {
 	}
 }
 
-func TestForwardAnthropicRequest_AuthHeaderPrecedence(t *testing.T) {
+func TestForwardAnthropicRequest_UsesConfiguredProviderKey(t *testing.T) {
 	var upstreamAuth, upstreamApiKey string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamAuth = r.Header.Get("Authorization")
@@ -2094,31 +2243,67 @@ func TestForwardAnthropicRequest_AuthHeaderPrecedence(t *testing.T) {
 	defer upstream.Close()
 
 	prov := provider.NewOpenAIProviderWithTransport(
-		"longcat2", "openai", "sk-test", upstream.URL,
+		"longcat2", "openai", "upstream-secret", upstream.URL,
 		"v1/messages", "v1/models", true, 5*time.Second,
 	)
 	server := newTestServer(prov)
 	server.config.Providers = []config.ProviderConfig{
-		{ID: "longcat2", Name: "longcat2", Type: "anthropic", BaseURL: upstream.URL, APIKey: "sk-test", Enabled: true,
+		{ID: "longcat2", Name: "longcat2", Type: "anthropic", BaseURL: upstream.URL, APIKey: "upstream-secret", Enabled: true,
 			Transport: config.TransportConfig{ChatPath: "v1/messages", ModelsPath: "v1/models"}},
 	}
 
-	// 测试 Authorization 优先于 x-api-key
+	// 客户端认证头属于代理入口，不应泄漏或复用为上游 provider key。
 	originalBody := []byte(`{"model":"LongCat-2.0","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(originalBody)))
-	req.Header.Set("Authorization", "Bearer custom-token")
-	req.Header.Set("x-api-key", "fallback-key")
+	req.Header.Set("Authorization", "Bearer proxy-secret")
+	req.Header.Set("x-api-key", "client-anthropic-key")
 
 	err := server.forwardAnthropicRequest(context.Background(), rec, req, prov, originalBody, "LongCat-2.0")
 	if err != nil {
 		t.Fatalf("forwardAnthropicRequest failed: %v", err)
 	}
-	if upstreamAuth != "Bearer custom-token" {
-		t.Errorf("Authorization = %q, want Bearer custom-token", upstreamAuth)
+	if upstreamAuth != "Bearer upstream-secret" {
+		t.Errorf("Authorization = %q, want Bearer upstream-secret", upstreamAuth)
 	}
-	if upstreamApiKey != "fallback-key" {
-		t.Errorf("x-api-key = %q, want fallback-key", upstreamApiKey)
+	if upstreamApiKey != "upstream-secret" {
+		t.Errorf("x-api-key = %q, want upstream-secret", upstreamApiKey)
+	}
+}
+
+func TestForwardAnthropicRequest_UsesConfiguredTransportPath(t *testing.T) {
+	var upstreamPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		if r.URL.Path != "/custom/messages" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	prov := provider.NewOpenAIProviderWithTransport(
+		"longcat2", "openai", "upstream-secret", upstream.URL,
+		"custom/messages", "custom/models", true, 5*time.Second,
+	)
+	server := newTestServer(prov)
+	server.config.Providers = []config.ProviderConfig{
+		{ID: "longcat2", Name: "longcat2", Type: "anthropic", BaseURL: upstream.URL, APIKey: "upstream-secret", Enabled: true,
+			Transport: config.TransportConfig{ChatPath: "custom/messages", ModelsPath: "custom/models"}},
+	}
+
+	originalBody := []byte(`{"model":"LongCat-2.0","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(originalBody)))
+
+	err := server.forwardAnthropicRequest(context.Background(), rec, req, prov, originalBody, "LongCat-2.0")
+	if err != nil {
+		t.Fatalf("forwardAnthropicRequest failed: %v", err)
+	}
+	if upstreamPath != "/custom/messages" {
+		t.Errorf("upstream path = %q, want /custom/messages", upstreamPath)
 	}
 }
 
@@ -2136,9 +2321,9 @@ func TestGetProviderTypeFromConfig(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
+		name     string
 		provName string
-		want    string
+		want     string
 	}{
 		{"find by ID", "longcat2", "anthropic"},
 		{"find by Name", "longcat2", "anthropic"},

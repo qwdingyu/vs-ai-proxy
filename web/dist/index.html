@@ -195,13 +195,13 @@
         <div class="hero-grid">
           <div class="hero-card">
             <h2 data-i18n="dashboard.hero.title">让 Visual Studio / Copilot 快速接入你的模型</h2>
-            <p class="hint" data-i18n="dashboard.hero.desc">VS AI Proxy 是一个轻量代理面板，用来统一管理 OpenAI-compatible、DeepSeek、Ollama 等 provider，并兼容 Visual Studio / Copilot 的模型发现和聊天接口。</p>
+            <p class="hint" data-i18n="dashboard.hero.desc">VS AI Proxy 是一个轻量代理面板，用来统一管理 OpenAI-compatible、Anthropic-compatible、DeepSeek、LongCat、Ollama 等 provider，并兼容 Visual Studio / Copilot 的模型发现和聊天接口。</p>
             <ul class="feature-list">
               <li data-i18n="dashboard.hero.feature1">一个端口同时提供代理接口和 Web 管理面板。</li>
               <li data-i18n="dashboard.hero.feature2">支持多 provider、多模型、优先级路由和模型列表校验。</li>
               <li data-i18n="dashboard.hero.feature3">提供请求统计、日志排障和正式版本自动更新。</li>
             </ul>
-            <p class="hero-model-summary" data-i18n="dashboard.hero.models">已验证系列：DeepSeek · Step · GPT 系列 · GLM · Kimi · MiMo</p>
+            <p class="hero-model-summary" data-i18n="dashboard.hero.models">已验证系列：DeepSeek · Step · GPT 系列 · GLM · Kimi · MiMo · LongCat</p>
           </div>
           <div class="quick-card community-card">
             <div class="community-copy">
@@ -227,7 +227,7 @@
             <h2 id="supportedModelsTitle" data-i18n="dashboard.supported.title">已验证的模型范围</h2>
             <a class="btn supported-models-action" href="#/test" data-i18n="dashboard.supported.testBtn">去测试页验证</a>
           </div>
-          <p class="hint supported-models-desc" data-i18n="dashboard.supported.desc">协议层兼容上游实际提供的 OpenAI-compatible 模型；以下是已完成 VS/Copilot 专项验证的代表系列。</p>
+          <p class="hint supported-models-desc" data-i18n="dashboard.supported.desc">协议层兼容上游实际提供的 OpenAI-compatible 模型和 Anthropic Messages API；以下是已完成 VS/Copilot 专项验证的代表系列。</p>
           <div class="table-scroll">
             <table class="table supported-models-table">
               <thead>
@@ -267,6 +267,11 @@
                   <td class="model-family" data-i18n="dashboard.supported.mimo.family">MiMo</td>
                   <td class="model-ids" data-i18n="dashboard.supported.mimo.models">mimo-v2.5 / mimo-v2.5-pro</td>
                   <td data-i18n="dashboard.supported.mimo.coverage">输出参数方言、SSE 与工具调用</td>
+                </tr>
+                <tr>
+                  <td class="model-family" data-i18n="dashboard.supported.longcat.family">LongCat</td>
+                  <td class="model-ids" data-i18n="dashboard.supported.longcat.models">LongCat-2.0</td>
+                  <td data-i18n="dashboard.supported.longcat.coverage">Anthropic Messages API、自定义 chat_path 与流式兜底</td>
                 </tr>
               </tbody>
             </table>

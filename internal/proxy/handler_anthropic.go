@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -60,30 +61,30 @@ type anthropicToolChoice struct {
 
 // anthropicRequest 是 Anthropic Messages API 的完整请求体。
 type anthropicRequest struct {
-	Model         string                `json:"model"`
-	MaxTokens     int                   `json:"max_tokens"`
-	Messages      []anthropicMessage    `json:"messages"`
-	System        string                `json:"system,omitempty"`
-	Temperature   *float64              `json:"temperature,omitempty"`
-	TopP          *float64              `json:"top_p,omitempty"`
-	TopK          *int                  `json:"top_k,omitempty"`
-	StopSequences []string              `json:"stop_sequences,omitempty"`
-	Tools         []anthropicTool       `json:"tools,omitempty"`
-	ToolChoice    *anthropicToolChoice  `json:"tool_choice,omitempty"`
-	Stream        bool                  `json:"stream,omitempty"`
-	Metadata      map[string]string     `json:"metadata,omitempty"`
+	Model         string               `json:"model"`
+	MaxTokens     int                  `json:"max_tokens"`
+	Messages      []anthropicMessage   `json:"messages"`
+	System        string               `json:"system,omitempty"`
+	Temperature   *float64             `json:"temperature,omitempty"`
+	TopP          *float64             `json:"top_p,omitempty"`
+	TopK          *int                 `json:"top_k,omitempty"`
+	StopSequences []string             `json:"stop_sequences,omitempty"`
+	Tools         []anthropicTool      `json:"tools,omitempty"`
+	ToolChoice    *anthropicToolChoice `json:"tool_choice,omitempty"`
+	Stream        bool                 `json:"stream,omitempty"`
+	Metadata      map[string]string    `json:"metadata,omitempty"`
 }
 
 // anthropicResponse 是 Anthropic Messages API 的完整响应体。
 type anthropicResponse struct {
-	ID           string                    `json:"id"`
-	Type         string                    `json:"type"`
-	Role         string                    `json:"role"`
-	Content      []anthropicContentBlock   `json:"content"`
-	Model        string                    `json:"model"`
-	StopReason   string                    `json:"stop_reason"`
-	StopSequence *string                   `json:"stop_sequence"`
-	Usage        *anthropicUsage           `json:"usage,omitempty"`
+	ID           string                  `json:"id"`
+	Type         string                  `json:"type"`
+	Role         string                  `json:"role"`
+	Content      []anthropicContentBlock `json:"content"`
+	Model        string                  `json:"model"`
+	StopReason   string                  `json:"stop_reason"`
+	StopSequence *string                 `json:"stop_sequence"`
+	Usage        *anthropicUsage         `json:"usage,omitempty"`
 }
 
 type anthropicUsage struct {
@@ -93,12 +94,12 @@ type anthropicUsage struct {
 
 // anthropicStreamEvent 是 Anthropic 流式事件的 data 负载。
 type anthropicStreamEvent struct {
-	Type         string                  `json:"type"`
-	Index        int                     `json:"index,omitempty"`
-	Message      *anthropicResponse      `json:"message,omitempty"`
-	ContentBlock *anthropicContentBlock  `json:"content_block,omitempty"`
-	Delta        *anthropicStreamDelta   `json:"delta,omitempty"`
-	Usage        *anthropicUsage         `json:"usage,omitempty"`
+	Type         string                 `json:"type"`
+	Index        int                    `json:"index,omitempty"`
+	Message      *anthropicResponse     `json:"message,omitempty"`
+	ContentBlock *anthropicContentBlock `json:"content_block,omitempty"`
+	Delta        *anthropicStreamDelta  `json:"delta,omitempty"`
+	Usage        *anthropicUsage        `json:"usage,omitempty"`
 }
 
 type anthropicStreamDelta struct {
@@ -247,17 +248,7 @@ func chatResponseToAnthropicResponse(resp *provider.ChatResponse, baseModel stri
 
 	// finish_reason 映射
 	if len(resp.Choices) > 0 {
-		reason := resp.Choices[0].FinishReason
-		switch reason {
-		case "stop":
-			anthropicResp.StopReason = "end_turn"
-		case "length":
-			anthropicResp.StopReason = "max_tokens"
-		case "tool_calls":
-			anthropicResp.StopReason = "tool_use"
-		default:
-			anthropicResp.StopReason = reason
-		}
+		anthropicResp.StopReason = openAIStopReasonToAnthropic(resp.Choices[0].FinishReason)
 	} else {
 		anthropicResp.StopReason = "end_turn"
 	}
@@ -418,19 +409,7 @@ func anthropicResponseToChatResponse(anthropicResp *anthropicResponse) *provider
 	}
 
 	// stop_reason 映射
-	finishReason := "stop"
-	switch anthropicResp.StopReason {
-	case "end_turn":
-		finishReason = "stop"
-	case "max_tokens":
-		finishReason = "length"
-	case "tool_use":
-		finishReason = "tool_calls"
-	default:
-		if anthropicResp.StopReason != "" {
-			finishReason = anthropicResp.StopReason
-		}
-	}
+	finishReason := anthropicStopReasonToOpenAI(anthropicResp.StopReason)
 
 	// content 数组 → 消息
 	message := provider.Message{
@@ -477,6 +456,93 @@ func anthropicResponseToChatResponse(anthropicResp *anthropicResponse) *provider
 	return resp
 }
 
+func openAIStopReasonToAnthropic(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "", "stop":
+		return "end_turn"
+	case "length":
+		return "max_tokens"
+	case "tool_calls", "function_call":
+		return "tool_use"
+	case "content_filter", "refusal":
+		return "refusal"
+	default:
+		return strings.TrimSpace(reason)
+	}
+}
+
+func anthropicStopReasonToOpenAI(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "", "end_turn", "stop_sequence", "pause_turn":
+		return "stop"
+	case "max_tokens", "model_context_window_exceeded":
+		return "length"
+	case "tool_use":
+		return "tool_calls"
+	case "refusal":
+		return "content_filter"
+	default:
+		return strings.TrimSpace(reason)
+	}
+}
+
+func marshalAnthropicRequestBody(req *anthropicRequest, extra map[string]json.RawMessage) ([]byte, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	if len(extra) == 0 {
+		return body, nil
+	}
+
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	for key, raw := range extra {
+		if len(raw) == 0 {
+			continue
+		}
+		switch key {
+		case "metadata", "thinking", "service_tier", "output_config":
+			out[key] = append(json.RawMessage(nil), raw...)
+		case "tool_choice":
+			converted, ok := anthropicToolChoiceRawFromOpenAI(raw)
+			if ok {
+				out[key] = converted
+			}
+		}
+	}
+	return json.Marshal(out)
+}
+
+func anthropicToolChoiceRawFromOpenAI(raw json.RawMessage) (json.RawMessage, bool) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, false
+	}
+	var kind string
+	if err := json.Unmarshal(root["type"], &kind); err != nil || strings.TrimSpace(kind) == "" {
+		return nil, false
+	}
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	switch kind {
+	case "function":
+		var fn struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(root["function"], &fn); err != nil || strings.TrimSpace(fn.Name) == "" {
+			return nil, false
+		}
+		converted, _ := json.Marshal(anthropicToolChoice{Type: "tool", Name: strings.TrimSpace(fn.Name)})
+		return converted, true
+	case "auto", "any", "none", "tool":
+		return append(json.RawMessage(nil), raw...), true
+	default:
+		return nil, false
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 直通 HTTP 请求：发送 Anthropic 格式请求到上游 {base_url}/v1/messages
 // ---------------------------------------------------------------------------
@@ -484,24 +550,27 @@ func anthropicResponseToChatResponse(anthropicResp *anthropicResponse) *provider
 // SendAnthropicChatRequest 将内部 ChatRequest 转换为 Anthropic 格式后发送到上游。
 // 返回 OpenAI 格式的 ChatResponse，供 handleChatCompletions 等下游使用。
 func SendAnthropicChatRequest(ctx context.Context, upstreamBase string, apiKey string, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	return SendAnthropicChatRequestWithPath(ctx, upstreamBase, "v1/messages", apiKey, req)
+}
+
+// SendAnthropicChatRequestWithPath 是管理测试和 OpenAI→Anthropic provider 转换共用的
+// 非流式 Anthropic 上游调用入口。chatPath 必须来自归一化后的 provider transport；
+// 这里保留默认值只是为了兼容旧调用方，避免自定义网关路径被硬编码 /v1/messages 覆盖。
+func SendAnthropicChatRequestWithPath(ctx context.Context, upstreamBase string, chatPath string, apiKey string, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 	anthropicReq := chatRequestToAnthropicRequest(req)
-	body, err := json.Marshal(anthropicReq)
+	body, err := marshalAnthropicRequestBody(anthropicReq, req.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic 请求序列化失败: %w", err)
 	}
 
-	upstreamURL := strings.TrimRight(upstreamBase, "/") + "/v1/messages"
+	upstreamURL := anthropicUpstreamURL(upstreamBase, chatPath)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("anthropic 请求创建失败: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	// 同时设置 Authorization: Bearer 和 x-api-key，兼容以下两种场景：
-	// 1. 官方 Anthropic API 使用 x-api-key
-	// 2. New API / One API 等网关使用 Authorization: Bearer（如 LongCat、OpenRouter）
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	httpReq.Header.Set("x-api-key", apiKey)
+	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	httpResp, err := http.DefaultClient.Do(httpReq)
@@ -527,6 +596,108 @@ func SendAnthropicChatRequest(ctx context.Context, upstreamBase string, apiKey s
 	return anthropicResponseToChatResponse(&anthropicResp), nil
 }
 
+// SendAnthropicChatStreamContent 只服务管理端“非流式失败后流式兜底”的健康检查。
+// 它解析 Anthropic 原生 SSE 的 text_delta，而不是复用 OpenAI stream parser；
+// 否则 anthropic 类型 provider 会在兜底阶段把 OpenAI 协议打到 Anthropic endpoint。
+func SendAnthropicChatStreamContent(ctx context.Context, upstreamBase string, chatPath string, apiKey string, req *provider.ChatRequest) (string, error) {
+	streamReq := cloneChatRequest(req)
+	streamReq.Stream = true
+	anthropicReq := chatRequestToAnthropicRequest(streamReq)
+	body, err := marshalAnthropicRequestBody(anthropicReq, streamReq.Extra)
+	if err != nil {
+		return "", fmt.Errorf("anthropic 流式请求序列化失败: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicUpstreamURL(upstreamBase, chatPath), bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("anthropic 流式请求创建失败: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("anthropic 流式上游请求失败: %w", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(httpResp.Body)
+		return "", fmt.Errorf("anthropic 流式上游返回 %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	scanner := bufio.NewScanner(httpResp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var content strings.Builder
+	currentEvent := ""
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			currentEvent = strings.TrimSpace(line[len("event:"):])
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(line[len("data:"):])
+		if payload == "[DONE]" {
+			break
+		}
+		if currentEvent == "error" {
+			return "", fmt.Errorf("Anthropic 流式错误事件: %s", anthropicErrorMessageFromPayload(payload))
+		}
+		content.WriteString(anthropicStreamTextDelta(payload))
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(content.String()) == "" {
+		return "", fmt.Errorf("Anthropic 流式响应没有返回文本内容")
+	}
+	return content.String(), nil
+}
+
+func anthropicStreamTextDelta(payload string) string {
+	var event struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	}
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return ""
+	}
+	if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
+		return event.Delta.Text
+	}
+	return ""
+}
+
+func anthropicErrorMessageFromPayload(payload string) string {
+	var root struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(payload), &root); err != nil {
+		return payload
+	}
+	message := strings.TrimSpace(root.Error.Message)
+	if message == "" {
+		message = strings.TrimSpace(payload)
+	}
+	if errorType := strings.TrimSpace(root.Error.Type); errorType != "" {
+		return errorType + ": " + message
+	}
+	return message
+}
+
 // ---------------------------------------------------------------------------
 // 流式转换：OpenAI SSE → Anthropic event-based SSE
 // ---------------------------------------------------------------------------
@@ -534,16 +705,29 @@ func SendAnthropicChatRequest(ctx context.Context, upstreamBase string, apiKey s
 // anthropicStreamWriter 实现 openAIStreamEventTarget 接口，
 // 将 OpenAI SSE delta 事件转换为 Anthropic event-based SSE 格式写出。
 type anthropicStreamWriter struct {
-	writer          io.Writer
-	flusher         http.Flusher
-	model           string
-	messageID       string
-	contentIndex    int
-	hasSentStart    bool
-	hasSentBlock    bool
-	finishReason    string
-	inputTokens     int64
-	outputTokens    int64
+	writer        io.Writer
+	flusher       http.Flusher
+	model         string
+	messageID     string
+	contentIndex  int
+	hasSentStart  bool
+	hasSentBlock  bool
+	openBlockType string
+	finishReason  string
+	inputTokens   int64
+	outputTokens  int64
+	// toolBlocks 按 OpenAI tool_calls[].index 跟踪增量参数。
+	// OpenAI SSE 常把同一个工具调用的 arguments 拆成多段发送；
+	// Anthropic SSE 要求同一个 tool_use content block 持续接收 input_json_delta。
+	// 当前状态机覆盖主流的单工具或按 index 顺序增量场景，不在这里扩展成完整并行调度器。
+	toolBlocks map[int]*anthropicStreamToolBlock
+}
+
+type anthropicStreamToolBlock struct {
+	contentIndex int
+	id           string
+	name         string
+	started      bool
 }
 
 func (w *anthropicStreamWriter) Write(data []byte) (int, error) {
@@ -564,7 +748,7 @@ func (w *anthropicStreamWriter) Write(data []byte) (int, error) {
 			Object  string `json:"object"`
 			Model   string `json:"model"`
 			Choices []struct {
-				Index        int `json:"index"`
+				Index        int             `json:"index"`
 				Delta        json.RawMessage `json:"delta"`
 				FinishReason string          `json:"finish_reason"`
 			} `json:"choices"`
@@ -606,11 +790,11 @@ func (w *anthropicStreamWriter) Write(data []byte) (int, error) {
 			w.emitEvent("message_start", anthropicStreamEvent{
 				Type: "message_start",
 				Message: &anthropicResponse{
-					ID:   w.messageID,
-					Type: "message",
-					Role: "assistant",
+					ID:      w.messageID,
+					Type:    "message",
+					Role:    "assistant",
 					Content: []anthropicContentBlock{},
-					Model: w.model,
+					Model:   w.model,
 				},
 			})
 		}
@@ -619,6 +803,7 @@ func (w *anthropicStreamWriter) Write(data []byte) (int, error) {
 		if delta.Reasoning != "" {
 			if !w.hasSentBlock {
 				w.hasSentBlock = true
+				w.openBlockType = "thinking"
 				w.emitEvent("content_block_start", anthropicStreamEvent{
 					Type:  "content_block_start",
 					Index: w.contentIndex,
@@ -650,9 +835,11 @@ func (w *anthropicStreamWriter) Write(data []byte) (int, error) {
 				})
 				w.contentIndex++
 				w.hasSentBlock = false
+				w.openBlockType = ""
 			}
 			// 开新的 text 块
 			w.hasSentBlock = true
+			w.openBlockType = "text"
 			w.emitEvent("content_block_start", anthropicStreamEvent{
 				Type:  "content_block_start",
 				Index: w.contentIndex,
@@ -685,43 +872,71 @@ func (w *anthropicStreamWriter) Write(data []byte) (int, error) {
 			}
 			if err := json.Unmarshal(delta.ToolCalls, &toolCalls); err == nil {
 				for _, tc := range toolCalls {
-					if w.hasSentBlock {
-						w.emitEvent("content_block_stop", anthropicStreamEvent{
-							Type:  "content_block_stop",
-							Index: w.contentIndex,
-						})
-						w.contentIndex++
-						w.hasSentBlock = false
-					}
-					w.emitEvent("content_block_start", anthropicStreamEvent{
-						Type:  "content_block_start",
-						Index: w.contentIndex,
-						ContentBlock: &anthropicContentBlock{
-							Type: "tool_use",
-							ID:   tc.ID,
-							Name: tc.Function.Name,
-							Input: json.RawMessage(tc.Function.Arguments),
-						},
-					})
-					w.emitEvent("content_block_delta", anthropicStreamEvent{
-						Type:  "content_block_delta",
-						Index: w.contentIndex,
-						Delta: &anthropicStreamDelta{
-							Type:       "input_json_delta",
-							PartialJSON: tc.Function.Arguments,
-						},
-					})
-					w.emitEvent("content_block_stop", anthropicStreamEvent{
-						Type:  "content_block_stop",
-						Index: w.contentIndex,
-					})
-					w.contentIndex++
+					w.writeToolCallDelta(tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
 				}
 			}
 		}
 	}
 
 	return len(data), nil
+}
+
+func (w *anthropicStreamWriter) writeToolCallDelta(index int, id string, name string, arguments string) {
+	if w.toolBlocks == nil {
+		w.toolBlocks = make(map[int]*anthropicStreamToolBlock)
+	}
+	block := w.toolBlocks[index]
+	if block == nil {
+		block = &anthropicStreamToolBlock{contentIndex: -1}
+		w.toolBlocks[index] = block
+	}
+	if id != "" {
+		block.id = id
+	}
+	if name != "" {
+		block.name = name
+	}
+	if !block.started {
+		// 开启工具块前必须关闭当前文本/思考块。Anthropic event stream 同一时刻
+		// 只能有一个 active content block，否则客户端会把后续 delta 归到错误块。
+		if w.hasSentBlock {
+			w.emitEvent("content_block_stop", anthropicStreamEvent{
+				Type:  "content_block_stop",
+				Index: w.contentIndex,
+			})
+			w.contentIndex++
+			w.hasSentBlock = false
+			w.openBlockType = ""
+		}
+		block.contentIndex = w.contentIndex
+		block.started = true
+		w.hasSentBlock = true
+		w.openBlockType = "tool_use"
+		w.emitEvent("content_block_start", anthropicStreamEvent{
+			Type:  "content_block_start",
+			Index: block.contentIndex,
+			ContentBlock: &anthropicContentBlock{
+				Type: "tool_use",
+				ID:   block.id,
+				Name: block.name,
+				// Anthropic 官方流式格式在 start 事件给空对象，后续通过
+				// input_json_delta.partial_json 拼接完整参数；不要在这里放半截 JSON。
+				Input: json.RawMessage(`{}`),
+			},
+		})
+	}
+	if arguments != "" {
+		// arguments 是 OpenAI 的增量片段，可能不是合法完整 JSON；
+		// Anthropic 的 partial_json 正是为这种片段设计的，不能提前 marshal 或校验。
+		w.emitEvent("content_block_delta", anthropicStreamEvent{
+			Type:  "content_block_delta",
+			Index: block.contentIndex,
+			Delta: &anthropicStreamDelta{
+				Type:        "input_json_delta",
+				PartialJSON: arguments,
+			},
+		})
+	}
 }
 
 // emitEvent 写出一个 Anthropic 流式事件。
@@ -745,6 +960,10 @@ func (w *anthropicStreamWriter) finish() {
 			Type:  "content_block_stop",
 			Index: w.contentIndex,
 		})
+		// 工具块和文本块统一在 finish 阶段关闭。这样单 chunk 和多 chunk 工具调用
+		// 都只产生一个 content_block_start / content_block_stop 生命周期。
+		w.hasSentBlock = false
+		w.openBlockType = ""
 	}
 
 	// 映射 finish_reason
@@ -792,13 +1011,33 @@ func writeAnthropicErrorResponse(w http.ResponseWriter, statusCode int, message 
 	errResp := map[string]interface{}{
 		"type": "error",
 		"error": map[string]interface{}{
-			"type":    "api_error",
+			"type":    anthropicErrorTypeForStatus(statusCode),
 			"message": message,
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(errResp)
+}
+
+func anthropicErrorTypeForStatus(statusCode int) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return "invalid_request_error"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	default:
+		if statusCode >= 500 {
+			return "api_error"
+		}
+		return "api_error"
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -919,11 +1158,54 @@ func findProviderConfig(cfg *config.AppConfig, providerName string) *config.Prov
 		return nil
 	}
 	for _, p := range cfg.Providers {
-		if p.ID == providerName || p.Name == providerName {
-			return &p
+		normalized := config.NormalizeProvider(p)
+		if config.ProviderKey(normalized) == providerName || normalized.Name == providerName {
+			return &normalized
 		}
 	}
 	return nil
+}
+
+// anthropicProviderUpstreamConfig 返回 Anthropic 直通请求真正发往上游所需的三项配置。
+// 关键边界：
+//   - baseURL/chatPath 来自 provider 配置和 transport，支持 New API/One API 等自定义路径；
+//   - apiKey 来自 provider.APIKey，不来自客户端请求头，避免把 PROXY_API_KEY 泄漏给上游；
+//   - 返回的 chatPath 已有默认值，调用方不再拼硬编码 /v1/messages。
+func anthropicProviderUpstreamConfig(cfg *config.AppConfig, providerName string) (baseURL string, chatPath string, apiKey string, ok bool) {
+	providerCfg := findProviderConfig(cfg, providerName)
+	if providerCfg == nil {
+		return "", "", "", false
+	}
+	baseURL = strings.TrimRight(providerCfg.BaseURL, "/")
+	chatPath = strings.Trim(providerCfg.Transport.ChatPath, "/")
+	if chatPath == "" {
+		chatPath = "v1/messages"
+	}
+	return baseURL, chatPath, strings.TrimSpace(providerCfg.APIKey), baseURL != ""
+}
+
+// anthropicUpstreamURL 只拼接“版本化 API 根 + 资源相对路径”。
+// chatPath 在 config.NormalizeProvider 中已经会被规范成相对路径；这里再次 trim
+// 是为了保护直接测试 helper 或旧调用方传入带斜杠路径时不会生成双斜杠。
+func anthropicUpstreamURL(baseURL string, chatPath string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	chatPath = strings.Trim(chatPath, "/")
+	if chatPath == "" {
+		chatPath = "v1/messages"
+	}
+	return baseURL + "/" + chatPath
+}
+
+// setAnthropicUpstreamAuthHeaders 设置上游 provider 鉴权头。
+// 同时写 Authorization 和 x-api-key 是为了兼容官方 Anthropic 与 Anthropic 协议网关；
+// 但 token 来源必须是 provider.APIKey，不能复用客户端到代理的认证头。
+func setAnthropicUpstreamAuthHeaders(httpReq *http.Request, apiKey string) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	httpReq.Header.Set("x-api-key", apiKey)
 }
 
 // Ensure handler_anthropic.go implements the required interfaces.
@@ -1328,17 +1610,8 @@ func (s *Server) handleAnthropicStream(
 // 注意：原始请求体中的 model 可能包含 @provider 后缀（如 LongCat-2.0@longcat2），
 // 需要清理后再发送给上游，因为上游不认识这个后缀。
 func (s *Server) forwardAnthropicRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, prov provider.Provider, originalBody []byte, modelName string) error {
-	// 从 config 查找 provider 的 base_url
-	upstreamBase := ""
-	if s.config != nil {
-		for _, p := range s.config.Providers {
-			if p.ID == prov.Name() || p.Name == prov.Name() {
-				upstreamBase = strings.TrimRight(p.BaseURL, "/")
-				break
-			}
-		}
-	}
-	if upstreamBase == "" {
+	upstreamBase, chatPath, apiKey, ok := anthropicProviderUpstreamConfig(s.config, prov.Name())
+	if !ok {
 		return fmt.Errorf("anthropic passthrough: 无法找到 provider %q 的 base_url", prov.Name())
 	}
 
@@ -1364,23 +1637,14 @@ func (s *Server) forwardAnthropicRequest(ctx context.Context, w http.ResponseWri
 		return fmt.Errorf("anthropic passthrough: 序列化请求体失败: %w", err)
 	}
 
-	upstreamURL := upstreamBase + "/v1/messages"
+	upstreamURL := anthropicUpstreamURL(upstreamBase, chatPath)
 	bodyReader := bytes.NewReader(modifiedBody)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bodyReader)
 	if err != nil {
 		return fmt.Errorf("anthropic passthrough: 创建请求失败: %w", err)
 	}
 
-	// 复制认证头：优先使用 Authorization，否则从 x-api-key 转换为 Bearer 格式
-	auth := r.Header.Get("Authorization")
-	apiKey := r.Header.Get("x-api-key")
-	if auth != "" {
-		httpReq.Header.Set("Authorization", auth)
-	} else if apiKey != "" {
-		// Anthropic 官方客户端使用 x-api-key 头，但上游可能只接受 Authorization: Bearer
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	httpReq.Header.Set("x-api-key", apiKey)
+	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
 	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -1420,21 +1684,12 @@ func (s *Server) handleAnthropicPassthroughStream(
 		return fmt.Errorf("response writer does not support flushing")
 	}
 
-	// 查找 base_url
-	upstreamBase := ""
-	if s.config != nil {
-		for _, p := range s.config.Providers {
-			if p.ID == prov.Name() || p.Name == prov.Name() {
-				upstreamBase = strings.TrimRight(p.BaseURL, "/")
-				break
-			}
-		}
-	}
-	if upstreamBase == "" {
+	upstreamBase, chatPath, apiKey, ok := anthropicProviderUpstreamConfig(s.config, prov.Name())
+	if !ok {
 		return fmt.Errorf("anthropic passthrough stream: 无法找到 provider %q 的 base_url", prov.Name())
 	}
 
-	upstreamURL := upstreamBase + "/v1/messages"
+	upstreamURL := anthropicUpstreamURL(upstreamBase, chatPath)
 
 	// 清理模型名：去掉 @provider 后缀和 :latest 后缀
 	// StripModelTag 只处理 :latest，不处理 @provider，需要手动清理
@@ -1462,15 +1717,7 @@ func (s *Server) handleAnthropicPassthroughStream(
 		return fmt.Errorf("anthropic passthrough stream: 创建请求失败: %w", err)
 	}
 
-	// 复制认证头：优先使用 Authorization，否则从 x-api-key 转换为 Bearer 格式
-	auth := r.Header.Get("Authorization")
-	apiKey := r.Header.Get("x-api-key")
-	if auth != "" {
-		httpReq.Header.Set("Authorization", auth)
-	} else if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	httpReq.Header.Set("x-api-key", apiKey)
+	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
 	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
 	httpReq.Header.Set("Content-Type", "application/json")
 

@@ -1654,8 +1654,15 @@ func (s *Server) testChat(c *gin.Context) {
 	var resp *provider.ChatResponse
 	var err error
 	if providerCfg.Type == "anthropic" {
-		// anthropic 类型 provider：使用 Anthropic Messages API 协议直通
-		resp, err = proxy.SendAnthropicChatRequest(c.Request.Context(), providerCfg.BaseURL, providerCfg.APIKey, chatReq)
+		// anthropic 类型 provider 必须使用 Anthropic Messages API 协议直通。
+		// chat_path 来自 transport 配置，避免管理测试页和真实代理转发路径不一致。
+		resp, err = proxy.SendAnthropicChatRequestWithPath(
+			c.Request.Context(),
+			providerCfg.BaseURL,
+			providerCfg.Transport.ChatPath,
+			providerCfg.APIKey,
+			chatReq,
+		)
 	} else {
 		resp, err = prov.Chat(c.Request.Context(), chatReq)
 	}
@@ -1663,7 +1670,22 @@ func (s *Server) testChat(c *gin.Context) {
 		// 管理测试页的目标是帮助用户判断“当前 provider + 当前模型是否实际可对话”。
 		// 某些上游非流式链路不稳定但流式可用，因此这里自动做一次流式兜底，
 		// 并通过 fallback_mode/warning 明确告知用户：模型可用，但非流式链路存在异常。
-		content, fallbackErr := managementTestChatStreamFallback(c.Request.Context(), prov, chatReq)
+		var content string
+		var fallbackErr error
+		if providerCfg.Type == "anthropic" {
+			// Anthropic 上游的流式响应是 event-based SSE（content_block_delta 等事件），
+			// 不能复用 OpenAI ChatStream 兜底；否则非流式失败后会把 OpenAI 请求体
+			// 打到 Anthropic endpoint，导致管理测试误报“模型不可用”。
+			content, fallbackErr = proxy.SendAnthropicChatStreamContent(
+				c.Request.Context(),
+				providerCfg.BaseURL,
+				providerCfg.Transport.ChatPath,
+				providerCfg.APIKey,
+				chatReq,
+			)
+		} else {
+			content, fallbackErr = managementTestChatStreamFallback(c.Request.Context(), prov, chatReq)
+		}
 		if fallbackErr == nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success":       true,

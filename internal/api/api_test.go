@@ -2287,6 +2287,135 @@ func TestManagementTestChatWithAnthropicProvider(t *testing.T) {
 	}
 }
 
+func TestManagementTestChatWithAnthropicProviderUsesConfiguredTransportPath(t *testing.T) {
+	seen := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Path]++
+		switch r.URL.Path {
+		case "/custom/messages":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","model":"LongCat-2.0","content":[{"type":"text","text":"custom path ok"}],"stop_reason":"end_turn"}`))
+		case "/custom/models":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":[{"id":"LongCat-2.0"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	providerCfg := config.ProviderConfig{
+		ID:      "longcat2",
+		Name:    "longcat2",
+		Type:    "anthropic",
+		BaseURL: upstream.URL,
+		APIKey:  "sk-test",
+		Enabled: true,
+		Transport: config.TransportConfig{
+			ChatPath:   "custom/messages",
+			ModelsPath: "custom/models",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": providerCfg,
+		"message":  "hello",
+		"model":    "LongCat-2.0",
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"success":true`)) {
+		t.Fatalf("anthropic custom path chat should succeed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"content":"custom path ok"`)) {
+		t.Fatalf("response should include custom path content: %s", rec.Body.String())
+	}
+	if seen["/custom/messages"] != 1 {
+		t.Fatalf("unexpected endpoint calls: %#v", seen)
+	}
+	if seen["/v1/messages"] != 0 {
+		t.Fatalf("default anthropic paths must not be used with custom transport: %#v", seen)
+	}
+}
+
+func TestManagementTestChatWithAnthropicProviderFallsBackUsingAnthropicStream(t *testing.T) {
+	seen := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Path]++
+		switch r.URL.Path {
+		case "/custom/models":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":[{"id":"LongCat-2.0"}]}`))
+		case "/custom/messages":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode anthropic request: %v", err)
+			}
+			if body["stream"] == true {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Write([]byte(strings.Join([]string{
+					`event: message_start`,
+					`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"LongCat-2.0"}}`,
+					``,
+					`event: content_block_start`,
+					`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+					``,
+					`event: content_block_delta`,
+					`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"stream ok"}}`,
+					``,
+					`event: message_stop`,
+					`data: {"type":"message_stop"}`,
+					``,
+				}, "\n")))
+				return
+			}
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte(`{"type":"error","error":{"message":"non-stream unavailable"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	apiSrv, _ := newAPITestHarness(t)
+	providerCfg := config.ProviderConfig{
+		ID:      "longcat2",
+		Name:    "longcat2",
+		Type:    "anthropic",
+		BaseURL: upstream.URL,
+		APIKey:  "sk-test",
+		Enabled: true,
+		Transport: config.TransportConfig{
+			ChatPath:   "custom/messages",
+			ModelsPath: "custom/models",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/test/chat", mustJSONBody(t, map[string]any{
+		"provider": providerCfg,
+		"message":  "hello",
+		"model":    "LongCat-2.0",
+	}))
+	apiSrv.engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"success":true`)) {
+		t.Fatalf("anthropic stream fallback should succeed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"fallback_mode":"stream"`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"content":"stream ok"`)) {
+		t.Fatalf("anthropic stream fallback details missing: %s", rec.Body.String())
+	}
+	if seen["/custom/messages"] != 2 {
+		t.Fatalf("expected non-stream + stream calls to custom messages, seen=%#v", seen)
+	}
+	if seen["/v1/messages"] != 0 {
+		t.Fatalf("default anthropic messages path must not be used during fallback: %#v", seen)
+	}
+}
+
 func TestManagementTestConnectionWithAnthropicProvider(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {

@@ -1,16 +1,18 @@
 # VS AI Proxy
 
-VS AI Proxy 是给 **Windows + Visual Studio Copilot BYOM** 场景使用的本地 AI 代理。它把 OpenAI-compatible 上游统一代理到本机 `127.0.0.1:12345`，让 Visual Studio 可以通过本地 endpoint 使用你配置的模型。
+VS AI Proxy 是给 **Windows + Visual Studio Copilot BYOM** 场景使用的本地 AI 代理。它把 OpenAI-compatible 与 Anthropic Messages API 上游统一代理到本机 `127.0.0.1:12345`，让 Visual Studio 可以通过本地 endpoint 使用你配置的模型。
 
 ## 适合谁使用
 
 - 使用 Windows 和 Visual Studio 的 Copilot 用户。
-- 想在 Visual Studio 中接入自定义 OpenAI-compatible 服务的用户。
+- 想在 Visual Studio 中接入自定义 OpenAI-compatible 或 Anthropic-compatible 服务的用户。
 - 需要管理多个 provider、多个模型，并在一个本地地址中统一使用的用户。
 
 ## 主要功能
 
 - **Visual Studio 适配**：支持 `/v1/models`、`/v1/chat/completions` 等 OpenAI-compatible 接口。
+- **Anthropic 兼容**：支持 Anthropic Messages API 直通与 OpenAI-compatible 请求转换，覆盖非流式、流式兜底、工具调用和停止原因映射。
+- **LongCat 支持**：支持 LongCat 等 Anthropic-compatible provider 的自定义 `chat_path`、模型名清理和上游 provider key 隔离。
 - **本地管理面板**：通过浏览器配置 provider、模型和测试请求。
 - **模型下拉测试**：测试页按所选 provider 加载官方返回的模型，减少填错模型名。
 - **工具调用兼容**：兼容常见 `tool_calls`、流式工具调用和部分 provider 的工具调用方言。
@@ -20,7 +22,7 @@ VS AI Proxy 是给 **Windows + Visual Studio Copilot BYOM** 场景使用的本�
 
 ## 模型兼容范围
 
-VS AI Proxy 不使用封闭的模型白名单：只要上游提供 OpenAI-compatible 的模型发现和聊天接口，就可以通过管理面板配置并接入。下面列出的是已经针对 Visual Studio / Copilot BYOM 做过真实对话、路由、流式响应、工具调用或大上下文专项验证的代表范围。
+VS AI Proxy 不使用封闭的模型白名单：只要上游提供 OpenAI-compatible 的模型发现和聊天接口，或提供 Anthropic Messages API 兼容的消息接口，就可以通过管理面板配置并接入。下面列出的是已经针对 Visual Studio / Copilot BYOM 做过真实对话、路由、流式响应、工具调用或大上下文专项验证的代表范围。
 
 | 模型系列 | 已验证的代表模型 ID | 当前兼容重点 |
 | --- | --- | --- |
@@ -30,6 +32,7 @@ VS AI Proxy 不使用封闭的模型白名单：只要上游提供 OpenAI-compat
 | GLM | `glm-5.2`、`z-ai/glm-5.2` | 官方短名、namespaced 模型名、限流诊断和大请求 |
 | Kimi | `kimi-for-coding` | Kimi Coding 版本路径、模型发现和多轮消息兼容 |
 | MiMo | `mimo-v2.5`、`mimo-v2.5-pro` | `max_completion_tokens` 参数方言、SSE 和标准工具调用 |
+| LongCat | `LongCat-2.0` | Anthropic Messages API、自定义 `chat_path`、流式兜底和工具调用参数分片 |
 
 这里的“GPT 系列兼容”表示代理按 OpenAI-compatible 协议支持上游实际返回的 GPT 型号，不表示每个历史或未来 GPT SKU 都已逐一实测。具体模型是否可见、是否有权限以及服务稳定性仍由所配置的 provider 和账号决定；上线前请在「测试」页面先读取模型列表，再完成一次真实聊天测试。
 
@@ -65,6 +68,13 @@ VS AI Proxy 不使用封闭的模型白名单：只要上游提供 OpenAI-compat
    - `Base URL`：填写上游地址，例如 `https://api.example.com/v1`
    - `API Key`：填写上游密钥
    - `启用`：保持开启
+
+   如果接入 LongCat 或其他 Anthropic-compatible 服务：
+
+   - `类型`：选择 `anthropic`
+   - `Base URL`：填写上游 API 根地址
+   - `Chat Path`：按上游要求填写，例如 `v1/messages` 或网关提供的自定义路径
+   - `API Key`：填写上游 provider key，不要填写 VS AI Proxy 的本地访问 key
 
 6. 在「测试」页面选择 provider，再从模型下拉框选择模型并点击测试。
 
