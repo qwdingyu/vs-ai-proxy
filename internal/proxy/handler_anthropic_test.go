@@ -1595,6 +1595,66 @@ func TestHandleChatCompletions_AnthropicProviderNonStream(t *testing.T) {
 	}
 }
 
+func TestHandleChatCompletions_AnthropicProviderUsesConfiguredTransportPath(t *testing.T) {
+	seen := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Path]++
+		switch r.URL.Path {
+		case "/custom/messages":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"msg_custom_path","type":"message","role":"assistant","model":"LongCat-2.0","content":[{"type":"text","text":"custom path ok"}],"stop_reason":"end_turn"}`))
+		case "/custom/models":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":[{"id":"LongCat-2.0"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	prov := provider.NewOpenAIProviderWithTransport(
+		"longcat2", "openai", "sk-test", upstream.URL,
+		"custom/messages", "custom/models", true, 5*time.Second,
+	)
+	server := newTestServer(prov)
+	server.config.Providers = []config.ProviderConfig{{
+		ID:      "longcat2",
+		Name:    "longcat2",
+		Type:    "anthropic",
+		BaseURL: upstream.URL,
+		APIKey:  "sk-test",
+		Enabled: true,
+		Transport: config.TransportConfig{
+			ChatPath:   "custom/messages",
+			ModelsPath: "custom/models",
+		},
+	}}
+
+	inner := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+	handler := server.loggingMiddleware(inner)
+
+	body := `{"model":"LongCat-2.0","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "custom path ok") {
+		t.Fatalf("response should come from custom path: %s", rec.Body.String())
+	}
+	if seen["/custom/messages"] != 1 {
+		t.Fatalf("custom messages endpoint calls = %#v, want one call", seen)
+	}
+	if seen["/v1/messages"] != 0 {
+		t.Fatalf("default Anthropic path must not be used: %#v", seen)
+	}
+}
+
 func TestHandleChatCompletions_AnthropicProviderWithSystemMessage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/messages" {

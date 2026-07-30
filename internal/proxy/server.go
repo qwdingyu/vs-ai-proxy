@@ -952,12 +952,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if providerType == "anthropic" {
 			provCfg := findProviderConfig(cfg, prov.Name())
 			var anthropicBaseURL, anthropicAPIKey string
+			anthropicChatPath := "v1/messages"
 			if provCfg != nil {
 				anthropicBaseURL = provCfg.BaseURL
 				anthropicAPIKey = provCfg.APIKey
+				anthropicChatPath = provCfg.Transport.ChatPath
 			}
 			// 发送 Anthropic 格式请求到上游，返回 OpenAI 格式的 ChatResponse
-			anthropicResp, anthropicErr := SendAnthropicChatRequest(ctx, anthropicBaseURL, anthropicAPIKey, req)
+			anthropicResp, anthropicErr := SendAnthropicChatRequestWithPath(ctx, anthropicBaseURL, anthropicChatPath, anthropicAPIKey, req)
 			cancel()
 			if anthropicErr != nil {
 				if isClientGoneError(anthropicErr) {

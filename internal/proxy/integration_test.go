@@ -751,6 +751,33 @@ func TestOpenAIChatRejectsSSEErrorEvent(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatRawErrorObjectIsUpstreamAPIError(t *testing.T) {
+	prov := newFakeProvider("minimax", true, []string{"MiniMax-M2"}, nil, "")
+	prov.rawBody = []byte(`{"type":"error","error":{"type":"authorized_error","message":"invalid api key (2049)","http_code":"401"},"request_id":"req_minimax"}`)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"MiniMax-M2",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Proxy-Error-Code"); got != "upstream_api_error" {
+		t.Fatalf("error code = %q, want upstream_api_error; body=%s", got, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid api key") {
+		t.Fatalf("response should preserve upstream error message: %s", rec.Body.String())
+	}
+}
+
 func TestOpenAIChatRawPassesThroughUndeclaredToolCallsInStableMode(t *testing.T) {
 	prov := newFakeProvider("useai", true, []string{"gpt-5.5"}, nil, "")
 	prov.rawBody = []byte(`{

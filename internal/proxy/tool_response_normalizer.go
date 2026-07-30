@@ -352,7 +352,7 @@ func validateOpenAIChatResponseBody(body []byte) error {
 	}
 	if rawError, exists := root["error"]; exists && rawError != nil {
 		encoded, _ := json.Marshal(rawError)
-		return fmt.Errorf("解析响应失败: upstream returned error object: %s", sanitizeDiagnosticMessage(string(encoded)))
+		return fmt.Errorf("API 错误 200: %s", sanitizeDiagnosticMessage(string(encoded)))
 	}
 
 	choices, _ := root["choices"].([]any)

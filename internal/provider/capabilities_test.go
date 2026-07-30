@@ -21,6 +21,28 @@ func TestCompatibilityProfileForXiaomiMiMo(t *testing.T) {
 	}
 }
 
+func TestCompatibilityProfileForMiniMaxOfficialBaseURL(t *testing.T) {
+	profile := CompatibilityProfileFor(
+		"custom-minimax",
+		"MiniMax",
+		"https://api.minimax.io/v1",
+		string(ApiFormatOpenAi),
+	)
+
+	if profile.Capability != "minimax" {
+		t.Fatalf("capability = %q, want minimax", profile.Capability)
+	}
+	if profile.ChatPath != "chat/completions" {
+		t.Fatalf("chat_path = %q, want chat/completions", profile.ChatPath)
+	}
+	if profile.ModelsPath != "models" {
+		t.Fatalf("models_path = %q, want models", profile.ModelsPath)
+	}
+	if profile.DefaultBaseURL != "https://api.minimax.io/v1" {
+		t.Fatalf("default_base_url = %q, want official MiniMax OpenAI-compatible base URL", profile.DefaultBaseURL)
+	}
+}
+
 func TestCompatibilityProfileForKimiVersionedBaseURL(t *testing.T) {
 	profile := CompatibilityProfileFor(
 		"kimi",

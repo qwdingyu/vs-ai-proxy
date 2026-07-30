@@ -119,6 +119,9 @@ func InferCapabilityName(id, name, baseURL, providerType string) string {
 	if strings.Contains(strings.ToLower(baseURL), "api.xiaomimimo.com") {
 		return "xiaomimimo"
 	}
+	if strings.Contains(strings.ToLower(baseURL), "api.minimax.io") {
+		return "minimax"
+	}
 	switch strings.ToLower(strings.TrimSpace(providerType)) {
 	case string(ApiFormatOllama):
 		return "ollama"
@@ -323,6 +326,16 @@ var providerCapabilities = map[string]ProviderCapabilities{
 		OutputTokenParam:        "max_completion_tokens",
 		DefaultBaseUrl:          "https://api.xiaomimimo.com/v1",
 		EnvPrefix:               "XIAOMIMIMO",
+	},
+	"minimax": {
+		Category:                ProviderCategoryDirect,
+		ApiFormat:               ApiFormatOpenAi,
+		SupportsReasoningEffort: false,
+		SupportsTopK:            false,
+		ChatPath:                "chat/completions",
+		ModelsPath:              "models",
+		DefaultBaseUrl:          "https://api.minimax.io/v1",
+		EnvPrefix:               "MINIMAX",
 	},
 	"google": {
 		Category:                ProviderCategoryDirect,
