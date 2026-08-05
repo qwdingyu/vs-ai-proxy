@@ -93,6 +93,26 @@ func TestModelCatalogLoadsEmbeddedDefaultSelections(t *testing.T) {
 	}
 }
 
+func TestModelCatalogMiniMaxM3ReportsVisionForOllamaProvider(t *testing.T) {
+	registry := NewRegistry("minimax-m3", time.Minute)
+	prov := &fakeProvider{
+		name:    "ollama",
+		enabled: true,
+		models:  []string{"minimax-m3"},
+	}
+	registry.Add(&ProviderEntry{Provider: prov, Models: prov.models, Priority: 1})
+	registry.SetModels(prov.Name(), prov.models)
+
+	catalog := NewModelCatalog(registry, "", time.Minute)
+	profile, ok := catalog.Profile("minimax-m3", "ollama")
+	if !ok {
+		t.Fatalf("expected MiniMax-M3 profile")
+	}
+	if profile.SupportsVision == nil || !*profile.SupportsVision {
+		t.Fatalf("supports_vision = %v, want true", profile.SupportsVision)
+	}
+}
+
 func TestModelCatalogLoadsKimiCodingParameterPolicy(t *testing.T) {
 	catalog := NewModelCatalog(nil, "", time.Minute)
 	profile, ok := catalog.ProfileFromSelections("kimi-for-coding", "kimi")

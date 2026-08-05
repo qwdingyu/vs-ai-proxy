@@ -1770,6 +1770,56 @@ func TestModelSaveEnrichesAPISwitchMetadataSeed(t *testing.T) {
 	}
 }
 
+func TestModelSaveEnrichesMiniMaxM3VisionWhenUnset(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	providerRec := httptest.NewRecorder()
+	providerReq := httptest.NewRequest(http.MethodPost, "/api/providers", mustJSONBody(t, config.ProviderConfig{
+		ID:      "ollama",
+		Name:    "ollama",
+		Type:    "ollama",
+		BaseURL: "https://ollama.com",
+		Enabled: true,
+	}))
+	apiSrv.engine.ServeHTTP(providerRec, providerReq)
+	if providerRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/providers status = %d, want %d; body=%s", providerRec.Code, http.StatusOK, providerRec.Body.String())
+	}
+
+	models := []config.ModelConfig{{
+		Name:       "minimax-m3",
+		ProviderID: "ollama",
+		Provider:   "ollama",
+		Enabled:    true,
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/models", mustJSONBody(t, models))
+	apiSrv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/models status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cfgRec := httptest.NewRecorder()
+	cfgReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	apiSrv.engine.ServeHTTP(cfgRec, cfgReq)
+	if cfgRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d, want %d", cfgRec.Code, http.StatusOK)
+	}
+
+	var got config.AppConfig
+	if err := json.Unmarshal(cfgRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if len(got.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(got.Models))
+	}
+	model := got.Models[0]
+	if model.SupportsVision == nil || !*model.SupportsVision {
+		t.Fatalf("supports_vision = %v, want true", model.SupportsVision)
+	}
+}
+
 func TestModelSavePreservesExplicitContextAndInheritsUnsetDefaults(t *testing.T) {
 	apiSrv, _ := newAPITestHarness(t)
 	explicitContext := 222222

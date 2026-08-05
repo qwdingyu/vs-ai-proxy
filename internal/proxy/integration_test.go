@@ -1511,6 +1511,55 @@ func TestModelDiscoveryEndpointsShareBuiltInLimitsForCustomProvider(t *testing.T
 	}
 }
 
+func TestMiniMaxM3DiscoveryEndpointsPublishVisionCapability(t *testing.T) {
+	prov := newFakeProvider(
+		"ollama",
+		true,
+		[]string{"minimax-m3"},
+		&fakeChatResponse{Model: "minimax-m3", Content: "ok"},
+		"",
+	)
+	server := newOpenServer(prov)
+	handler := withMux(server, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/models", server.handleListModels)
+		mux.HandleFunc("/api/tags", server.handleOllamaTags)
+		mux.HandleFunc("/api/show", server.handleOllamaShow)
+	})
+
+	openAIRec := httptest.NewRecorder()
+	handler.ServeHTTP(openAIRec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if openAIRec.Code != http.StatusOK {
+		t.Fatalf("/v1/models status = %d; body=%s", openAIRec.Code, openAIRec.Body.String())
+	}
+	var openAI map[string]any
+	if err := json.Unmarshal(openAIRec.Body.Bytes(), &openAI); err != nil {
+		t.Fatalf("decode /v1/models: %v", err)
+	}
+	assertVisionCapability(t, "/v1/models", modelItemByUpstream(t, openAI["data"], "minimax-m3"))
+
+	tagsRec := httptest.NewRecorder()
+	handler.ServeHTTP(tagsRec, httptest.NewRequest(http.MethodGet, "/api/tags", nil))
+	if tagsRec.Code != http.StatusOK {
+		t.Fatalf("/api/tags status = %d; body=%s", tagsRec.Code, tagsRec.Body.String())
+	}
+	var tags map[string]any
+	if err := json.Unmarshal(tagsRec.Body.Bytes(), &tags); err != nil {
+		t.Fatalf("decode /api/tags: %v", err)
+	}
+	assertVisionCapability(t, "/api/tags", modelItemByUpstream(t, tags["models"], "minimax-m3"))
+
+	showRec := httptest.NewRecorder()
+	handler.ServeHTTP(showRec, httptest.NewRequest(http.MethodGet, "/api/show?model=minimax-m3", nil))
+	if showRec.Code != http.StatusOK {
+		t.Fatalf("/api/show status = %d; body=%s", showRec.Code, showRec.Body.String())
+	}
+	var show map[string]any
+	if err := json.Unmarshal(showRec.Body.Bytes(), &show); err != nil {
+		t.Fatalf("decode /api/show: %v", err)
+	}
+	assertVisionCapability(t, "/api/show", show)
+}
+
 func modelItemByUpstream(t *testing.T, raw any, upstream string) map[string]any {
 	t.Helper()
 	items, ok := raw.([]any)
@@ -1529,6 +1578,21 @@ func modelItemByUpstream(t *testing.T, raw any, upstream string) map[string]any 
 	}
 	t.Fatalf("missing model %q in %#v", upstream, items)
 	return nil
+}
+
+func assertVisionCapability(t *testing.T, endpoint string, item map[string]any) {
+	t.Helper()
+	if item["supports_vision"] != true || item["supports_images"] != true {
+		t.Fatalf("%s vision flags = supports_vision:%v supports_images:%v, want true/true", endpoint, item["supports_vision"], item["supports_images"])
+	}
+	capabilities, _ := item["capabilities"].([]any)
+	if !containsAnyString(capabilities, "vision") {
+		t.Fatalf("%s capabilities = %#v, want vision", endpoint, capabilities)
+	}
+	modelInfo, _ := item["model_info"].(map[string]any)
+	if modelInfo["supports_vision"] != true || modelInfo["supports_images"] != true {
+		t.Fatalf("%s model_info vision flags = %#v, want true", endpoint, modelInfo)
+	}
 }
 
 func assertModelLimits(t *testing.T, endpoint string, item map[string]any, contextLength, maxOutput int) {
