@@ -913,6 +913,41 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		ctx = requestmeta.ContextWithRequestID(ctx, requestIDFromContext(r.Context()))
 
 		if req.Stream {
+			// anthropic 类型 provider 的流式分支必须在这里处理：
+			// 下面的 handleStream 只按 provider.ResolveApiFormat 分流，而 anthropic
+			// 类型在 providerFromConfig 里是 *OpenAIProvider，会被判定为 OpenAI 格式，
+			// 结果既把 OpenAI 请求体打到 Anthropic endpoint，又把上游 Anthropic SSE
+			// 原样透传给 Visual Studio（缺少 choices/[DONE]，VS 无法解析）。
+			// 因此流式必须先于 handleStream 判断 provider 类型，与非流式保持同一语义。
+			if getProviderTypeFromConfig(cfg, prov.Name()) == "anthropic" {
+				anthropicStreamWriter := &streamAttemptWriter{ResponseWriter: w}
+				if err := s.streamAnthropicAsOpenAI(anthropicStreamWriter, r, ctx, cfg, prov, req); err != nil {
+					cancel()
+					if isClientGoneError(err) {
+						return
+					}
+					lastErr = err
+					attempt := newAttemptDiagnostic(prov.Name(), modelID, time.Since(attemptStart).Seconds()*1000, err)
+					attempts = append(attempts, attempt)
+					s.logProviderAttemptFailureForRequest(r.Context(), modelName, modelID, prov.Name(), attempt)
+					if anthropicStreamWriter.HasWritten() {
+						// 与下方 OpenAI 流式分支同一守卫语义：已经向下游写出 SSE 后
+						// 不能切换候选重放，否则 VS 会收到两段拼接的损坏流。
+						markWrittenStreamFailure(w, attempt)
+						registry.RecordCandidateFailure(prov.Name(), err)
+						return
+					}
+					registry.RecordCandidateFailure(prov.Name(), err)
+					if shouldStopCandidateFallback(attempt.Category) {
+						break
+					}
+					continue
+				}
+				cancel()
+				registry.RecordCandidateSuccess(prov.Name(), time.Since(attemptStart))
+				return
+			}
+
 			streamReq := r.WithContext(ctx)
 			streamWriter := &streamAttemptWriter{ResponseWriter: w}
 			err := s.handleStream(streamWriter, streamReq, prov, req, provider.ApiFormatOpenAi)
@@ -1499,6 +1534,64 @@ func readRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]
 	}
 	http.Error(w, "读取请求体失败", http.StatusBadRequest)
 	return nil, false
+}
+
+// streamAnthropicAsOpenAI 处理 anthropic 类型 provider 的流式请求。
+//
+// 契约：上游收到 Anthropic Messages 请求体，下游 Visual Studio 收到标准
+// OpenAI SSE（choices[].delta + finish_reason + data: [DONE]）。
+// 请求转换与鉴权头复用非流式路径的同一组 helper，确保两条链路不会漂移。
+func (s *Server) streamAnthropicAsOpenAI(
+	w http.ResponseWriter,
+	r *http.Request,
+	ctx context.Context,
+	cfg *config.AppConfig,
+	prov provider.Provider,
+	req *provider.ChatRequest,
+) error {
+	setProxyStreamState(w, "upstream_connecting")
+
+	// cfg 必须使用调用方已取得的快照，不能在请求处理中直接读 s.config：
+	// Reconfigure 会在 s.mu 保护下替换 s.config，绕过快照读取会构成数据竞争，
+	// 也可能让同一个请求的鉴权与路由看到不同代的配置。
+	baseURL, chatPath, apiKey, ok := anthropicProviderUpstreamConfig(cfg, prov.Name())
+	if !ok {
+		return fmt.Errorf("anthropic 流式: 无法找到 provider %q 的 base_url", prov.Name())
+	}
+
+	resp, err := SendAnthropicChatStreamRequest(ctx, baseURL, chatPath, apiKey, req)
+	if err != nil {
+		return fmt.Errorf("anthropic 流式: %w", err)
+	}
+	setProxyStreamState(w, "upstream_connected")
+
+	// 与非流式链路的响应侧保持一致：先归一化工具调用，再走统一契约校验，
+	// 避免出现只在流式下生效的第二套工具语义。
+	normalizeProviderSpecificToolCalls(resp, allowedToolNames(req))
+	if err := validateProviderResponseToolContract(resp); err != nil {
+		return err
+	}
+	// 防御性检查：anthropicResponseToChatResponse 当前总是构造恰好一个 choice，
+	// 因此这里在正常路径下不可达。保留它是为了在转换逻辑将来变化时，
+	// 宁可失败关闭也不要写出一个 VS 无法解析的空 choices 响应。
+	if len(resp.Choices) == 0 {
+		return fmt.Errorf("anthropic 流式: 上游未返回任何 choices")
+	}
+
+	fillMissingStreamResponseModel(resp, req.Model)
+	setResponseToolDiagnosticHeader(w, resp)
+	setToolOutcomeDiagnosticHeader(w, req, resp)
+	setResponseUsage(w, resp.Usage)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return fmt.Errorf("anthropic 流式: response writer 不支持 flush")
+	}
+	if err := writeOpenAIChatResponseAsSSE(w, flusher, resp); err != nil {
+		return fmt.Errorf("anthropic 流式: 写出 OpenAI SSE 失败: %w", err)
+	}
+	s.cacheChatResponse(resp)
+	return nil
 }
 
 // handleStream 处理流式响应

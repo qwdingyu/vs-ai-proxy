@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dingyuwang/vs-ai-proxy/internal/config"
@@ -594,6 +596,362 @@ func SendAnthropicChatRequestWithPath(ctx context.Context, upstreamBase string, 
 	}
 
 	return anthropicResponseToChatResponse(&anthropicResp), nil
+}
+
+// SendAnthropicChatStreamRequest 发送流式 Anthropic Messages 请求，并把上游的
+// Anthropic event-based SSE 聚合回一个 OpenAI 格式的 ChatResponse。
+//
+// 为什么必须存在这个函数：
+// Visual Studio Copilot 对 /v1/chat/completions 固定使用 stream=true，而
+// handleChatCompletions 的流式分支在 anthropic 判断之前就 return 了，导致
+// anthropic 类型 provider 把 OpenAI 请求体打到 Anthropic endpoint，并且
+// 上游的 Anthropic SSE 被原样透传给 VS（没有 choices、没有 [DONE]），
+// VS 因此无法解析。这里把流式链路收敛到和一条非流式链路相同的协议转换语义：
+// 上游始终收到 Anthropic 请求体，下游始终拿到 OpenAI 结构。
+//
+// 实现选择：聚合上游事件后用 anthropicResponseToChatResponse 复用已验证的
+// 转换逻辑（含 text/thinking/tool_use 与 usage 映射），再由调用方按统一
+// OpenAI SSE 契约写出。这样输入输出都与非流式路径完全同构，避免出现第三套
+// 只在流式下生效的转换分支。
+func SendAnthropicChatStreamRequest(ctx context.Context, upstreamBase string, chatPath string, apiKey string, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	streamReq := cloneChatRequest(req)
+	streamReq.Stream = true
+	anthropicReq := chatRequestToAnthropicRequest(streamReq)
+	body, err := marshalAnthropicRequestBody(anthropicReq, streamReq.Extra)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic 流式请求序列化失败: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicUpstreamURL(upstreamBase, chatPath), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("anthropic 流式请求创建失败: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic 流式上游请求失败: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("anthropic 流式上游返回 %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	acc := newAnthropicStreamAccumulator()
+	// 读取放在独立 goroutine 中，主流程只等待「终态已到」或「读取结束」两个信号。
+	//
+	// 为什么不能直接在主流程里 for scanner.Scan()：
+	// bufio.Scanner 对末尾没有换行符的行，必须等到 EOF 才返回。若上游把
+	// message_stop 作为最后一行且不补换行、同时又不关闭连接（复用连接的真实网关
+	// 常见行为），Scan() 会永久阻塞，主流程根本没有机会判断 sawTerminal，
+	// 请求就会挂到超时。这里用完成通道让主流程能在终态到达时立即返回，
+	// 不依赖上游关闭 body。
+	type readResult struct {
+		err error
+	}
+	readDone := make(chan readResult, 1)
+	readResultErr := make(chan error, 1)
+	terminalSeen := make(chan struct{})
+
+	go func() {
+		defer close(readDone)
+		// 为什么不用 bufio.Scanner / ReadString：
+		// 两者对「末尾没有换行符的行」都必须等到 EOF 才返回（已实测验证）。
+		// 若上游把 message_stop 作为最后一行且不补换行、同时保持连接不关闭
+		// （复用连接的真实网关常见），读取会永久阻塞，主流程无法得知终态，
+		// 请求挂到超时。因此这里按字节流读取，自行切分完整行，
+		// 并把每次读到的「未完成行」也立即交给解析器——终态判断因此
+		// 既不依赖换行符，也不依赖 EOF。
+		reader := bufio.NewReaderSize(httpResp.Body, 32*1024)
+		currentEvent := ""
+		var dataLines []string
+		var dispatchErr error
+		var pending strings.Builder
+		dispatch := func() {
+			if dispatchErr != nil || len(dataLines) == 0 {
+				currentEvent = ""
+				return
+			}
+			payload := strings.TrimSpace(strings.Join(dataLines, "\n"))
+			event := currentEvent
+			dataLines = dataLines[:0]
+			currentEvent = ""
+			if payload == "" || payload == "[DONE]" {
+				return
+			}
+			if event == "error" {
+				dispatchErr = fmt.Errorf("Anthropic 流式错误事件: %s", anthropicErrorMessageFromPayload(payload))
+				return
+			}
+			dispatchErr = acc.consume(payload)
+		}
+		signalTerminal := func() {
+			select {
+			case terminalSeen <- struct{}{}:
+			default:
+			}
+		}
+		// handleLine 处理一个逻辑行；返回 true 表示已到达终态，应停止读取。
+		handleLine := func(raw string) bool {
+			line := strings.TrimSpace(raw)
+			if line == "" {
+				dispatch()
+				return acc.sawTerminal
+			}
+			if strings.HasPrefix(line, ":") {
+				return false
+			}
+			if strings.HasPrefix(line, "event:") {
+				currentEvent = strings.TrimSpace(line[len("event:"):])
+				return false
+			}
+			if strings.HasPrefix(line, "data:") {
+				dataLines = append(dataLines, strings.TrimSpace(line[len("data:"):]))
+				if strings.Contains(line, `"message_stop"`) {
+					dispatch()
+					return acc.sawTerminal
+				}
+				return false
+			}
+			return false
+		}
+
+		buf := make([]byte, 8192)
+		for {
+			n, readErr := reader.Read(buf)
+			if n > 0 {
+				pending.Write(buf[:n])
+				for {
+					text := pending.String()
+					idx := strings.IndexByte(text, '\n')
+					if idx < 0 {
+						break
+					}
+					line := text[:idx]
+					rest := text[idx+1:]
+					pending.Reset()
+					pending.WriteString(rest)
+					if stop := handleLine(line); stop {
+						signalTerminal()
+						return
+					}
+				}
+				// 关键：把仍未结束的半行也立即解析，使 message_stop
+				// 即使没有换行符结尾也能在读到它的瞬间被识别。
+				if pending.Len() > 0 {
+					if stop := handleLine(pending.String()); stop {
+						signalTerminal()
+						return
+					}
+				}
+			}
+			if readErr != nil {
+				break
+			}
+		}
+		// 上游未以空行结束最后一个事件时（部分网关直接关闭连接），仍要提交它。
+		dispatch()
+		// dispatchErr 是闭包内累积的解析/协议错误（例如上游 error 事件）。
+		// 必须经 readDone 传回主流程，否则错误会被静默吞掉，
+		// 只在下游表现成"缺少内容"的泛化失败，丢失真实原因。
+		if dispatchErr != nil {
+			select {
+			case readResultErr <- dispatchErr:
+			default:
+			}
+		}
+	}()
+
+	select {
+	case <-terminalSeen:
+		// 终态已到，无需等待上游关闭 body。注意：终态信号可能早于读取 goroutine
+		// 完全退出，因此下面仍要检查已记录的解析错误。
+	case res := <-readDone:
+		if res.err != nil {
+			return nil, res.err
+		}
+	}
+
+	// 解析过程中若产生过错误（如上游 error 事件），必须优先返回它，
+	// 不能让下游只看到"没有内容"的泛化失败而丢掉真实原因。
+	select {
+	case err := <-readResultErr:
+		if err != nil {
+			return nil, err
+		}
+	default:
+	}
+
+	// 无论是否收到 message_stop，都返回已聚合的内容：
+	// 有 message_stop 是正常完成；没有但连接正常结束（EOF）时上游可能省略终态事件，
+	// 此时也不应丢弃已收到的内容。真正的空流由上层按"无 choices"失败关闭，
+	// 因此这里不会把截断的流伪装成成功。
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	return acc.response(), nil
+}
+
+// anthropicStreamAccumulator 把 Anthropic event-based SSE 增量还原成一个完整响应。
+//
+// 必须处理的事件（其余事件安全忽略，保证上游新增事件类型不会导致解析失败）：
+//   - message_start      : 响应 id / model / 初始 usage
+//   - content_block_start: 新内容块（text / thinking / tool_use）
+//   - content_block_delta: text_delta / thinking_delta / input_json_delta
+//   - content_block_stop : 结束当前块
+//   - message_delta      : stop_reason 与 output_tokens
+type anthropicStreamAccumulator struct {
+	resp          *anthropicResponse
+	blocks        []anthropicContentBlock
+	toolInputJSON map[int]*strings.Builder
+	toolInputSeen map[int]bool
+	// blockPos 把 Anthropic 协议的 content block index 映射到 a.blocks 的切片位置。
+	// 协议只保证 index 唯一且递增，不保证从 0 开始连续（上游可能跳过序号），
+	// 因此绝不能用切片位置当协议 index 使用。
+	blockPos map[int]int
+	// sawTerminal 记录是否已收到 message_stop。
+	// Anthropic 的 SSE 是应用层协议：上游可能在 message_stop 之后继续挂住连接
+	// （等待复用或延迟关闭 body），因此读取循环必须据此结束，而不能等待传输层 EOF。
+	// 这与 dsml_stream.go 中 OpenAI 流对 [DONE] 的处理是同一个道理。
+	sawTerminal bool
+	// mu 保护以上字段：读取在独立 goroutine 中进行，主流程在终态到达后
+	// 可能先于读取 goroutine 完全退出就调用 response()，必须避免数据竞争。
+	mu sync.Mutex
+}
+
+func newAnthropicStreamAccumulator() *anthropicStreamAccumulator {
+	return &anthropicStreamAccumulator{
+		resp: &anthropicResponse{
+			Type: "message",
+			Role: "assistant",
+		},
+		toolInputJSON: map[int]*strings.Builder{},
+		toolInputSeen: map[int]bool{},
+		blockPos:      map[int]int{},
+	}
+}
+
+func (a *anthropicStreamAccumulator) consume(payload string) error {
+	var event anthropicStreamEvent
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		// 单个事件解析失败不应中断整条流：上游可能夹带心跳或未知字段。
+		return nil
+	}
+
+	switch event.Type {
+	case "message_start":
+		if event.Message != nil {
+			if event.Message.ID != "" {
+				a.resp.ID = event.Message.ID
+			}
+			if event.Message.Model != "" {
+				a.resp.Model = event.Message.Model
+			}
+			if event.Message.Role != "" {
+				a.resp.Role = event.Message.Role
+			}
+			if event.Message.Usage != nil {
+				a.resp.Usage = &anthropicUsage{
+					InputTokens:  event.Message.Usage.InputTokens,
+					OutputTokens: event.Message.Usage.OutputTokens,
+				}
+			}
+		}
+	case "content_block_start":
+		block := anthropicContentBlock{}
+		if event.ContentBlock != nil {
+			block = *event.ContentBlock
+		}
+		// tool_use 的 input 在流式下由 input_json_delta 分片给出，这里先清空，
+		// 避免把 start 事件里的空对象 {} 当成最终参数。
+		if block.Type == "tool_use" {
+			block.Input = nil
+			a.toolInputJSON[event.Index] = &strings.Builder{}
+		}
+		a.blockPos[event.Index] = len(a.blocks)
+		a.blocks = append(a.blocks, block)
+	case "content_block_delta":
+		if event.Delta == nil {
+			break
+		}
+		pos, ok := a.blockPos[event.Index]
+		if !ok {
+			// 没有对应的 content_block_start：按协议不该出现，忽略而不是错位写入。
+			break
+		}
+		switch event.Delta.Type {
+		case "text_delta":
+			a.blocks[pos].Text += event.Delta.Text
+		case "thinking_delta":
+			a.blocks[pos].Thinking += event.Delta.Text
+		case "input_json_delta":
+			if builder, ok := a.toolInputJSON[event.Index]; ok {
+				builder.WriteString(event.Delta.PartialJSON)
+				a.toolInputSeen[event.Index] = true
+			}
+		default:
+			// signature_delta 等事件不参与 ChatResponse 构造。
+		}
+	case "message_delta":
+		if event.Delta != nil && event.Delta.StopReason != "" {
+			a.resp.StopReason = event.Delta.StopReason
+		}
+		if event.Usage != nil {
+			if a.resp.Usage == nil {
+				a.resp.Usage = &anthropicUsage{}
+			}
+			// message_delta 的 usage 通常只带 output_tokens，input_tokens 保留
+			// message_start 的值，避免把已有输入计数覆盖成 0。
+			if event.Usage.InputTokens > 0 {
+				a.resp.Usage.InputTokens = event.Usage.InputTokens
+			}
+			if event.Usage.OutputTokens > 0 {
+				a.resp.Usage.OutputTokens = event.Usage.OutputTokens
+			}
+		}
+	case "message_stop":
+		// 应用层终态：读取循环据此结束，不等待上游关闭 body。
+		a.sawTerminal = true
+	case "content_block_stop", "ping":
+		// 无需额外处理：块内容已在 delta 阶段累积。
+	}
+	return nil
+}
+
+func (a *anthropicStreamAccumulator) response() *provider.ChatResponse {
+	blocks := make([]anthropicContentBlock, 0, len(a.blocks))
+	// 按协议 index 升序还原顺序，而不是依赖 a.blocks 的追加顺序：
+	// 上游的 index 可能不是从 0 连续递增，且我们必须用协议 index 查参数表。
+	indices := make([]int, 0, len(a.blocks))
+	for protoIndex := range a.blockPos {
+		indices = append(indices, protoIndex)
+	}
+	sort.Ints(indices)
+	for _, protoIndex := range indices {
+		block := a.blocks[a.blockPos[protoIndex]]
+		if block.Type == "tool_use" {
+			raw := ""
+			if builder, ok := a.toolInputJSON[protoIndex]; ok {
+				raw = strings.TrimSpace(builder.String())
+			}
+			// 上游没有发 input_json_delta（例如非流式补齐或空参数工具）时，
+			// 退化为空对象，保证 tool_use 的 input 始终是合法 JSON。
+			if !a.toolInputSeen[protoIndex] || raw == "" {
+				block.Input = json.RawMessage(`{}`)
+			} else if json.Valid([]byte(raw)) {
+				block.Input = json.RawMessage(raw)
+			} else {
+				block.Input = json.RawMessage(`{}`)
+			}
+		}
+		blocks = append(blocks, block)
+	}
+	a.resp.Content = blocks
+	return anthropicResponseToChatResponse(a.resp)
 }
 
 // SendAnthropicChatStreamContent 只服务管理端“非流式失败后流式兜底”的健康检查。
