@@ -2283,7 +2283,7 @@ func TestForwardAnthropicRequest_ModelNameCleaning(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(originalBody)))
 	req.Header.Set("x-api-key", "sk-test")
 
-	err := server.forwardAnthropicRequest(context.Background(), rec, req, prov, originalBody, "LongCat-2.0@longcat2")
+	err := server.forwardAnthropicRequest(context.Background(), server.config, rec, req, prov, originalBody, "LongCat-2.0@longcat2")
 	if err != nil {
 		t.Fatalf("forwardAnthropicRequest failed: %v", err)
 	}
@@ -2319,7 +2319,7 @@ func TestForwardAnthropicRequest_UsesConfiguredProviderKey(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer proxy-secret")
 	req.Header.Set("x-api-key", "client-anthropic-key")
 
-	err := server.forwardAnthropicRequest(context.Background(), rec, req, prov, originalBody, "LongCat-2.0")
+	err := server.forwardAnthropicRequest(context.Background(), server.config, rec, req, prov, originalBody, "LongCat-2.0")
 	if err != nil {
 		t.Fatalf("forwardAnthropicRequest failed: %v", err)
 	}
@@ -2358,7 +2358,7 @@ func TestForwardAnthropicRequest_UsesConfiguredTransportPath(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(originalBody)))
 
-	err := server.forwardAnthropicRequest(context.Background(), rec, req, prov, originalBody, "LongCat-2.0")
+	err := server.forwardAnthropicRequest(context.Background(), server.config, rec, req, prov, originalBody, "LongCat-2.0")
 	if err != nil {
 		t.Fatalf("forwardAnthropicRequest failed: %v", err)
 	}

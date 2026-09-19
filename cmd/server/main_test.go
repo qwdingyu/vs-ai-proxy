@@ -620,3 +620,127 @@ func writeConfigFile(t *testing.T, path string, cfg *config.AppConfig) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// config doctor 子命令
+// ---------------------------------------------------------------------------
+
+// runConfigDoctor 必须是只读的：对同一份配置反复诊断不能改变磁盘文件。
+func TestRunConfigDoctorIsReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	original := `{"config_version":1,"providers":[
+		{"id":"p1","name":"p1","type":"openai","api_key":"k","base_url":"https://h/v1","enabled":true}],
+	 "models":[]}`
+	if err := os.WriteFile(cfgPath, []byte(original), 0600); err != nil {
+		t.Fatalf("写入配置失败: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runConfigDoctor(&stdout, &stderr, cfgPath)
+	if exitCode == 2 {
+		t.Fatalf("诊断失败 exit=2: %s", stderr.String())
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if string(after) != original {
+		t.Fatalf("config doctor 修改了配置文件！\nbefore=%s\nafter =%s", original, after)
+	}
+}
+
+// 存在 ERROR 级问题时退出码必须是 1，便于发布门禁复用。
+func TestRunConfigDoctorExitsOneOnProblems(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	// anthropic 类型却用 OpenAI 路径 → ERROR
+	body := `{"config_version":2,"providers":[
+		{"id":"a1","name":"a1","type":"anthropic","api_key":"k","base_url":"https://h","enabled":true,
+		 "transport":{"chat_path":"chat/completions","models_path":"models"}}],"models":[]}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatalf("写入配置失败: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runConfigDoctor(&stdout, &stderr, cfgPath)
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1; stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "anthropic") {
+		t.Errorf("输出应包含出问题的 provider 信息: %s", stdout.String())
+	}
+}
+
+// 健康配置退出码必须是 0。
+func TestRunConfigDoctorExitsZeroWhenClean(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	body := `{"config_version":2,"providers":[
+		{"id":"p1","name":"p1","type":"openai","api_key":"k","base_url":"https://h/v1","enabled":true,
+		 "transport":{"chat_path":"chat/completions","models_path":"models"}}],"models":[]}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatalf("写入配置失败: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runConfigDoctor(&stdout, &stderr, cfgPath)
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0; stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "只读诊断") {
+		t.Errorf("输出缺少标题: %s", stdout.String())
+	}
+}
+
+// 无法解析的配置必须退出 2，而不是 panic。
+func TestRunConfigDoctorExitsTwoOnBadConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte("{not json"), 0600); err != nil {
+		t.Fatalf("写入配置失败: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runConfigDoctor(&stdout, &stderr, cfgPath)
+	if exitCode != 2 {
+		t.Fatalf("exitCode = %d, want 2", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "读取配置失败") {
+		t.Errorf("stderr 应说明失败原因: %s", stderr.String())
+	}
+}
+
+// --config-doctor 必须能通过 handleCommandLine 触发，且不影响其它参数。
+func TestHandleCommandLineConfigDoctor(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	cfgDir := filepath.Join(dir, "vs-ai-proxy")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatalf("创建目录失败: %v", err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.json")
+	body := `{"config_version":2,"providers":[
+		{"id":"p1","name":"p1","type":"openai","api_key":"k","base_url":"https://h/v1","enabled":true,
+		 "transport":{"chat_path":"chat/completions","models_path":"models"}}],"models":[]}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatalf("写入配置失败: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, exitCode := handleCommandLine([]string{"--config-doctor"}, &stdout, &stderr)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0; stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "实际上游地址") {
+		t.Errorf("输出缺少上游地址表: %s", stdout.String())
+	}
+	// 必须回退到默认配置路径
+	if !strings.Contains(stdout.String(), cfgPath) {
+		t.Errorf("输出应显示配置路径 %s: %s", cfgPath, stdout.String())
+	}
+}

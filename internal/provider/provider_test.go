@@ -2190,3 +2190,57 @@ func TestIsRetryableOpErrorRejectsContextErrors(t *testing.T) {
 		t.Fatal("dial with context.DeadlineExceeded must not be retryable")
 	}
 }
+
+// NewProviderHTTPClient 是 provider 层之外（Anthropic 直通等）复用上游 HTTP
+// 纪律的唯一入口。它的 timeout 语义与传输层设置都必须与转发路径一致，
+// 否则这些路径会悄悄退回 http.DefaultClient 的行为。
+func TestNewProviderHTTPClientTimeoutSemantics(t *testing.T) {
+	// 流式安全：timeout<=0 表示不设客户端级超时，生命周期交给 ctx。
+	// 若这里被改成非零默认值，长回复会被 client.Timeout 提前截断。
+	streamSafe := NewProviderHTTPClient(0)
+	if streamSafe.Timeout != 0 {
+		t.Fatalf("NewProviderHTTPClient(0).Timeout = %s, want 0（流式必须不设客户端超时）", streamSafe.Timeout)
+	}
+
+	// 非流式可显式指定总超时。
+	withTimeout := NewProviderHTTPClient(45 * time.Second)
+	if withTimeout.Timeout != 45*time.Second {
+		t.Fatalf("NewProviderHTTPClient(45s).Timeout = %s, want 45s", withTimeout.Timeout)
+	}
+}
+
+// 传输层必须与 provider 转发完全一致：这些设置直接影响流式流畅性与并发连接复用。
+func TestNewProviderHTTPClientTransportDiscipline(t *testing.T) {
+	client := NewProviderHTTPClient(0)
+
+	if client == http.DefaultClient {
+		t.Fatal("返回了 http.DefaultClient，会继承 DefaultTransport（透明 gzip、MaxIdleConnsPerHost=2）")
+	}
+
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport 类型 = %T, want *http.Transport", client.Transport)
+	}
+
+	// DisableCompression=false 会让传输层声明 Accept-Encoding: gzip，
+	// 并在流式响应前插入解压缓冲，破坏"边收边吐"。
+	if !transport.DisableCompression {
+		t.Error("DisableCompression = false, want true（否则流式会被透明 gzip 缓冲）")
+	}
+	if transport.ForceAttemptHTTP2 {
+		t.Error("ForceAttemptHTTP2 = true, want false（本项目的既有决策）")
+	}
+	if transport.MaxIdleConnsPerHost < 16 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 足够大以复用连接（默认 2 会频繁重建 TLS）",
+			transport.MaxIdleConnsPerHost)
+	}
+	if transport.Proxy == nil {
+		t.Error("Proxy = nil, want http.ProxyFromEnvironment（云主机/企业环境依赖）")
+	}
+	if transport.DialContext == nil {
+		t.Error("DialContext = nil, want 带拨号超时的实现")
+	}
+	if transport.TLSHandshakeTimeout == 0 {
+		t.Error("TLSHandshakeTimeout = 0, want 非零")
+	}
+}

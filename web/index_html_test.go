@@ -472,8 +472,25 @@ func TestAdvancedChildPagesKeepAdvancedNavActive(t *testing.T) {
 		t.Fatalf("read dist/index.html: %v", err)
 	}
 	html := string(data)
-	if !strings.Contains(html, "const activePage = ['config', 'models', 'monitor'].includes(currentPage) ? 'advanced' : currentPage") {
-		t.Fatalf("advanced child pages should keep the advanced nav item active")
+
+	// 断言"意图"而不是硬编码整个列表：所有从「高级」页进入的子页面
+	// 都必须让「高级」导航项保持高亮，否则用户点进去会看不到当前位置。
+	// 新增子页面时必须把它加进这个列表——本测试就是那个提醒。
+	const decl = "const activePage = ["
+	start := strings.Index(html, decl)
+	if start < 0 {
+		t.Fatalf("未找到 activePage 推导逻辑")
+	}
+	end := strings.Index(html[start:], "].includes(currentPage)")
+	if end < 0 {
+		t.Fatalf("activePage 推导逻辑结构变化，无法解析子页面列表")
+	}
+	listPart := html[start+len(decl) : start+end]
+	childPages := []string{"config", "models", "monitor", "doctor"}
+	for _, page := range childPages {
+		if !strings.Contains(listPart, "'"+page+"'") {
+			t.Fatalf("高级子页面 %q 未包含在 activePage 列表中；它不会让「高级」导航保持高亮（列表=%s）", page, listPart)
+		}
 	}
 }
 
@@ -691,4 +708,53 @@ func placeholders(value string) string {
 	matches := pattern.FindAllString(value, -1)
 	sort.Strings(matches)
 	return strings.Join(matches, ",")
+}
+
+// config doctor 管理页接线：入口、只读声明、渲染函数与分发必须齐全，
+// 否则用户点进去只会看到空白页（这类"页面存在但没接线"的缺陷最难发现）。
+func TestConfigDoctorPageIsWiredToReadOnlyEndpoint(t *testing.T) {
+	data, err := fs.ReadFile(MustSubFS(), "index.html")
+	if err != nil {
+		t.Fatalf("read dist/index.html: %v", err)
+	}
+	html := string(data)
+	for _, marker := range []string{
+		// 入口
+		`href="#/doctor" data-page="doctor"`,
+		`data-i18n="advanced.card.doctor.label"`,
+		// 页面骨架
+		`id="page-doctor"`,
+		`id="doctorProviders"`,
+		`id="doctorModels"`,
+		`id="doctorProblems"`,
+		`id="doctorRewrite"`,
+		`id="doctorFindings"`,
+		`id="doctorUrlsBody"`,
+		`id="btnRefreshDoctor"`,
+		// 调用的是只读 GET 端点
+		`fetchJSON('/config/doctor')`,
+		// 渲染与分发
+		`const renderDoctor = (data) =>`,
+		`const loadDoctor = async () =>`,
+		`if (page === 'doctor') loadDoctor();`,
+		// 高级页高亮归属
+		`'monitor', 'doctor'].includes(currentPage) ? 'advanced'`,
+		// 刷新按钮绑定
+		`$('btnRefreshDoctor').addEventListener('click', loadDoctor);`,
+	} {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("config doctor UI missing %q", marker)
+		}
+	}
+
+	// doctor 是只读诊断：前端不得出现任何写回端点的调用（PUT/POST/DELETE 到 /config）。
+	for _, forbidden := range []string{
+		`fetchJSON('/config/doctor', { method: 'PUT'`,
+		`fetchJSON('/config/doctor', { method: 'POST'`,
+		`fetchJSON('/config/doctor', { method: 'DELETE'`,
+	} {
+		if strings.Contains(html, forbidden) {
+			t.Fatalf("config doctor 页面出现写操作 %q，违反只读约定", forbidden)
+		}
+	}
 }

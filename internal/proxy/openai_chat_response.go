@@ -285,24 +285,144 @@ func asString(value any) string {
 	return text
 }
 
+// writeOpenAISSEContentDelta 写出一个只含指定增量文本的 chunk 并立即 flush。
+//
+// kind 取 "text" 或 "thinking"：前者映射到 OpenAI 的 delta.content，
+// 后者映射到 reasoning_content（与累积响应里的字段命名保持一致）。
+func writeOpenAISSEContentDelta(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	resp *provider.ChatResponse,
+	kind string,
+	text string,
+) error {
+	if text == "" || len(resp.Choices) == 0 {
+		return nil
+	}
+	field := "content"
+	if kind == "thinking" {
+		field = "reasoning_content"
+	}
+	return writeOpenAISSEChunk(w, flusher, resp, map[string]any{field: text})
+}
+
+// writeOpenAISSEChunk 写出一条只带 delta 的 SSE chunk 并立即 flush。
+//
+// 立即 flush 是流式增量性的必要条件：Go 的 http.ResponseWriter 会缓冲响应，
+// 只写不 flush 的话，即使上游是逐块读到的，客户端仍会看到内容"攒一批"才出现。
+func writeOpenAISSEChunk(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	resp *provider.ChatResponse,
+	delta map[string]any,
+) error {
+	if len(delta) == 0 {
+		return nil
+	}
+	chunk, err := json.Marshal(map[string]any{
+		"id":      resp.ID,
+		"object":  "chat.completion.chunk",
+		"created": resp.Created,
+		"model":   resp.Model,
+		"choices": []map[string]any{{"index": resp.Choices[0].Index, "delta": delta, "finish_reason": nil}},
+	})
+	if err != nil {
+		return err
+	}
+	if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", chunk); writeErr != nil {
+		return writeErr
+	}
+	flusher.Flush()
+	return nil
+}
+
+// writeOpenAISSEPrelude 设置 SSE 响应头并写出 role chunk，随后立即 flush。
+//
+// 先发 role chunk 并 flush，客户端可以立刻进入"流已开始"的状态，
+// 不必等到第一个 token 生成完毕。
+func writeOpenAISSEPrelude(w http.ResponseWriter, flusher http.Flusher, resp *provider.ChatResponse) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	roleChunk, err := json.Marshal(map[string]any{
+		"id":      resp.ID,
+		"object":  "chat.completion.chunk",
+		"created": resp.Created,
+		"model":   resp.Model,
+		"choices": []map[string]any{{"index": resp.Choices[0].Index, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}},
+	})
+	if err != nil {
+		return err
+	}
+	if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", roleChunk); writeErr != nil {
+		return writeErr
+	}
+	flusher.Flush()
+	return nil
+}
+
+// writeOpenAISSETail 写出 finish_reason 与终止帧 [DONE]，并 flush。
+//
+// 工具调用参数（tool_calls / function_call）必须在这里以**完整 JSON** 形式发出，
+// 而不是像文本那样逐片下发：工具参数是结构化 JSON，分片会破坏协议。
+// 因此增量模式下文本走 writeOpenAISSEContentDelta，工具调用在流末由此函数统一补发。
+func writeOpenAISSETail(w http.ResponseWriter, flusher http.Flusher, resp *provider.ChatResponse) error {
+	if len(resp.Choices) == 0 {
+		return nil
+	}
+	choice := resp.Choices[0]
+	finish := visualStudioFinishReason(choice.FinishReason)
+	finishChunk, err := json.Marshal(map[string]any{
+		"id":      resp.ID,
+		"object":  "chat.completion.chunk",
+		"created": resp.Created,
+		"model":   resp.Model,
+		"choices": []map[string]any{{"index": choice.Index, "delta": map[string]any{}, "finish_reason": finish}},
+	})
+	if err != nil {
+		return err
+	}
+	if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", finishChunk); writeErr != nil {
+		return writeErr
+	}
+	if _, writeErr := io.WriteString(w, "data: [DONE]\n\n"); writeErr != nil {
+		return writeErr
+	}
+	flusher.Flush()
+	return nil
+}
+
+// writeOpenAISSEFinalMessageDelta 补发无法增量表达的消息字段。
+//
+// 文本与思考已由增量回调逐片下发，这里只补"必须整体给出"的部分：
+//   - tool_calls / function_call：参数是结构化 JSON，分片会破坏协议
+//   - refusal：当前 Anthropic 转换器不会产生该字段，但非增量路径会下发它；
+//     这里保持同构，避免将来转换器支持 refusal 后只有流式路径丢字段
+func writeOpenAISSEFinalMessageDelta(w http.ResponseWriter, flusher http.Flusher, resp *provider.ChatResponse) error {
+	if len(resp.Choices) == 0 {
+		return nil
+	}
+	message := resp.Choices[0].Message
+	delta := map[string]any{}
+	if message.Refusal != "" {
+		delta["refusal"] = message.Refusal
+	}
+	if len(message.ToolCalls) > 0 {
+		delta["tool_calls"] = message.ToolCalls
+	}
+	if message.FunctionCall != nil {
+		delta["function_call"] = message.FunctionCall
+	}
+	return writeOpenAISSEChunk(w, flusher, resp, delta)
+}
+
 func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, resp *provider.ChatResponse) error {
 	if err := validateProviderResponseToolContract(resp); err != nil {
 		return err
 	}
 	choice := resp.Choices[0]
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if roleChunk, err := json.Marshal(map[string]any{
-		"id":      resp.ID,
-		"object":  "chat.completion.chunk",
-		"created": resp.Created,
-		"model":   resp.Model,
-		"choices": []map[string]any{{"index": choice.Index, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}},
-	}); err == nil {
-		if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", roleChunk); writeErr != nil {
-			return writeErr
-		}
+	if err := writeOpenAISSEPrelude(w, flusher, resp); err != nil {
+		return err
 	}
 	delta := map[string]any{}
 	if choice.Message.Content != "" {
@@ -323,40 +443,10 @@ func writeOpenAIChatResponseAsSSE(w http.ResponseWriter, flusher http.Flusher, r
 	if choice.Message.FunctionCall != nil {
 		delta["function_call"] = choice.Message.FunctionCall
 	}
-	if len(delta) > 0 {
-		contentChunk, err := json.Marshal(map[string]any{
-			"id":      resp.ID,
-			"object":  "chat.completion.chunk",
-			"created": resp.Created,
-			"model":   resp.Model,
-			"choices": []map[string]any{{"index": choice.Index, "delta": delta, "finish_reason": nil}},
-		})
-		if err != nil {
-			return err
-		}
-		if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", contentChunk); writeErr != nil {
-			return writeErr
-		}
-	}
-	finish := visualStudioFinishReason(choice.FinishReason)
-	finishChunk, err := json.Marshal(map[string]any{
-		"id":      resp.ID,
-		"object":  "chat.completion.chunk",
-		"created": resp.Created,
-		"model":   resp.Model,
-		"choices": []map[string]any{{"index": choice.Index, "delta": map[string]any{}, "finish_reason": finish}},
-	})
-	if err != nil {
+	if err := writeOpenAISSEChunk(w, flusher, resp, delta); err != nil {
 		return err
 	}
-	if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", finishChunk); writeErr != nil {
-		return writeErr
-	}
-	if _, writeErr := io.WriteString(w, "data: [DONE]\n\n"); writeErr != nil {
-		return writeErr
-	}
-	flusher.Flush()
-	return nil
+	return writeOpenAISSETail(w, flusher, resp)
 }
 
 func mergeOpenAIStreamToolCalls(acc map[int]map[string]any, chunks []any) {

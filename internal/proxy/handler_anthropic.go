@@ -25,6 +25,15 @@ import (
 // Anthropic 格式。流式场景同时处理 OpenAI SSE → Anthropic event-based SSE 的转换。
 // ---------------------------------------------------------------------------
 
+// anthropicUpstreamClient 是 anthropic 直通/转换路径共用的上游 HTTP 客户端。
+//
+// 为什么不用 http.DefaultClient：它没有连接池纪律（无 keep-alive 复用、
+// 无拨号/TLS/空闲超时、不走环境代理），云主机部署下每次请求都可能新建 TLS 握手。
+// 为什么 Timeout 必须为 0：本包 5 个调用点全部由 ctx/请求上下文约束生命周期，
+// 且包含流式读取——client.Timeout 会连同流式 body 一起计时，设置它等于给长回复
+// 埋雷。这与 OpenAI 流式路径在 doChatStream 中清零 client.Timeout 是同一决策。
+var anthropicUpstreamClient = provider.NewProviderHTTPClient(0)
+
 // anthropicMessage 是 Anthropic Messages API 中 messages 数组的元素。
 type anthropicMessage struct {
 	Role    string          `json:"role"`
@@ -105,11 +114,25 @@ type anthropicStreamEvent struct {
 }
 
 type anthropicStreamDelta struct {
-	Type         string `json:"type,omitempty"`
-	Text         string `json:"text,omitempty"`
+	Type string `json:"type,omitempty"`
+	Text string `json:"text,omitempty"`
+	// Thinking 是 thinking_delta 的真实线格式字段。
+	// Anthropic 发的是 {"type":"thinking_delta","thinking":"..."}，
+	// 而不是 text；缺这个字段会让扩展思考内容被静默丢弃，
+	// 表现为下游 reasoning_content 只剩下 content_block_start 里的开头一小段。
+	Thinking     string `json:"thinking,omitempty"`
 	StopReason   string `json:"stop_reason,omitempty"`
 	StopSequence string `json:"stop_sequence,omitempty"`
 	PartialJSON  string `json:"partial_json,omitempty"`
+}
+
+// thinkingText 取 thinking_delta 的文本，兼容两种线格式：
+// 规范字段 thinking，以及部分网关误用的 text。
+func (d anthropicStreamDelta) thinkingText() string {
+	if d.Thinking != "" {
+		return d.Thinking
+	}
+	return d.Text
 }
 
 // ---------------------------------------------------------------------------
@@ -403,9 +426,18 @@ func chatRequestToAnthropicRequest(req *provider.ChatRequest) *anthropicRequest 
 
 // anthropicResponseToChatResponse 将 Anthropic 格式的响应转换为内部 ChatResponse。
 // 这是 chatResponseToAnthropicResponse 的逆操作，用于 OpenAI 客户端 → Anthropic 上游的场景。
+// anthropicClientFacingID 把 Anthropic 的 message id 规范化成 OpenAI 风格的 id。
+//
+// 流式首帧（role chunk）、流式增量帧、末帧（finish），以及非流式响应与缓存，
+// 必须共用同一规则；否则同一个请求在下游会出现两个不同的 id，
+// 客户端按 id 关联分片时会错乱。
+func anthropicClientFacingID(raw string) string {
+	return strings.TrimPrefix(raw, "msg_")
+}
+
 func anthropicResponseToChatResponse(anthropicResp *anthropicResponse) *provider.ChatResponse {
 	resp := &provider.ChatResponse{
-		ID:     strings.TrimPrefix(anthropicResp.ID, "msg_"),
+		ID:     anthropicClientFacingID(anthropicResp.ID),
 		Object: "chat.completion",
 		Model:  anthropicResp.Model,
 	}
@@ -575,7 +607,7 @@ func SendAnthropicChatRequestWithPath(ctx context.Context, upstreamBase string, 
 	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	httpResp, err := http.DefaultClient.Do(httpReq)
+	httpResp, err := anthropicUpstreamClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic 上游请求失败: %w", err)
 	}
@@ -614,6 +646,39 @@ func SendAnthropicChatRequestWithPath(ctx context.Context, upstreamBase string, 
 // OpenAI SSE 契约写出。这样输入输出都与非流式路径完全同构，避免出现第三套
 // 只在流式下生效的转换分支。
 func SendAnthropicChatStreamRequest(ctx context.Context, upstreamBase string, chatPath string, apiKey string, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	return sendAnthropicChatStreamRequestWithHooks(ctx, upstreamBase, chatPath, apiKey, req, nil, nil)
+}
+
+// SendAnthropicChatStreamRequestWithDelta 在读取上游 Anthropic SSE 的同时，
+// 对每个文本/思考增量立即回调 onDelta，使调用方能够边收边吐。
+//
+// 与 SendAnthropicChatStreamRequest 的唯一区别就是多了这个回调；
+// onDelta 为 nil 时两者完全等价。累积语义不变：返回值仍是完整的 ChatResponse，
+// 因此工具调用、finish_reason、usage 等仍按原有逻辑在流末统一处理。
+//
+// onDelta 返回错误时读取立即中止并把该错误返回给调用方，
+// 用于在客户端断开后尽快释放上游连接。
+func SendAnthropicChatStreamRequestWithDelta(
+	ctx context.Context,
+	upstreamBase string,
+	chatPath string,
+	apiKey string,
+	req *provider.ChatRequest,
+	onDelta func(kind string, text string) error,
+	onStart func(id string, model string),
+) (*provider.ChatResponse, error) {
+	return sendAnthropicChatStreamRequestWithHooks(ctx, upstreamBase, chatPath, apiKey, req, onDelta, onStart)
+}
+
+func sendAnthropicChatStreamRequestWithHooks(
+	ctx context.Context,
+	upstreamBase string,
+	chatPath string,
+	apiKey string,
+	req *provider.ChatRequest,
+	onDelta func(kind string, text string) error,
+	onStart func(id string, model string),
+) (*provider.ChatResponse, error) {
 	streamReq := cloneChatRequest(req)
 	streamReq.Stream = true
 	anthropicReq := chatRequestToAnthropicRequest(streamReq)
@@ -631,7 +696,7 @@ func SendAnthropicChatStreamRequest(ctx context.Context, upstreamBase string, ch
 	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	httpResp, err := http.DefaultClient.Do(httpReq)
+	httpResp, err := anthropicUpstreamClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic 流式上游请求失败: %w", err)
 	}
@@ -642,7 +707,7 @@ func SendAnthropicChatStreamRequest(ctx context.Context, upstreamBase string, ch
 		return nil, fmt.Errorf("anthropic 流式上游返回 %d: %s", httpResp.StatusCode, string(respBody))
 	}
 
-	acc := newAnthropicStreamAccumulator()
+	acc := newAnthropicStreamAccumulatorWithDelta(onDelta, onStart)
 	// 读取放在独立 goroutine 中，主流程只等待「终态已到」或「读取结束」两个信号。
 	//
 	// 为什么不能直接在主流程里 for scanner.Scan()：
@@ -651,15 +716,15 @@ func SendAnthropicChatStreamRequest(ctx context.Context, upstreamBase string, ch
 	// 常见行为），Scan() 会永久阻塞，主流程根本没有机会判断 sawTerminal，
 	// 请求就会挂到超时。这里用完成通道让主流程能在终态到达时立即返回，
 	// 不依赖上游关闭 body。
-	type readResult struct {
-		err error
-	}
-	readDone := make(chan readResult, 1)
+	// readDone 只广播"读取 goroutine 已收口"，不承载错误：
+	// 错误一律经 readResultErr 投递（见 publishDispatchErr）。
+	// 这里刻意用 struct{} 而非带 err 字段的结构体——后者会让人误以为
+	// 错误也走这条通道，而实际上从来没有人往里发送过值（只 close）。
+	readDone := make(chan struct{})
 	readResultErr := make(chan error, 1)
 	terminalSeen := make(chan struct{})
 
 	go func() {
-		defer close(readDone)
 		// 为什么不用 bufio.Scanner / ReadString：
 		// 两者对「末尾没有换行符的行」都必须等到 EOF 才返回（已实测验证）。
 		// 若上游把 message_stop 作为最后一行且不补换行、同时保持连接不关闭
@@ -672,6 +737,30 @@ func SendAnthropicChatStreamRequest(ctx context.Context, upstreamBase string, ch
 		var dataLines []string
 		var dispatchErr error
 		var pending strings.Builder
+
+		// publishDispatchErr 把读取阶段记录的解析/协议错误交给主流程。
+		//
+		// 必须在唤醒主流程**之前**调用。主流程被 terminalSeen 唤醒后，对 readResultErr
+		// 只做一次非阻塞读；若此刻错误还没进通道，它就会被静默丢弃，下游只能看到
+		// "缺少内容"的泛化失败，丢掉真实原因（例如上游 overloaded_error）。
+		// 这不是理论风险：8 worker 并发、GOMAXPROCS=8 下实测约 0.4%~0.8% 的请求
+		// 会命中该窗口，表现为 err==nil + 半截内容，调用方把截断的流当成功收尾。
+		publishDispatchErr := func() {
+			if dispatchErr == nil {
+				return
+			}
+			select {
+			case readResultErr <- dispatchErr:
+			default:
+			}
+		}
+		// defer 统一收口完成信号，覆盖函数体内每一条 return 路径。
+		// 对"读到 EOF 自然结束"这条路径，它是唯一的错误投递点（该路径不调用 signalTerminal）；
+		// 对提前退出路径，错误已由 signalTerminal 投递，这里的重复发送会被 default 丢弃。
+		defer func() {
+			publishDispatchErr()
+			close(readDone)
+		}()
 		dispatch := func() {
 			if dispatchErr != nil || len(dataLines) == 0 {
 				currentEvent = ""
@@ -691,6 +780,9 @@ func SendAnthropicChatStreamRequest(ctx context.Context, upstreamBase string, ch
 			dispatchErr = acc.consume(payload)
 		}
 		signalTerminal := func() {
+			// 必须在唤醒主流程**之前**投递错误：主流程被唤醒后对 readResultErr
+			// 只做一次非阻塞读，若此时错误尚未入队就会被静默丢弃。
+			publishDispatchErr()
 			select {
 			case terminalSeen <- struct{}{}:
 			default:
@@ -749,32 +841,29 @@ func SendAnthropicChatStreamRequest(ctx context.Context, upstreamBase string, ch
 						return
 					}
 				}
+				// 回调出错（典型：下游客户端已断开）或上游 error 事件之后，
+				// 继续读取没有任何意义：消费方已经不在了，只会白占连接与带宽。
+				// 这里主动结束，让错误尽快回到主流程。
+				if dispatchErr != nil {
+					signalTerminal()
+					return
+				}
 			}
 			if readErr != nil {
 				break
 			}
 		}
 		// 上游未以空行结束最后一个事件时（部分网关直接关闭连接），仍要提交它。
+		// dispatchErr（上游 error 事件 / 回调失败）由上面的 defer 统一传回主流程。
 		dispatch()
-		// dispatchErr 是闭包内累积的解析/协议错误（例如上游 error 事件）。
-		// 必须经 readDone 传回主流程，否则错误会被静默吞掉，
-		// 只在下游表现成"缺少内容"的泛化失败，丢失真实原因。
-		if dispatchErr != nil {
-			select {
-			case readResultErr <- dispatchErr:
-			default:
-			}
-		}
 	}()
 
 	select {
 	case <-terminalSeen:
 		// 终态已到，无需等待上游关闭 body。注意：终态信号可能早于读取 goroutine
 		// 完全退出，因此下面仍要检查已记录的解析错误。
-	case res := <-readDone:
-		if res.err != nil {
-			return nil, res.err
-		}
+	case <-readDone:
+		// 读取 goroutine 已收口（EOF 路径）。错误同样只在下面统一读取。
 	}
 
 	// 解析过程中若产生过错误（如上游 error 事件），必须优先返回它，
@@ -813,6 +902,15 @@ type anthropicStreamAccumulator struct {
 	// 协议只保证 index 唯一且递增，不保证从 0 开始连续（上游可能跳过序号），
 	// 因此绝不能用切片位置当协议 index 使用。
 	blockPos map[int]int
+	// onDelta 在收到文本/思考增量时立即回调，使调用方能够"边收边吐"。
+	// 这是流式增量性的实现基础：若不回调、等整条流读完再一次性写出，
+	// 功能断言仍会通过，但用户要等整段回复生成完才看到任何输出。
+	// 回调返回错误（例如下游客户端已断开）会中止读取并向上传播。
+	onDelta func(kind string, text string) error
+	// onStart 在 message_start 解析后立即回调，让调用方能在收到第一个增量之前
+	// 就用真实的上游 id / model 写出流起始帧（OpenAI 的 role chunk）。
+	// 若不回调，调用方只能用占位 id，导致首帧与末帧的 id 不一致。
+	onStart func(id string, model string)
 	// sawTerminal 记录是否已收到 message_stop。
 	// Anthropic 的 SSE 是应用层协议：上游可能在 message_stop 之后继续挂住连接
 	// （等待复用或延迟关闭 body），因此读取循环必须据此结束，而不能等待传输层 EOF。
@@ -824,6 +922,15 @@ type anthropicStreamAccumulator struct {
 }
 
 func newAnthropicStreamAccumulator() *anthropicStreamAccumulator {
+	return newAnthropicStreamAccumulatorWithDelta(nil, nil)
+}
+
+// newAnthropicStreamAccumulatorWithDelta 允许调用方注入增量回调。
+// onDelta 为 nil 时行为与原来完全一致（只累积，不回调）。
+func newAnthropicStreamAccumulatorWithDelta(
+	onDelta func(kind string, text string) error,
+	onStart func(id string, model string),
+) *anthropicStreamAccumulator {
 	return &anthropicStreamAccumulator{
 		resp: &anthropicResponse{
 			Type: "message",
@@ -832,6 +939,8 @@ func newAnthropicStreamAccumulator() *anthropicStreamAccumulator {
 		toolInputJSON: map[int]*strings.Builder{},
 		toolInputSeen: map[int]bool{},
 		blockPos:      map[int]int{},
+		onDelta:       onDelta,
+		onStart:       onStart,
 	}
 }
 
@@ -851,6 +960,10 @@ func (a *anthropicStreamAccumulator) consume(payload string) error {
 			if event.Message.Model != "" {
 				a.resp.Model = event.Message.Model
 			}
+			// 透出真实 id/model，让调用方在首个增量到达前就能写出正确的起始帧。
+			if a.onStart != nil {
+				a.onStart(event.Message.ID, event.Message.Model)
+			}
 			if event.Message.Role != "" {
 				a.resp.Role = event.Message.Role
 			}
@@ -866,14 +979,34 @@ func (a *anthropicStreamAccumulator) consume(payload string) error {
 		if event.ContentBlock != nil {
 			block = *event.ContentBlock
 		}
-		// tool_use 的 input 在流式下由 input_json_delta 分片给出，这里先清空，
-		// 避免把 start 事件里的空对象 {} 当成最终参数。
+		// tool_use 的 input 通常由 input_json_delta 分片给出；但部分网关会把
+		// 完整参数直接放在 content_block_start 里（没有 delta）。因此这里**保留**
+		// 原始 Input 作为回退，改由 response() 在"确实收到过 delta"时优先使用
+		// 累积结果。若在此处清空，这类网关的工具参数会变成 {}，工具静默失效。
 		if block.Type == "tool_use" {
-			block.Input = nil
 			a.toolInputJSON[event.Index] = &strings.Builder{}
 		}
 		a.blockPos[event.Index] = len(a.blocks)
 		a.blocks = append(a.blocks, block)
+		// content_block_start 可以自带初始文本（协议允许，部分网关会这么发）。
+		// 这部分内容不属于任何 delta，若不在这里回调就会在增量模式下丢失，
+		// 导致下游内容比上游少一截。放在 append 之后回调可保证顺序正确。
+		if a.onDelta != nil {
+			switch block.Type {
+			case "text":
+				if block.Text != "" {
+					if err := a.onDelta("text", block.Text); err != nil {
+						return err
+					}
+				}
+			case "thinking":
+				if block.Thinking != "" {
+					if err := a.onDelta("thinking", block.Thinking); err != nil {
+						return err
+					}
+				}
+			}
+		}
 	case "content_block_delta":
 		if event.Delta == nil {
 			break
@@ -886,8 +1019,21 @@ func (a *anthropicStreamAccumulator) consume(payload string) error {
 		switch event.Delta.Type {
 		case "text_delta":
 			a.blocks[pos].Text += event.Delta.Text
+			// 累积之后立即回调：调用方据此写出下游 chunk 并 flush，
+			// 使用户无需等待整段回复生成完毕。
+			if a.onDelta != nil && event.Delta.Text != "" {
+				if err := a.onDelta("text", event.Delta.Text); err != nil {
+					return err
+				}
+			}
 		case "thinking_delta":
-			a.blocks[pos].Thinking += event.Delta.Text
+			thinking := event.Delta.thinkingText()
+			a.blocks[pos].Thinking += thinking
+			if a.onDelta != nil && thinking != "" {
+				if err := a.onDelta("thinking", thinking); err != nil {
+					return err
+				}
+			}
 		case "input_json_delta":
 			if builder, ok := a.toolInputJSON[event.Index]; ok {
 				builder.WriteString(event.Delta.PartialJSON)
@@ -938,13 +1084,14 @@ func (a *anthropicStreamAccumulator) response() *provider.ChatResponse {
 			if builder, ok := a.toolInputJSON[protoIndex]; ok {
 				raw = strings.TrimSpace(builder.String())
 			}
-			// 上游没有发 input_json_delta（例如非流式补齐或空参数工具）时，
-			// 退化为空对象，保证 tool_use 的 input 始终是合法 JSON。
-			if !a.toolInputSeen[protoIndex] || raw == "" {
-				block.Input = json.RawMessage(`{}`)
-			} else if json.Valid([]byte(raw)) {
+			// 优先级：input_json_delta 累积结果 > content_block_start 自带的 input > {}。
+			// 无论走哪条分支，最终都必须是合法 JSON，否则 VS 无法解析工具参数。
+			switch {
+			case a.toolInputSeen[protoIndex] && raw != "" && json.Valid([]byte(raw)):
 				block.Input = json.RawMessage(raw)
-			} else {
+			case len(block.Input) > 0 && json.Valid(block.Input) && !isJSONEmptyObject(block.Input):
+				// 网关把完整参数放在 start 块里、没有 delta：保留它。
+			default:
 				block.Input = json.RawMessage(`{}`)
 			}
 		}
@@ -954,86 +1101,29 @@ func (a *anthropicStreamAccumulator) response() *provider.ChatResponse {
 	return anthropicResponseToChatResponse(a.resp)
 }
 
-// SendAnthropicChatStreamContent 只服务管理端“非流式失败后流式兜底”的健康检查。
-// 它解析 Anthropic 原生 SSE 的 text_delta，而不是复用 OpenAI stream parser；
-// 否则 anthropic 类型 provider 会在兜底阶段把 OpenAI 协议打到 Anthropic endpoint。
+// SendAnthropicChatStreamContent 只服务管理端"非流式失败后流式兜底"的健康检查，
+// 返回上游流式响应里累积到的正文文本。
+//
+// 实现上直接复用 SendAnthropicChatStreamRequest，而不是另写一套 SSE 解析。
+// 原因：这个函数原先自己用 bufio.Scanner + 只认 "[DONE]" 终止，而 Anthropic
+// 协议根本不发 [DONE]（它发 message_stop），因此它只能等传输层 EOF。
+// 实测确认：上游发完 message_stop 后保持连接不关闭时，该函数会一直挂到
+// ctx 超时（ctx 设 3s 就返回 3s，设 7s 就返回 7s），管理页兜底探测随之卡住。
+// 复用主读取器可同时获得：message_stop 终态识别、无换行终态、多行 data 拼接、
+// error 事件上报，且不必维护第二套会再次漂移的解析逻辑。
 func SendAnthropicChatStreamContent(ctx context.Context, upstreamBase string, chatPath string, apiKey string, req *provider.ChatRequest) (string, error) {
-	streamReq := cloneChatRequest(req)
-	streamReq.Stream = true
-	anthropicReq := chatRequestToAnthropicRequest(streamReq)
-	body, err := marshalAnthropicRequestBody(anthropicReq, streamReq.Extra)
+	resp, err := SendAnthropicChatStreamRequest(ctx, upstreamBase, chatPath, apiKey, req)
 	if err != nil {
-		return "", fmt.Errorf("anthropic 流式请求序列化失败: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicUpstreamURL(upstreamBase, chatPath), bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("anthropic 流式请求创建失败: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	httpResp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("anthropic 流式上游请求失败: %w", err)
-	}
-	defer httpResp.Body.Close()
-	if httpResp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(httpResp.Body)
-		return "", fmt.Errorf("anthropic 流式上游返回 %d: %s", httpResp.StatusCode, string(respBody))
-	}
-
-	scanner := bufio.NewScanner(httpResp.Body)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var content strings.Builder
-	currentEvent := ""
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-		if strings.HasPrefix(line, "event:") {
-			currentEvent = strings.TrimSpace(line[len("event:"):])
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(line[len("data:"):])
-		if payload == "[DONE]" {
-			break
-		}
-		if currentEvent == "error" {
-			return "", fmt.Errorf("Anthropic 流式错误事件: %s", anthropicErrorMessageFromPayload(payload))
-		}
-		content.WriteString(anthropicStreamTextDelta(payload))
-	}
-	if err := scanner.Err(); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(content.String()) == "" {
+	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("Anthropic 流式响应没有返回文本内容")
 	}
-	return content.String(), nil
-}
-
-func anthropicStreamTextDelta(payload string) string {
-	var event struct {
-		Type  string `json:"type"`
-		Delta struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"delta"`
+	content := resp.Choices[0].Message.Content
+	if strings.TrimSpace(content) == "" {
+		return "", fmt.Errorf("Anthropic 流式响应没有返回文本内容")
 	}
-	if err := json.Unmarshal([]byte(payload), &event); err != nil {
-		return ""
-	}
-	if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
-		return event.Delta.Text
-	}
-	return ""
+	return content, nil
 }
 
 func anthropicErrorMessageFromPayload(payload string) string {
@@ -1691,7 +1781,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			streamReq := anthropicReq.Stream
 			if streamReq {
 				streamWriter := &streamAttemptWriter{ResponseWriter: w}
-				err := s.handleAnthropicPassthroughStream(streamWriter, r, prov, originalBody, modelName)
+				err := s.handleAnthropicPassthroughStream(streamWriter, r, cfg, prov, originalBody, modelName)
 				cancel()
 				if err != nil {
 					if isClientGoneError(err) {
@@ -1717,7 +1807,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			}
 
 			// 非流式直通转发
-			err := s.forwardAnthropicRequest(ctx, w, r, prov, originalBody, modelName)
+			err := s.forwardAnthropicRequest(ctx, cfg, w, r, prov, originalBody, modelName)
 			cancel()
 			if err != nil {
 				if isClientGoneError(err) {
@@ -1967,8 +2057,12 @@ func (s *Server) handleAnthropicStream(
 // forwardAnthropicRequest 非流式直通转发：将原始 Anthropic 请求体 POST 到上游 {base_url}/v1/messages。
 // 注意：原始请求体中的 model 可能包含 @provider 后缀（如 LongCat-2.0@longcat2），
 // 需要清理后再发送给上游，因为上游不认识这个后缀。
-func (s *Server) forwardAnthropicRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, prov provider.Provider, originalBody []byte, modelName string) error {
-	upstreamBase, chatPath, apiKey, ok := anthropicProviderUpstreamConfig(s.config, prov.Name())
+// forwardAnthropicRequest 非流式直通转发。
+//
+// cfg 必须是调用方在请求开始时取得的快照：Reconfigure 会在 s.mu 保护下替换
+// s.config，若这里直接读 s.config，配置热更新与在途请求并发时构成数据竞争。
+func (s *Server) forwardAnthropicRequest(ctx context.Context, cfg *config.AppConfig, w http.ResponseWriter, r *http.Request, prov provider.Provider, originalBody []byte, modelName string) error {
+	upstreamBase, chatPath, apiKey, ok := anthropicProviderUpstreamConfig(cfg, prov.Name())
 	if !ok {
 		return fmt.Errorf("anthropic passthrough: 无法找到 provider %q 的 base_url", prov.Name())
 	}
@@ -2006,7 +2100,7 @@ func (s *Server) forwardAnthropicRequest(ctx context.Context, w http.ResponseWri
 	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpResp, err := http.DefaultClient.Do(httpReq)
+	httpResp, err := anthropicUpstreamClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("anthropic passthrough: 上游请求失败: %w", err)
 	}
@@ -2029,9 +2123,13 @@ func (s *Server) forwardAnthropicRequest(ctx context.Context, w http.ResponseWri
 }
 
 // handleAnthropicPassthroughStream 流式直通转发：将原始 Anthropic 流式请求转发到上游。
+// handleAnthropicPassthroughStream 流式直通转发。
+//
+// cfg 同样必须是请求开始时取得的快照，理由见 forwardAnthropicRequest。
 func (s *Server) handleAnthropicPassthroughStream(
 	w http.ResponseWriter,
 	r *http.Request,
+	cfg *config.AppConfig,
 	prov provider.Provider,
 	originalBody []byte,
 	modelName string,
@@ -2042,7 +2140,7 @@ func (s *Server) handleAnthropicPassthroughStream(
 		return fmt.Errorf("response writer does not support flushing")
 	}
 
-	upstreamBase, chatPath, apiKey, ok := anthropicProviderUpstreamConfig(s.config, prov.Name())
+	upstreamBase, chatPath, apiKey, ok := anthropicProviderUpstreamConfig(cfg, prov.Name())
 	if !ok {
 		return fmt.Errorf("anthropic passthrough stream: 无法找到 provider %q 的 base_url", prov.Name())
 	}
@@ -2079,7 +2177,7 @@ func (s *Server) handleAnthropicPassthroughStream(
 	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpResp, err := http.DefaultClient.Do(httpReq)
+	httpResp, err := anthropicUpstreamClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("anthropic passthrough stream: 上游请求失败: %w", err)
 	}
@@ -2115,4 +2213,11 @@ func (s *Server) handleAnthropicPassthroughStream(
 		}
 	}
 	return nil
+}
+
+// isJSONEmptyObject 判断 RawMessage 是否为空对象（忽略空白）。
+// 用于区分"网关真的给了参数"与"start 块里的占位 {}"。
+func isJSONEmptyObject(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed == "" || trimmed == "{}"
 }

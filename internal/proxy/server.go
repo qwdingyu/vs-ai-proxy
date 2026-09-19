@@ -1541,6 +1541,54 @@ func readRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]
 // 契约：上游收到 Anthropic Messages 请求体，下游 Visual Studio 收到标准
 // OpenAI SSE（choices[].delta + finish_reason + data: [DONE]）。
 // 请求转换与鉴权头复用非流式路径的同一组 helper，确保两条链路不会漂移。
+// openAIStreamEmitter 把 Anthropic 上游的增量事件即时翻译成 OpenAI SSE 并下发。
+//
+// 为什么需要它：Anthropic 的消息是逐事件到达的，而 OpenAI SSE 的下游契约要求
+// 每个 delta 立刻可见。若先把整条上游流读进内存、再一次性写出，
+// 功能断言（最终内容、finish_reason、[DONE]）全部成立，但用户会等到整段回复
+// 生成完毕才看到任何输出——实测上游间隔 1 秒发 3 个 token 时，
+// 聚合实现让下游在 3.03 秒时一次性收到全部内容。因此必须"边收边吐"。
+type openAIStreamEmitter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	resp    *provider.ChatResponse
+	started bool
+}
+
+// onStart 在收到上游 message_start 时记录真实 id/model。
+// 故意不在这里写首帧：这一刻还没有任何增量，也无法确认上游接下来是否报错；
+// 真正的写出推迟到第一个增量（或流结束时），避免在下游留下半个流。
+func (e *openAIStreamEmitter) onStart(id string, model string) {
+	// 必须用与非流式转换相同的规范化规则，否则首帧 id（msg_xxx）
+	// 会与末帧 id（去前缀后的 xxx）不一致。
+	if id != "" {
+		e.resp.ID = anthropicClientFacingID(id)
+	}
+	if model != "" {
+		e.resp.Model = model
+	}
+}
+
+// ensureStarted 幂等地写出 SSE 头与 role chunk，使客户端立即进入流状态。
+func (e *openAIStreamEmitter) ensureStarted() error {
+	if e.started {
+		return nil
+	}
+	if err := writeOpenAISSEPrelude(e.w, e.flusher, e.resp); err != nil {
+		return err
+	}
+	e.started = true
+	return nil
+}
+
+// onDelta 立即下发一个内容增量。返回错误（如下游断开）会中止上游读取。
+func (e *openAIStreamEmitter) onDelta(kind string, text string) error {
+	if err := e.ensureStarted(); err != nil {
+		return err
+	}
+	return writeOpenAISSEContentDelta(e.w, e.flusher, e.resp, kind, text)
+}
+
 func (s *Server) streamAnthropicAsOpenAI(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -1559,7 +1607,27 @@ func (s *Server) streamAnthropicAsOpenAI(
 		return fmt.Errorf("anthropic 流式: 无法找到 provider %q 的 base_url", prov.Name())
 	}
 
-	resp, err := SendAnthropicChatStreamRequest(ctx, baseURL, chatPath, apiKey, req)
+	// flush 能力必须在开始读取上游之前确认：一旦开始增量下发，
+	// 没有 flush 就退化成"缓冲到最后一次性输出"，与聚合实现同样糟糕。
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return fmt.Errorf("anthropic 流式: response writer 不支持 flush")
+	}
+
+	emitter := &openAIStreamEmitter{
+		w:       w,
+		flusher: flusher,
+		resp: &provider.ChatResponse{
+			Created: time.Now().Unix(),
+			Model:   req.Model,
+			Choices: []provider.Choice{{Index: 0}},
+		},
+	}
+
+	resp, err := SendAnthropicChatStreamRequestWithDelta(
+		ctx, baseURL, chatPath, apiKey, req,
+		emitter.onDelta, emitter.onStart,
+	)
 	if err != nil {
 		return fmt.Errorf("anthropic 流式: %w", err)
 	}
@@ -1583,13 +1651,24 @@ func (s *Server) streamAnthropicAsOpenAI(
 	setToolOutcomeDiagnosticHeader(w, req, resp)
 	setResponseUsage(w, resp.Usage)
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return fmt.Errorf("anthropic 流式: response writer 不支持 flush")
+	// 收尾只替换 choices（工具调用、finish_reason、index 都在里面）。
+	// 刻意不覆盖 ID / Created / Model：它们已在首帧与增量帧中下发，
+	// 收尾再改会让同一请求的首尾字段不一致（转换器会去掉 msg_ 前缀，
+	// 而 message_start 给的是原始 id，二者不同源）。
+	emitter.resp.Choices = resp.Choices
+
+	// 工具调用无法增量表达：参数是结构化 JSON，分片会破坏协议，
+	// 因此文本走增量、工具调用在流末以完整 JSON 统一补发。
+	if err := emitter.ensureStarted(); err != nil {
+		return fmt.Errorf("anthropic 流式: 写出 SSE 首帧失败: %w", err)
 	}
-	if err := writeOpenAIChatResponseAsSSE(w, flusher, resp); err != nil {
-		return fmt.Errorf("anthropic 流式: 写出 OpenAI SSE 失败: %w", err)
+	if err := writeOpenAISSEFinalMessageDelta(w, flusher, emitter.resp); err != nil {
+		return fmt.Errorf("anthropic 流式: 写出流末消息字段失败: %w", err)
 	}
+	if err := writeOpenAISSETail(w, flusher, emitter.resp); err != nil {
+		return fmt.Errorf("anthropic 流式: 写出终止帧失败: %w", err)
+	}
+
 	s.cacheChatResponse(resp)
 	return nil
 }

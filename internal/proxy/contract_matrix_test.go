@@ -9,11 +9,19 @@ package proxy
 // 执行的矩阵，作为 make release-gate 的组成部分，任何新 provider 类型或协议
 // 分支改动都必须先过这里。
 //
-// 矩阵维度（v1）：
-//   上游类型   {openai, anthropic}
+// 矩阵维度（v1.1）：
+//   上游类型   {openai, anthropic}      （ollama 上游见 integration_test.go 的专项用例）
 //   请求模式   {stream, non-stream}
-//   响应形态   {纯文本, 工具调用, 200 错误体, 上游截断, 上游 error 事件, 终态缺省}
+//   响应形态   {纯文本, 工具调用(分片/start块内联), 扩展思考(thinking_delta),
+//               200 错误体, 上游截断, 上游 error 事件, 终态缺省}
 //   客户端入口 {/v1/chat/completions, /v1/messages, /api/chat}
+//
+// v1.1 增补说明：下面三条用例对应两个**真实发生过的漏检**——
+//   - thinking_delta 的实际字段名是 "thinking"，此前结构体缺失该字段，
+//     矩阵与单测又都用了错误的 "text"，导致思考内容被静默丢弃；
+//   - 部分网关把完整工具参数放在 content_block_start 的 input 里，
+//     此前该 input 被主动清空，工具参数退化为 {}。
+// 这两类缺陷在 v1.0 矩阵下全绿，因此必须显式覆盖。
 //
 // 关键断言设计：
 //   1. 增量性：流式必须边收边吐。用通道门控（upstream 写一半后阻塞等待下游
@@ -28,6 +36,7 @@ package proxy
 
 import (
 	"bufio"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -384,9 +393,40 @@ func TestMatrix_ChatCompletions_Anthropic_Stream_TerminalWithoutNewlineOrEOF(t *
 	drainLines(t, lines, &sb)
 	body := sb.String()
 	assertOpenAIStreamContract(t, body)
-	if !strings.Contains(body, "Hello") {
-		t.Errorf("下游缺少聚合文本 Hello:\n%s", body)
+	// 文本是增量下发的（"Hel" + "lo"），不能在原始 body 里直接找 "Hello"；
+	// 按 delta 累加后再比对。增量性本身由 handler_anthropic_incremental_test.go 保证。
+	if got := assembleStreamContent(t, body); got != "Hello" {
+		t.Errorf("下游累加文本 = %q, want %q:\n%s", got, "Hello", body)
 	}
+}
+
+// assembleStreamContent 把 OpenAI SSE body 里所有 delta.content 按顺序拼接，
+// 用于在"增量下发"语义下校验内容完整性。
+func assembleStreamContent(t *testing.T, body string) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil || len(chunk.Choices) == 0 {
+			continue
+		}
+		sb.WriteString(chunk.Choices[0].Delta.Content)
+	}
+	return sb.String()
 }
 
 func TestMatrix_ChatCompletions_Anthropic_Stream_ToolUseInputJSONDelta(t *testing.T) {
@@ -536,5 +576,218 @@ func TestMatrix_OllamaClient_OpenAIProvider_StreamNDJSON(t *testing.T) {
 	}
 	if strings.Contains(body, "data: ") {
 		t.Errorf("/api/chat 下游不得出现 SSE data: 前缀（应为 NDJSON）:\n%s", body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 以下三条是补齐的矩阵缺口：都是被测出过的真实缺陷形态，
+// 原先不在矩阵里，导致"矩阵全绿"也无法拦截。
+// ---------------------------------------------------------------------------
+
+// thinking_delta 的线格式字段是 "thinking" 而不是 "text"。
+// 此前 anthropicStreamDelta 缺 Thinking 字段，思考内容被静默丢弃，
+// 而矩阵与旧测试都用错字段，双双漏检。
+func TestMatrix_ChatCompletions_Anthropic_Stream_ThinkingDeltaContract(t *testing.T) {
+	upstream := newMatrixUpstream(t, "v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		write := func(s string) { _, _ = w.Write([]byte(s)) }
+		write("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_think\",\"type\":\"message\",\"role\":\"assistant\"}}\n\n")
+		write("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n")
+		// 真实线格式：字段名是 thinking
+		write("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"STEP-ONE\"}}\n\n")
+		write("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"-STEP-TWO\"}}\n\n")
+		write("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		write("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		write("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"ANSWER\"}}\n\n")
+		write("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+		write("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		write("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	})
+	defer upstream.Close()
+
+	handler := newMatrixServer(t, "anthropic", "v1/messages", upstream.URL)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, lines := openStream(t, ts, "/v1/chat/completions",
+		`{"model":"`+matrixModel+`","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body := collectLines(t, lines)
+	assertOpenAIStreamContract(t, body)
+
+	var reasoning, content string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil || len(chunk.Choices) == 0 {
+			continue
+		}
+		reasoning += chunk.Choices[0].Delta.ReasoningContent
+		content += chunk.Choices[0].Delta.Content
+	}
+	if reasoning != "STEP-ONE-STEP-TWO" {
+		t.Errorf("thinking_delta 未完整映射到 reasoning_content: got %q, want %q\n%s",
+			reasoning, "STEP-ONE-STEP-TWO", body)
+	}
+	if content != "ANSWER" {
+		t.Errorf("正文内容不正确: got %q, want %q", content, "ANSWER")
+	}
+}
+
+// 部分网关把完整工具参数直接放在 content_block_start 的 input 里、
+// 不发 input_json_delta。此前该 input 被主动清空，工具参数会退化成 {}，
+// 工具静默失效（VS 收到调用却没有可执行参数）。
+func TestMatrix_ChatCompletions_Anthropic_Stream_ToolInputInStartBlock(t *testing.T) {
+	upstream := newMatrixUpstream(t, "v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		write := func(s string) { _, _ = w.Write([]byte(s)) }
+		write("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_toolstart\",\"type\":\"message\",\"role\":\"assistant\"}}\n\n")
+		// 完整参数就在 start 块里，没有任何 input_json_delta
+		write("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_s\",\"name\":\"create_file\",\"input\":{\"path\":\"b.go\",\"content\":\"hi\"}}}\n\n")
+		write("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		write("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n")
+		write("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	})
+	defer upstream.Close()
+
+	handler := newMatrixServer(t, "anthropic", "v1/messages", upstream.URL)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, lines := openStream(t, ts, "/v1/chat/completions",
+		`{"model":"`+matrixModel+`","stream":true,"messages":[{"role":"user","content":"create"}],"tools":[{"type":"function","function":{"name":"create_file"}}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body := collectLines(t, lines)
+	assertOpenAIStreamContract(t, body)
+
+	var args string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []struct {
+						Function struct {
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil || len(chunk.Choices) == 0 {
+			continue
+		}
+		for _, call := range chunk.Choices[0].Delta.ToolCalls {
+			args += call.Function.Arguments
+		}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(args), &parsed); err != nil {
+		t.Fatalf("start 块里的工具参数丢失或非法: %q\n%s", args, body)
+	}
+	if parsed["path"] != "b.go" || parsed["content"] != "hi" {
+		t.Errorf("start 块工具参数不完整: %v\n%s", parsed, body)
+	}
+}
+
+// anthropic 上游返回 200 + 错误体：必须失败关闭，不得当成正常消息下发。
+func TestMatrix_ChatCompletions_Anthropic_NonStream_Upstream200ErrorObjectFailsClosed(t *testing.T) {
+	upstream := newMatrixUpstream(t, "v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`))
+	})
+	defer upstream.Close()
+
+	handler := newMatrixServer(t, "anthropic", "v1/messages", upstream.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"`+matrixModel+`","stream":false,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("上游 200 错误体被伪装成成功下发:\n%s", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 主 OpenAI 路径的终态独立性（矩阵 v1.1 补齐的缺口）
+//
+// 覆盖的是最繁忙的链路：OpenAI 兼容 provider × stream。此前矩阵只测了
+// anthropic 上游的终态无换行场景，主 OpenAI 路径"上游发完 [DONE] 但保持连接
+// 不关闭"这一**真实网关行为**完全没有断言。
+//
+// 断言方式：上游写出 [DONE] 后阻塞（gate.wait），测试必须在下游看到 [DONE]
+// 之后才放行。若实现依赖传输层 EOF 才结束，下游永远拿不到 [DONE]，测试超时失败。
+// ---------------------------------------------------------------------------
+
+func TestMatrix_ChatCompletions_OpenAI_Stream_TerminalWithoutUpstreamClose(t *testing.T) {
+	gate := newGate()
+	upstream := newMatrixUpstream(t, "v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		write := func(s string) { _, _ = w.Write([]byte(s)) }
+		write("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"" + matrixModel + "\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n")
+		write("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"" + matrixModel + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n")
+		write("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"" + matrixModel + "\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		write("data: [DONE]\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// 真实网关：发完终态后复用连接、不关闭 body
+		gate.wait()
+	})
+	defer upstream.Close()
+
+	handler := newMatrixServer(t, "openai", "v1/chat/completions", upstream.URL)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, lines := openStream(t, ts, "/v1/chat/completions",
+		`{"model":"`+matrixModel+`","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	// upstream 仍在 gate 上阻塞，下游却必须先拿到 [DONE]。
+	t.Cleanup(gate.release)
+	var sb strings.Builder
+	scanUntil(t, lines, "[DONE]", &sb)
+	gate.release()
+	drainLines(t, lines, &sb)
+
+	body := sb.String()
+	assertOpenAIStreamContract(t, body)
+	if !strings.Contains(body, "Hello") {
+		t.Errorf("下游缺少正文内容:\n%s", body)
+	}
+	if !strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Errorf("下游缺少 finish_reason:\n%s", body)
 	}
 }

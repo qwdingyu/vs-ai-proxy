@@ -304,6 +304,7 @@ func (s *Server) registerManagementAPIRoutes(prefix string) {
 	group.GET("/version", s.getVersion)
 	group.GET("/config", s.getConfig)
 	group.POST("/config/validate", s.validateConfig)
+	group.GET("/config/doctor", s.getConfigDoctor)
 	group.PUT("/config", s.saveConfig)
 
 	// 提供商相关
@@ -814,7 +815,6 @@ func providerCompatibilityProfileFromConfig(p config.ProviderConfig) providerCom
 	// API 层保持薄封装：provider 包是能力事实来源，API 只负责稳定 JSON 形状。
 	key := config.ProviderKey(p)
 	profile := provider.CompatibilityProfileFor(key, p.Name, p.BaseURL, p.Type)
-	println("[DEBUG] CompatibilityProfileFor key=" + key + " name=" + p.Name + " baseURL=" + p.BaseURL + " type=" + p.Type + " -> chat_path=" + profile.ChatPath + " models_path=" + profile.ModelsPath)
 	return providerCompatibilityProfileResponse{
 		Capability:              profile.Capability,
 		Category:                profile.Category,
@@ -1174,6 +1174,125 @@ type configValidationIssue struct {
 	Code    string `json:"code"`
 	Field   string `json:"field"`
 	Message string `json:"message"`
+}
+
+// ---------------------------------------------------------------------------
+// config doctor（只读配置诊断）
+//
+// 与 CLI `--config-doctor` 共用 config.CheckConfig，保证两端结论完全一致；
+// 这里只做"报告形状"的转换，不重复实现任何判断逻辑。
+// ---------------------------------------------------------------------------
+
+type configDoctorFinding struct {
+	Severity string `json:"severity"`
+	Subject  string `json:"subject"`
+	Message  string `json:"message"`
+	Hint     string `json:"hint,omitempty"`
+}
+
+type configDoctorProvider struct {
+	ID         string `json:"id"`
+	Type       string `json:"type"`
+	Enabled    bool   `json:"enabled"`
+	BaseURL    string `json:"base_url"`
+	ChatURL    string `json:"chat_url"`
+	ModelsURL  string `json:"models_url"`
+	ChatPath   string `json:"chat_path"`
+	ModelsPath string `json:"models_path"`
+	// ChatPathDerived 表示磁盘上 transport 为空、路径由归一化推导产生。
+	ChatPathDerived bool `json:"chat_path_derived"`
+	// ChatPathRewritten 表示磁盘上的显式值会被归一化改写。
+	ChatPathRewritten bool `json:"chat_path_rewritten"`
+	// UpstreamURLChanged 表示升级前后该 provider 的最终上游地址发生变化。
+	UpstreamURLChanged bool `json:"upstream_url_changed"`
+}
+
+type configDoctorResponse struct {
+	ConfigPath            string                 `json:"config_path"`
+	ProviderCount         int                    `json:"provider_count"`
+	ModelCount            int                    `json:"model_count"`
+	RewriteNeeded         bool                   `json:"rewrite_needed"`
+	ConfigVersionMigrated bool                   `json:"config_version_migrated"`
+	ReadOnly              bool                   `json:"read_only"`
+	Counts                map[string]int         `json:"counts"`
+	HasProblems           bool                   `json:"has_problems"`
+	Findings              []configDoctorFinding  `json:"findings"`
+	Providers             []configDoctorProvider `json:"providers"`
+}
+
+// getConfigDoctor 返回只读配置诊断结果（管理页入口）。
+//
+// 只读性：优先用 config.LoadForDoctor 读磁盘原始内容（doctor 需要区分
+// "用户显式填写"与"推导产生"），该函数不做任何归一化与写回；磁盘不可读时
+// 退化为用当前运行配置，仍然不会写盘。绝不调用 config.NewManager——
+// 它在发现归一化差异时会立即 save，那正是本接口要预览的副作用。
+func (s *Server) getConfigDoctor(c *gin.Context) {
+	path := ""
+	if s.configMgr != nil {
+		path = s.configMgr.ConfigPath()
+	}
+
+	disk, resolvedPath, err := config.LoadForDoctor(path)
+	if err != nil || disk == nil {
+		// 退化路径：磁盘不可读（例如内存构造的配置）时，用运行中配置做运行时视图检查。
+		if s.configMgr == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "配置管理器不可用"})
+			return
+		}
+		disk = s.configMgr.Get()
+		resolvedPath = path
+	}
+
+	report := config.CheckConfig(disk, resolvedPath)
+
+	resp := configDoctorResponse{
+		ConfigPath:            report.ConfigPath,
+		ProviderCount:         report.ProviderCount,
+		ModelCount:            report.ModelCount,
+		RewriteNeeded:         report.RewriteNeeded,
+		ConfigVersionMigrated: report.ConfigVersionMigrated,
+		ReadOnly:              true,
+		Counts:                map[string]int{},
+		HasProblems:           report.HasProblems(),
+		Findings:              []configDoctorFinding{},
+		Providers:             []configDoctorProvider{},
+	}
+	for severity, count := range report.CountBySeverity() {
+		resp.Counts[string(severity)] = count
+	}
+	for _, f := range report.Findings {
+		resp.Findings = append(resp.Findings, configDoctorFinding{
+			Severity: string(f.Severity),
+			Subject:  f.Subject,
+			Message:  f.Message,
+			Hint:     f.Hint,
+		})
+	}
+
+	// 标记哪些 provider 的最终上游地址在升级前后发生了变化（WARN 的可视化提示）。
+	changed := map[string]bool{}
+	for _, f := range report.Findings {
+		if f.Severity == config.DoctorWarn && strings.Contains(f.Message, "上游地址发生了变化") {
+			changed[f.Subject] = true
+		}
+	}
+	for _, p := range report.Providers {
+		resp.Providers = append(resp.Providers, configDoctorProvider{
+			ID:                 p.ID,
+			Type:               p.Type,
+			Enabled:            p.Enabled,
+			BaseURL:            p.BaseURL,
+			ChatURL:            p.ChatURL,
+			ModelsURL:          p.ModelsURL,
+			ChatPath:           p.ChatPath,
+			ModelsPath:         p.ModelsPath,
+			ChatPathDerived:    p.ChatPathDerived,
+			ChatPathRewritten:  p.ChatPathRewritten,
+			UpstreamURLChanged: changed[p.ID],
+		})
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 type configValidationResult struct {

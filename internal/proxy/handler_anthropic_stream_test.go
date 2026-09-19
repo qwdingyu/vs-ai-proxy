@@ -99,8 +99,34 @@ func TestHandleChatCompletions_AnthropicProviderStreamEmitsOpenAISSE(t *testing.
 	if !strings.Contains(out, "chat.completion.chunk") {
 		t.Errorf("下游缺少 OpenAI chunk 结构: %s", out)
 	}
-	if !strings.Contains(out, "Hello") {
-		t.Errorf("下游缺少聚合后的文本内容: %s", out)
+	// 内容现在是增量下发的（"Hel" + "lo" 两个 chunk），因此不能直接
+	// 在原始 body 里找完整的 "Hello"；必须按 delta 累加后再比对。
+	// 这条断言在聚合实现下也成立，真正的增量性由
+	// handler_anthropic_incremental_test.go 的专项用例保证。
+	var assembled strings.Builder
+	for _, line := range strings.Split(out, "\n") {
+		assembled.WriteString(downstreamDeltaField(t, line, "content"))
+	}
+	if got := assembled.String(); got != "Hello" {
+		t.Errorf("下游累加后的文本内容 = %q, want %q; body=%s", got, "Hello", out)
+	}
+	// 同一个请求的所有 chunk 必须共用一致的 id 与 created，
+	// 否则客户端按 id 关联分片时会错乱。
+	ids := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		payload := openAISSEChunkPayload(line)
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) == nil && chunk.ID != "" {
+			ids[chunk.ID] = true
+		}
+	}
+	if len(ids) != 1 {
+		t.Errorf("下游 chunk 的 id 不一致: %v", ids)
 	}
 	// Anthropic 原生事件名绝不能泄漏到下游。
 	for _, leaked := range []string{"content_block_delta", "message_start", "content_block_start"} {

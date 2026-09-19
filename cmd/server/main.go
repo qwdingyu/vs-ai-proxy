@@ -331,12 +331,17 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 	doSelfUpdate := flags.Bool("self-update", false, "download, install, and restart into the latest release")
 	updateDir := flags.String("update-dir", "", "directory for downloaded updates; default is <config-dir>/updates")
 	updateManifestURL := flags.String("update-manifest-url", "", "custom static update manifest URL; overrides GitHub Releases when set")
+	configDoctor := flags.Bool("config-doctor", false, "read-only config diagnosis (upstream URLs, bindings, migration dry-run); does not modify any file")
 	if err := flags.Parse(args); err != nil {
 		return true, 2
 	}
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "未知参数: %s\n", strings.Join(flags.Args(), " "))
 		return true, 2
+	}
+	if *configDoctor {
+		exitCode := runConfigDoctor(stdout, stderr, os.Getenv("CONFIG_PATH"))
+		return true, exitCode
 	}
 	if *showVersion && !*checkUpdate && !*doUpdate && !*doSelfUpdate {
 		fmt.Fprintln(stdout, version)
@@ -406,6 +411,30 @@ func handleCommandLine(args []string, stdout, stderr io.Writer) (bool, int) {
 		return true, 0
 	}
 	return false, 0
+}
+
+// runConfigDoctor 执行只读配置诊断。
+//
+// 设计要点：
+//   - 绝不构造 config.Manager，因为 NewManager 在发现归一化差异时会立即写回磁盘，
+//     那会让"查看会改什么"这个动作本身先把配置改掉。
+//   - 退出码约定：0=无 warn/error；1=存在 warn/error；2=无法读取/解析配置。
+//     便于脚本与发布门禁复用。
+func runConfigDoctor(stdout, stderr io.Writer, configPath string) int {
+	cfg, resolvedPath, err := config.LoadForDoctor(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "读取配置失败: %v\n", err)
+		fmt.Fprintf(stderr, "配置文件: %s\n", resolvedPath)
+		return 2
+	}
+
+	report := config.CheckConfig(cfg, resolvedPath)
+	fmt.Fprint(stdout, config.RenderDoctorReport(report))
+
+	if report.HasProblems() {
+		return 1
+	}
+	return 0
 }
 
 func restartArgsWithoutSelfUpdate(args []string) []string {

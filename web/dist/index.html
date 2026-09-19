@@ -434,6 +434,61 @@
             <div class="value" data-i18n="advanced.card.monitor.value">监控</div>
             <div class="hint" data-i18n="advanced.card.monitor.hint">查看健康状态、请求统计和 provider 状态。</div>
           </a>
+          <a class="stat" href="#/doctor" data-page="doctor">
+            <div class="label" data-i18n="advanced.card.doctor.label">配置体检</div>
+            <div class="value" data-i18n="advanced.card.doctor.value">体检</div>
+            <div class="hint" data-i18n="advanced.card.doctor.hint">只读诊断：上游地址推导、模型绑定与升级写回预览。</div>
+          </a>
+        </div>
+      </section>
+
+      <section id="page-doctor" class="panel hidden">
+        <h2 data-i18n="doctor.title">配置体检（只读诊断）</h2>
+        <p class="hint" data-i18n="doctor.desc">升级或排障前检查配置。本页只读，不会修改任何文件。</p>
+        <p class="hint" data-i18n="doctor.writebackNote">注意：服务启动时已把推导出的 transport 写回磁盘，因此升级前的「写回预览」请在启动服务之前运行 vs-ai-proxy --config-doctor 查看。本页更适合检查运行期间手改过的配置。</p>
+        <div class="toolbar">
+          <button class="btn" id="btnRefreshDoctor" data-i18n="doctor.refresh">重新体检</button>
+        </div>
+        <div class="grid-3">
+          <div class="stat">
+            <div class="label" data-i18n="doctor.stat.providers">provider 数</div>
+            <div class="value" id="doctorProviders">-</div>
+          </div>
+          <div class="stat">
+            <div class="label" data-i18n="doctor.stat.models">模型数</div>
+            <div class="value" id="doctorModels">-</div>
+          </div>
+          <div class="stat">
+            <div class="label" data-i18n="doctor.stat.problems">待确认问题</div>
+            <div class="value" id="doctorProblems">-</div>
+          </div>
+          <div class="stat">
+            <div class="label" data-i18n="doctor.stat.rewrite">启动会写回磁盘</div>
+            <div class="value" id="doctorRewrite">-</div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:12px;">
+          <div class="label" data-i18n="doctor.findings">诊断结论</div>
+          <div class="hint" style="margin-bottom:10px;" data-i18n="doctor.findings.hint">按严重程度排序；ERROR 几乎必然导致请求失败。</div>
+          <div id="doctorFindings"></div>
+        </div>
+        <div class="panel" style="margin-top:12px;">
+          <div class="label" data-i18n="doctor.urls">实际上游地址</div>
+          <div class="hint" style="margin-bottom:10px;" data-i18n="doctor.urls.hint">base_url × transport 拼接后的真实请求地址；地址解析与真实转发同一事实源。</div>
+          <div class="table-scroll">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th data-i18n="doctor.col.provider">provider</th>
+                  <th data-i18n="doctor.col.type">类型</th>
+                  <th data-i18n="doctor.col.base">base_url</th>
+                  <th data-i18n="doctor.col.chat">chat 地址</th>
+                  <th data-i18n="doctor.col.flags">标记</th>
+                </tr>
+              </thead>
+              <tbody id="doctorUrlsBody"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -916,7 +971,7 @@
 
     const setActiveNav = (page) => {
       const currentPage = page || normalizePage();
-      const activePage = ['config', 'models', 'monitor'].includes(currentPage) ? 'advanced' : currentPage;
+      const activePage = ['config', 'models', 'monitor', 'doctor'].includes(currentPage) ? 'advanced' : currentPage;
       document.querySelectorAll('.nav-item[href^="#"]').forEach((el) => {
         const target = el.dataset.page || el.getAttribute('href').replace(/^#\/?/, '') || 'dashboard';
         const isActive = target === activePage;
@@ -1288,7 +1343,7 @@
     // 页面切换：根据前端 hash 路由显示对应面板
     const showPage = (page) => {
       setActiveNav(page);
-      ['dashboard', 'advanced', 'config', 'providers', 'models', 'test', 'monitor', 'logs', 'faq', 'contact'].forEach((name) => {
+      ['dashboard', 'advanced', 'config', 'providers', 'models', 'test', 'monitor', 'doctor', 'logs', 'faq', 'contact'].forEach((name) => {
         const el = $('page-' + name);
         if (!el) return;
         if (name === page) el.classList.remove('hidden');
@@ -1300,7 +1355,88 @@
       if (page === 'models') loadModels();
       if (page === 'test') loadTestLab();
       if (page === 'monitor') loadMonitor();
+      if (page === 'doctor') loadDoctor();
       if (page === 'logs') loadLogs();
+    };
+
+    // ── 配置体检（config doctor）─────────────────────────
+    // 只读诊断：调用 GET /config/doctor，后端与 CLI --config-doctor 共用同一套判断。
+    // 本页不提供"一键修复"——doctor 只报告，改动由用户显式决定。
+    const doctorSeverityClass = (severity) => {
+      if (severity === 'error') return 'err';
+      if (severity === 'warn') return 'warn';
+      return 'ok';
+    };
+    const doctorSeverityLabel = (severity) => {
+      if (severity === 'error') return t('doctor.severity.error');
+      if (severity === 'warn') return t('doctor.severity.warn');
+      return t('doctor.severity.info');
+    };
+
+    const renderDoctorFindings = (findings) => {
+      const box = $('doctorFindings');
+      if (!box) return;
+      if (!findings || !findings.length) {
+        box.innerHTML = `<div class="hint">${escapeHTML(t('doctor.findings.empty'))}</div>`;
+        return;
+      }
+      box.innerHTML = findings.map((f) => {
+        const hint = f.hint ? `<div class="hint">${escapeHTML(t('doctor.suggestion'))}: ${escapeHTML(f.hint)}</div>` : '';
+        return `<div class="diagnostic-card" style="margin-bottom:8px;">
+          <div class="label ${doctorSeverityClass(f.severity)}">${escapeHTML(doctorSeverityLabel(f.severity))} · ${escapeHTML(f.subject || '-')}</div>
+          <div class="value">${escapeHTML(f.message || '')}</div>
+          ${hint}
+        </div>`;
+      }).join('');
+    };
+
+    const renderDoctorProviders = (providers) => {
+      const body = $('doctorUrlsBody');
+      if (!body) return;
+      body.innerHTML = (providers || []).map((p) => {
+        const flags = [];
+        if (p.chat_path_derived) flags.push(t('doctor.flag.derived'));
+        if (p.chat_path_rewritten) flags.push(t('doctor.flag.rewritten'));
+        if (p.upstream_url_changed) flags.push(t('doctor.flag.changed'));
+        const flagHTML = flags.length
+          ? flags.map((f) => `<span class="badge ${f === t('doctor.flag.changed') ? 'warn' : ''}">${escapeHTML(f)}</span>`).join(' ')
+          : '-';
+        return `<tr>
+          <td>${escapeHTML(p.id || '-')}</td>
+          <td>${escapeHTML(p.type || '-')}</td>
+          <td>${escapeHTML(p.base_url || '-')}</td>
+          <td>${escapeHTML(p.chat_url || '-')}</td>
+          <td>${flagHTML}</td>
+        </tr>`;
+      }).join('');
+    };
+
+    const renderDoctor = (data) => {
+      if (!data) return;
+      $('doctorProviders').textContent = data.provider_count ?? '-';
+      $('doctorModels').textContent = data.model_count ?? '-';
+      const counts = data.counts || {};
+      const problems = (counts.error || 0) + (counts.warn || 0);
+      $('doctorProblems').textContent = String(problems);
+      const rewrite = data.rewrite_needed ? t('doctor.yes') : t('doctor.no');
+      $('doctorRewrite').textContent = data.config_version_migrated
+        ? `${rewrite} · ${t('doctor.migrated')}`
+        : rewrite;
+      renderDoctorFindings(data.findings);
+      renderDoctorProviders(data.providers);
+    };
+
+    const loadDoctor = async () => {
+      const box = $('doctorFindings');
+      if (box) box.innerHTML = `<div class="hint">${escapeHTML(t('doctor.loading'))}</div>`;
+      try {
+        renderDoctor(await fetchJSON('/config/doctor'));
+      } catch (e) {
+        if (box) {
+          const detail = e && e.message ? e.message : String(e);
+          box.innerHTML = `<div class="hint">${escapeHTML(t('doctor.failed'))}: ${escapeHTML(detail)}</div>`;
+        }
+      }
     };
 
     const loadVersion = async () => {
@@ -1968,6 +2104,7 @@
     $('btnCopyQQHome').addEventListener('click', copyQQGroup);
 
     $('btnReloadConfig').addEventListener('click', loadConfig);
+    $('btnRefreshDoctor').addEventListener('click', loadDoctor);
     $('btnSaveConfig').addEventListener('click', async () => {
       try {
         const cfg = currentConfig || await fetchJSON('/config');

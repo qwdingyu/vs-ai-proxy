@@ -2576,3 +2576,147 @@ func findProviderConfig(values []config.ProviderConfig, name string) (config.Pro
 	}
 	return config.ProviderConfig{}, false
 }
+
+// ---------------------------------------------------------------------------
+// config doctor 管理页端点
+// ---------------------------------------------------------------------------
+
+func callConfigDoctor(t *testing.T, apiSrv *Server) (*httptest.ResponseRecorder, configDoctorResponse) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/config/doctor", nil)
+	apiSrv.engine.ServeHTTP(rec, req)
+	var resp configDoctorResponse
+	if rec.Code == http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("解析 doctor 响应失败: %v; body=%s", err, rec.Body.String())
+		}
+	}
+	return rec, resp
+}
+
+// 端点必须返回只读诊断结果，且结构完整。
+func TestConfigDoctorEndpoint_ReturnsReport(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	rec, resp := callConfigDoctor(t, apiSrv)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !resp.ReadOnly {
+		t.Error("read_only 必须为 true：doctor 是只读诊断")
+	}
+	if resp.ProviderCount == 0 {
+		t.Error("provider_count 不应为 0（内置 provider 会被补入）")
+	}
+	if resp.Providers == nil || resp.Findings == nil {
+		t.Error("providers/findings 必须是非 null 数组，便于前端直接渲染")
+	}
+	if resp.ConfigPath == "" {
+		t.Error("config_path 不应为空")
+	}
+}
+
+// 端点必须只读：调用前后磁盘配置字节完全一致。
+func TestConfigDoctorEndpoint_IsReadOnly(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	cfgPath := apiSrv.configMgr.ConfigPath()
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if rec, _ := callConfigDoctor(t, apiSrv); rec.Code != http.StatusOK {
+			t.Fatalf("第 %d 次调用 status=%d", i+1, rec.Code)
+		}
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("再次读取配置失败: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("doctor 端点修改了配置文件！\nbefore=%s\nafter =%s", before, after)
+	}
+}
+
+// 悬空 provider_id 绑定必须出现在 findings 中（与 CLI 同一判断）。
+func TestConfigDoctorEndpoint_ReportsDanglingBinding(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	// 必须直接写磁盘：PUT /api/config 会先做校验，悬空 provider_id 会被 400 拒绝，
+	// 因此这种"手改配置写坏了"的状态只能通过直接落盘来构造——这正是 doctor 要覆盖的场景。
+	raw := `{"config_version":2,"port":11434,"default_model":"model-x","providers":[
+		{"id":"p1","name":"p1","type":"openai","api_key":"k","base_url":"https://example.invalid/v1",
+		 "enabled":true,"transport":{"chat_path":"chat/completions","models_path":"models"}}],
+	 "models":[{"name":"model-x","provider_id":"ghost-provider","enabled":true}]}`
+	if err := os.WriteFile(apiSrv.configMgr.ConfigPath(), []byte(raw), 0600); err != nil {
+		t.Fatalf("写入配置失败: %v", err)
+	}
+
+	_, resp := callConfigDoctor(t, apiSrv)
+	found := false
+	for _, f := range resp.Findings {
+		if f.Subject == "model-x" && strings.Contains(f.Message, "ghost-provider") {
+			found = true
+			if f.Severity != "warn" {
+				t.Errorf("severity = %q, want warn", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("未报告悬空绑定: %+v", resp.Findings)
+	}
+	if !resp.HasProblems {
+		t.Error("has_problems 应为 true")
+	}
+	if resp.Counts["warn"] == 0 {
+		t.Error("counts.warn 应大于 0")
+	}
+}
+
+// 46 号审查发现 #2 的升级回归形态必须被端点报告，且 providers 上有可视化标记。
+func TestConfigDoctorEndpoint_ReportsUpstreamURLChange(t *testing.T) {
+	apiSrv, _ := newAPITestHarness(t)
+
+	// 直接写磁盘，模拟"旧版本遗留、transport 为空"的配置。
+	// 注意：PUT /api/config 会在写入前归一化并固化 transport 路径，
+	// 因而经管理页保存过的配置不会再出现本形态——这正是本用例要覆盖的
+	// "手改/旧版遗留"场景（46 号审查发现 #2）。
+	raw := `{"config_version":2,"port":11434,"default_model":"model-x","providers":[
+		{"id":"gw","name":"gw","type":"openai","api_key":"k","base_url":"https://host/api","enabled":true}],
+	 "models":[{"name":"model-x","provider_id":"gw","enabled":true}]}`
+	if err := os.WriteFile(apiSrv.configMgr.ConfigPath(), []byte(raw), 0600); err != nil {
+		t.Fatalf("写入配置失败: %v", err)
+	}
+
+	_, resp := callConfigDoctor(t, apiSrv)
+
+	warnFound := false
+	for _, f := range resp.Findings {
+		if f.Severity == "warn" && strings.Contains(f.Message, "上游地址发生了变化") {
+			warnFound = true
+		}
+	}
+	if !warnFound {
+		t.Fatalf("未报告升级前后上游地址变化: %+v", resp.Findings)
+	}
+
+	var gw *configDoctorProvider
+	for i := range resp.Providers {
+		if resp.Providers[i].ID == "gw" {
+			gw = &resp.Providers[i]
+		}
+	}
+	if gw == nil {
+		t.Fatal("providers 中缺少 gw")
+	}
+	if !gw.UpstreamURLChanged {
+		t.Error("gw.upstream_url_changed 应为 true，供前端高亮")
+	}
+	if !strings.Contains(gw.ChatURL, "/api/chat/completions") {
+		t.Errorf("chat_url = %q, 应为拼接后的真实地址", gw.ChatURL)
+	}
+}

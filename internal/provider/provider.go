@@ -1538,6 +1538,19 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 	return models, nil
 }
 
+// NewProviderHTTPClient 供 provider 层之外的协议转换路径（如 anthropic 直通）
+// 复用同一套上游 HTTP 纪律：连接池、拨号/TLS/空闲超时、环境代理。
+//
+// timeout 语义必须与流式安全保持一致：
+//   - timeout > 0：客户端级总超时（含响应体读取），只适合非流式调用；
+//   - timeout <= 0：不设客户端级超时，生命周期完全由 ctx 预算约束。
+//
+// 对流式请求传 0 是既有决策（见 doChatStream 对 client.Timeout 的清零注释）：
+// client.Timeout 会连同流式 body 一起计时，设置它等于给长回复埋雷。
+func NewProviderHTTPClient(timeout time.Duration) *http.Client {
+	return newProviderHTTPClient(timeout)
+}
+
 func newProviderHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
@@ -1676,6 +1689,46 @@ func (p *OpenAIProvider) capabilityName() string {
 		return p.CapabilityName
 	}
 	return p.NameStr
+}
+
+// ResolveUpstreamURL 返回某个 provider 实例真实会被请求的上游 URL。
+//
+// 必须与 NewOpenAIProviderWithTransport + capabilityURL 的组合语义完全一致：
+//  1. 构造函数先规范化并 Trim 路径
+//  2. 空路径用 defaultOpenAIChatPathForBaseURL / defaultOpenAIModelsPathForBaseURL 按 base_url 形态预填
+//     （裸域名 → v1/...；带版本或自定义路径 → 不带 v1）
+//  3. capability 预设仅在构造函数未预填时兜底（实践中不会发生，保留以对齐语义）
+//  4. 最后 joinURLPath 做重叠段去重拼接
+//
+// config doctor 依赖本函数展示"实际请求地址"，因此不能另写一份推导，
+// 否则 doctor 会与真实转发行偏离，给出误导性结论。
+//
+// providerType 参与 capability 推导；kind 取 "chat" 或 "models"。
+func ResolveUpstreamURL(id, name, baseURL, providerType, chatPath, modelsPath, kind string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	chatPath = normalizeProviderResourcePath(chatPath)
+	modelsPath = normalizeProviderResourcePath(modelsPath)
+
+	switch kind {
+	case "models":
+		if modelsPath == "" {
+			modelsPath = defaultOpenAIModelsPathForBaseURL(baseURL)
+		}
+		if modelsPath == "" {
+			caps := GetCapabilities(InferCapabilityName(id, name, baseURL, providerType))
+			modelsPath = caps.ModelsPath
+		}
+		return joinURLPath(baseURL, modelsPath)
+	default:
+		if chatPath == "" {
+			chatPath = defaultOpenAIChatPathForBaseURL(baseURL)
+		}
+		if chatPath == "" {
+			caps := GetCapabilities(InferCapabilityName(id, name, baseURL, providerType))
+			chatPath = caps.ChatPath
+		}
+		return joinURLPath(baseURL, chatPath)
+	}
 }
 
 func joinURLPath(baseURL, path string) string {
