@@ -9,6 +9,19 @@
 /.bin/logs.json
 /.bin/logs.stats.json
 
+# .bin 逐用例诊断产物
+#
+# tests/large_request_matrix_diagnostic.sh 每次运行都会在
+# .bin/large-request-matrix/ 下写出 <序号>-<provider>-<model>-<字节>.json/.out。
+# 这是本地可再生成的临时产物（每次跑矩阵都会新增几十个），不应进版本库。
+#
+# 刻意**不**做目录级忽略：同目录下的 summary.json / results.jsonl / soak-*.log /
+# *-snapshot/ 是文档（docs/17、docs/36）引用的分析证据，必须保留且可提交。
+# 因此这里只按文件名形态精确忽略，不使用 /.bin/ 或 /.bin/large-request-matrix/。
+/.bin/large-request-matrix/[0-9]*-*.json
+/.bin/large-request-matrix/[0-9]*-*.out
+/.bin/release-*.log
+
 # 本地敏感文档：商业策略、客户评估与私有记录不入公开仓库
 #
 # docs/ 正式技术文档（踩坑记录、架构、审查报告）自 2026-09 起进入版本管理
