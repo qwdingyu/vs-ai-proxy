@@ -9,11 +9,21 @@
 /.bin/logs.json
 /.bin/logs.stats.json
 
-# 本地敏感文档与排障记录
+# 本地敏感文档：商业策略、客户评估与私有记录不入公开仓库
 #
-# docs/ 用作本地知识库，可能包含未脱敏排障记录、商业分析、路线图和护城河方案。
-# 开源仓库只在 README / LICENSE / SECURITY 等根目录公开文件中保留已脱敏说明。
-/docs/
+# docs/ 正式技术文档（踩坑记录、架构、审查报告）自 2026-09 起进入版本管理
+# （docs/32_产品定位与仓库策略_20260718.md 的 P0 决策）；
+# 以下内容仍保持本地私有，不在公开仓库出现。
+/docs/local/
+/docs/*.local.md
+/docs/*.secret.md
+/docs/16_Lite_Pro产品分层与高级功能方案_20260717.md
+/docs/32_产品定位与仓库策略_20260718.md
+/docs/47_产品核心能力增强审查与低成本高价值实施项_20260919.md
+/docs/99-x.md
+/docs/workbuddy-support.md
+/docs/VS-AI-PROXY使用说明.docx
+/docs/VS-AI-PROXY使用说明.pdf
 
 # 本地配置与运行时数据
 /.env
