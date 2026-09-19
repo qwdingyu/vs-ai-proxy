@@ -127,8 +127,17 @@ i18n-check:
 vuln-check:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
+# ─── 协议契约矩阵（发布门槛）───────────────────────────
+# 覆盖 provider 类型 × 流式/非流式 × 响应形态 × 客户端入口
+# （/v1/chat/completions、/v1/messages、/api/chat），含流式增量性与
+# 终态独立性的确定性断言。任何新 provider 类型或协议分支改动必须先过
+# 此矩阵；v0.2.76 anthropic 流式事故类缺陷由它拦截（docs/46、docs/47）。
+contract-matrix:
+	go test ./internal/proxy -run 'TestMatrix_' -count=1 -v
+	go test ./internal/proxy -run 'TestMatrix_' -count=1 -race
+
 # ─── 发布前完整核查 ────────────────────────────────────
-release-check: tool-check vuln-check i18n-check
+release-check: tool-check vuln-check i18n-check contract-matrix
 	go test ./... -count=1
 	go test -race ./... -count=1
 	go vet ./...
