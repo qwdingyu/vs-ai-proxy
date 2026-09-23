@@ -39,13 +39,25 @@ git status --porcelain        # 提交前自查：输出里不得出现 docs/
 
 ```bash
 # 只放行删除（D），拦截新增(A)/修改(M)/重命名(R)
-bad=$(git diff --cached --name-status | awk '$1 != "D" && $2 ~ /^docs\// {print}')
+# 必须加 -c core.quotepath=false，否则中文路径会被 git 转义成 "docs/\344\270\255…"
+# 而匹配不到 ^docs/ —— 本仓库 docs/ 下绝大多数文件名含中文，不加此参数等于形同虚设。
+bad=$(git -c core.quotepath=false diff --cached --name-status \
+      | awk '$1 != "D" && $2 ~ /^docs\// {print}')
 [ -n "$bad" ] && { echo "违规：docs/ 被暂存："; echo "$bad"; exit 1; }
 echo "OK：暂存区无 docs/ 新增或修改"
 ```
 
-> 注意：不要用 `git diff --cached --name-only | grep '^docs/'` 做这条自查。
-> 那个写法对**删除**也会命中，会在"移除 docs"这类合法提交上误报。
+> **两个已知的写法陷阱**（都实际踩过）：
+>
+> 1. 不要用 `git diff --cached --name-only | grep '^docs/'` —— 它对**删除**也会命中，
+>    会在「移除 docs」这类合法提交上误报。
+> 2. 不要省略 `-c core.quotepath=false` —— git 默认转义非 ASCII 路径，
+>    中文名文档会**静默漏过**检查。可用下面方式自证守卫有效：
+>
+>    ```bash
+>    echo x > "docs/中文名测试.md" && git add -f "docs/中文名测试.md"
+>    # 守卫必须报错；随后 git reset -q "docs/中文名测试.md" && rm "docs/中文名测试.md"
+>    ```
 
 若发现 `docs/` 被误暂存，立即撤销：
 
