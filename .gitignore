@@ -39,6 +39,13 @@
 /.omx/
 /.qwen/
 
+# Python 缓存
+#
+# tests/e2e_binary_check.py 是发布门槛脚本（仅标准库）。直接执行不会生成缓存，
+# 但 py_compile / 被 import 时会生成 __pycache__，不应进版本库。
+__pycache__/
+*.pyc
+
 # IDE / 系统文件
 .idea/
 .vscode/

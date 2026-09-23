@@ -41,7 +41,6 @@ import argparse
 import json
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -408,6 +407,71 @@ def run_checks(base: str, c: Checker) -> None:
     )
 
 
+MAX_LAUNCH_ATTEMPTS = 3
+
+
+def stop(proc) -> None:
+    """跨平台终止子进程。
+
+    不要直接用 `signal.SIGKILL`：Windows 上 Python 的 signal 模块**不定义**该常量，
+    会抛 AttributeError。`proc.kill()` 在 Windows 走 TerminateProcess、在 Unix 走
+    SIGKILL，语义正确且跨平台。
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def read_log(path: str, limit: int = 3000) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()[-limit:]
+    except OSError:
+        return "(无法读取代理日志)"
+
+
+def launch(binary: str, temp_dir: str, ready_timeout: float):
+    """启动 mock 上游与代理，返回 (proc, mock, base, log_path)；未就绪时前两项为 None。
+
+    每次都重新选取空闲端口：`free_port()` 是「先绑后关」，理论上存在端口在关闭与
+    代理绑定之间被抢占的窗口，因此启动失败由调用方换端口重试。
+    """
+    proxy_port = free_port()
+    mock_port = free_port()
+    write_config(temp_dir, proxy_port, mock_port)
+
+    mock = ThreadingHTTPServer(("127.0.0.1", mock_port), MockUpstream)
+    threading.Thread(target=mock.serve_forever, daemon=True).start()
+
+    log_path = os.path.join(temp_dir, "proxy.log")
+    log_file = open(log_path, "w", encoding="utf-8")
+    env = dict(os.environ)
+    env["XDG_CONFIG_HOME"] = temp_dir
+    env["VS_AI_PROXY_AUTO_UPDATE"] = "false"  # 核查不应触发任何网络更新
+
+    # 关键：stdout 重定向到**文件**而不是 PIPE。
+    # 用 PIPE 且从不读取时，一旦代理日志写满管道缓冲（约 64KB），代理会阻塞在
+    # 写日志上，导致请求挂起、门槛假失败。重定向到文件既无死锁，又便于失败时回读。
+    proc = subprocess.Popen(
+        [binary],
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    base = f"http://127.0.0.1:{proxy_port}"
+    if wait_ready(f"{base}/health", ready_timeout):
+        return proc, mock, base, log_path
+
+    stop(proc)
+    mock.shutdown()
+    return None, None, None, log_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="真实二进制端到端核查（发布门槛）")
     parser.add_argument("--binary", required=True, help="待核查的可执行文件路径")
@@ -424,47 +488,34 @@ def main() -> int:
         print(f"❌ 可执行文件没有执行权限: {binary}", file=sys.stderr)
         return 2
 
-    proxy_port = free_port()
-    mock_port = free_port()
     temp_dir = tempfile.mkdtemp(prefix="vs-ai-proxy-e2e-")
     checker = Checker(args.verbose)
     proc = None
     mock = None
+    log_path = os.path.join(temp_dir, "proxy.log")
     exit_code = 1
 
     try:
-        write_config(temp_dir, proxy_port, mock_port)
+        base = None
+        for attempt in range(1, MAX_LAUNCH_ATTEMPTS + 1):
+            proc, mock, base, log_path = launch(binary, temp_dir, args.ready_timeout)
+            if base:
+                break
+            if attempt < MAX_LAUNCH_ATTEMPTS:
+                print(f"⚠ 第 {attempt} 次启动未就绪，换端口重试…", file=sys.stderr)
 
-        mock = ThreadingHTTPServer(("127.0.0.1", mock_port), MockUpstream)
-        threading.Thread(target=mock.serve_forever, daemon=True).start()
-
-        env = dict(os.environ)
-        env["XDG_CONFIG_HOME"] = temp_dir
-        env["VS_AI_PROXY_AUTO_UPDATE"] = "false"  # 核查不应触发任何网络更新
-        proc = subprocess.Popen(
-            [binary],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-
-        base = f"http://127.0.0.1:{proxy_port}"
-        if not wait_ready(f"{base}/health", args.ready_timeout):
-            proc.send_signal(signal.SIGKILL)
-            out = proc.stdout.read() if proc.stdout else ""
-            print("❌ 代理未在超时内就绪，二进制输出如下：\n" + out[-3000:], file=sys.stderr)
+        if not base:
+            print(
+                f"❌ 代理在 {MAX_LAUNCH_ATTEMPTS} 次尝试内均未就绪，二进制输出如下：\n"
+                + read_log(log_path),
+                file=sys.stderr,
+            )
             return 1
 
         run_checks(base, checker)
         exit_code = checker.report()
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.send_signal(signal.SIGKILL)
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                pass
+        stop(proc)
         if mock is not None:
             mock.shutdown()
         if args.keep_temp:

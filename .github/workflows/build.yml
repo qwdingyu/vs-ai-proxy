@@ -65,6 +65,13 @@ jobs:
           test "${built}" = "${version}"
           test "${built}" != "dev"
 
+      # Windows 是 VS Copilot 的实际运行平台，也是本产品唯一的交付形态。
+      # Linux 侧的 e2e-check 只能证明 Linux 产物正确，无法覆盖 Windows 产物，
+      # 因此这里对 Windows EXE 再跑一遍同一套端到端核查。
+      - name: 真实二进制端到端核查（Windows 产物）
+        shell: bash
+        run: python tests/e2e_binary_check.py --binary ./vs-ai-proxy.exe --verbose
+
   # ─── 全平台构建 + 发布 ─────────────────────
   release:
     if: startsWith(github.ref, 'refs/tags/')
