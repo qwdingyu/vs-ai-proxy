@@ -16,27 +16,21 @@
 # 这是本地可再生成的临时产物（每次跑矩阵都会新增几十个），不应进版本库。
 #
 # 刻意**不**做目录级忽略：同目录下的 summary.json / results.jsonl / soak-*.log /
-# *-snapshot/ 是文档（docs/17、docs/36）引用的分析证据，必须保留且可提交。
+# *-snapshot/ 是本地分析文档引用的证据，必须保留且可提交。
 # 因此这里只按文件名形态精确忽略，不使用 /.bin/ 或 /.bin/large-request-matrix/。
 /.bin/large-request-matrix/[0-9]*-*.json
 /.bin/large-request-matrix/[0-9]*-*.out
 /.bin/release-*.log
 
-# 本地敏感文档：商业策略、客户评估与私有记录不入公开仓库
+# docs/ 目录整体不纳入版本管理 —— 强制规则，见 AGENTS.md
 #
-# docs/ 正式技术文档（踩坑记录、架构、审查报告）自 2026-09 起进入版本管理
-# （docs/32_产品定位与仓库策略_20260718.md 的 P0 决策）；
-# 以下内容仍保持本地私有，不在公开仓库出现。
-/docs/local/
-/docs/*.local.md
-/docs/*.secret.md
-/docs/16_Lite_Pro产品分层与高级功能方案_20260717.md
-/docs/32_产品定位与仓库策略_20260718.md
-/docs/47_产品核心能力增强审查与低成本高价值实施项_20260919.md
-/docs/99-x.md
-/docs/workbuddy-support.md
-/docs/VS-AI-PROXY使用说明.docx
-/docs/VS-AI-PROXY使用说明.pdf
+# 决策变更（2026-09）：docs/ 曾于 2026-09 进入版本管理（原 docs/32 的 P0 决策），
+# 现**整体移出版本管理**：文档文件保留在本地磁盘作为私有笔记，但不被 Git 跟踪、
+# 不推送到 GitHub。任何 docs/ 下的文件（含子目录）都不得提交。
+#
+# 下方原先按文件名逐条忽略的写法已被目录级忽略取代（目录级覆盖更彻底，
+# 不会因为新增文档忘记加规则而泄漏）。
+/docs/
 
 # 本地配置与运行时数据
 /.env
