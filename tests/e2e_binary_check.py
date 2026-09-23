@@ -53,6 +53,20 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------------------
+# 输出编码：Windows 控制台默认使用 cp1252 等本地代码页，**无法编码中文**。
+# 本脚本的报告含中文，若不做处理会在 Windows 上抛
+#   UnicodeEncodeError: 'charmap' codec can't encode characters
+# 使核查**在全部通过后**仍以 exit 1 结束（假失败），进而阻塞发布。
+# 这里在脚本内强制 UTF-8 并对无法编码的字符降级，不依赖调用方设置
+# PYTHONIOENCODING，本地与 CI 行为一致。
+# ---------------------------------------------------------------------------
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass  # 流被替换或不支持重配置时保持原样
+
+# ---------------------------------------------------------------------------
 # 常量：复刻线上真实形态（能力上限很大、max_tokens 未配置）
 # ---------------------------------------------------------------------------
 MODEL_NAME = "e2e-model"
