@@ -30,6 +30,49 @@ func (s *Server) transformRequest(
 	s.applyExecutionDefaults(cfg, req, requestedModel, prov)
 }
 
+// PrepareManagementTestRequest 让管理页「测试对话」复用与真实代理**完全一致**的参数
+// 处理链路，消除"管理页能测、VS Copilot 不能用"这类假阳性。
+//
+// 处理序列与 handleChatCompletions / handleOllamaChat / handleAnthropicMessages 相同：
+//  1. transformRequest（内含 applyExecutionDefaults：provider 能力过滤 + 模型缺省）
+//  2. catalog profile 与 config 模型配置合并
+//  3. applyProfileDefaults（能力上限钳制，绝不生成 max_tokens）
+//
+// 管理页过去直接构造裸 ChatRequest，绕过了上述全部处理。2026-09 的 max_tokens 事故
+// （能力上限被当成生成长度 → 上游判超限 → Copilot 完全不可用）因此在管理页完全不可见，
+// 白白拉长了排查时间。这里的实现刻意复用同一组底层函数，并有测试断言两边参数一致，
+// 防止未来再次分叉。
+func (s *Server) PrepareManagementTestRequest(
+	cfg *config.AppConfig,
+	req *provider.ChatRequest,
+	requestedModel string,
+	prov provider.Provider,
+) {
+	if req == nil || prov == nil {
+		return
+	}
+
+	_, _, catalog := s.snapshot()
+
+	s.transformRequest(cfg, req, requestedModel, prov)
+
+	var profile provider.ModelProfile
+	hasProfile := false
+	if catalog != nil {
+		if p, ok := profileForProvider(catalog, requestedModel, prov); ok {
+			profile = p
+			hasProfile = true
+		}
+	}
+	if modelCfg, ok := findModelConfig(cfg, requestedModel, req.Model, prov.Name()); ok {
+		profile = mergeModelConfigProfile(profile, modelCfg)
+		hasProfile = true
+	}
+	if hasProfile {
+		s.applyProfileDefaults(req, profile, prov)
+	}
+}
+
 func shouldInjectCachedReasoning(prov provider.Provider) bool {
 	if prov == nil {
 		return false
@@ -259,16 +302,26 @@ func (s *Server) applyProfileDefaults(
 		fixedTemperature := *profile.FixedTemperature
 		req.Temperature = &fixedTemperature
 	}
-	outputLimit := 0
+	// 输出上限只做「钳制」，绝不生成 max_tokens。
+	//
+	// context_length 与 max_output_tokens 都是能力声明（上下文窗口 / 输出能力上限），
+	// 并不代表本次请求想要的生成长度，因此不能派生出 max_tokens：
+	//   · 客户端未声明 max_tokens 时应保持不传，由上游使用自身默认值；
+	//   · Copilot 的带 tools 请求会跳过 applyGlobalDefaults，此处一旦生成就会
+	//     直接把 max_output_tokens（实测 131072 / 384000）当作 max_tokens 打到上游，
+	//     上游判定超限而拒绝，表现为「管理页能测、Copilot 完全不可用」；
+	//   · 真正代表「缺省生成长度」的是 profile.MaxTokens，已在上方按 override 策略应用。
+	// 语义依据：docs/02「context_length 会作为 max_tokens 的上限保护」。
+	capLimit := 0
 	if profile.ContextLength != nil && *profile.ContextLength > 0 {
-		outputLimit = *profile.ContextLength
+		capLimit = *profile.ContextLength
 	}
 	if profile.MaxOutputTokens != nil && *profile.MaxOutputTokens > 0 &&
-		(outputLimit == 0 || *profile.MaxOutputTokens < outputLimit) {
-		outputLimit = *profile.MaxOutputTokens
+		(capLimit == 0 || *profile.MaxOutputTokens < capLimit) {
+		capLimit = *profile.MaxOutputTokens
 	}
-	if outputLimit > 0 && (req.MaxTokens == nil || *req.MaxTokens > outputLimit) {
-		req.MaxTokens = intPtr(outputLimit)
+	if capLimit > 0 && req.MaxTokens != nil && *req.MaxTokens > capLimit {
+		req.MaxTokens = intPtr(capLimit)
 	}
 	if !caps.SupportsReasoningEffort {
 		req.ReasoningEffort = ""

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2332,9 +2333,12 @@ func TestForwardAnthropicRequest_UsesConfiguredProviderKey(t *testing.T) {
 }
 
 func TestForwardAnthropicRequest_UsesConfiguredTransportPath(t *testing.T) {
-	var upstreamPath string
+	// upstreamPath 由 httptest 的服务 goroutine 写、主测试 goroutine 读。
+	// 即使 forwardAnthropicRequest 会读完响应体，Go 内存模型也不保证两者之间存在
+	// happens-before 关系，因此必须显式同步（-race 会间歇性报 DATA RACE）。
+	var upstreamPath atomic.Value
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamPath = r.URL.Path
+		upstreamPath.Store(r.URL.Path)
 		if r.URL.Path != "/custom/messages" {
 			http.NotFound(w, r)
 			return
@@ -2362,8 +2366,8 @@ func TestForwardAnthropicRequest_UsesConfiguredTransportPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("forwardAnthropicRequest failed: %v", err)
 	}
-	if upstreamPath != "/custom/messages" {
-		t.Errorf("upstream path = %q, want /custom/messages", upstreamPath)
+	if got, _ := upstreamPath.Load().(string); got != "/custom/messages" {
+		t.Errorf("upstream path = %q, want /custom/messages", got)
 	}
 }
 

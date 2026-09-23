@@ -57,10 +57,10 @@ type ModelConfig struct {
 	Name                 string   `json:"name"`                   // 模型名称，管理界面展示用
 	ProviderID           string   `json:"provider_id"`            // 可选 provider 实例 ID；为空表示按 provider priority 自动选择
 	Provider             string   `json:"provider"`               // 所属提供商名称，用于和 provider 配置对照
-	ContextLength        *int     `json:"context_length"`         // 上下文长度，仅 UI 展示，当前不参与请求校验
-	MaxOutputTokens      *int     `json:"max_output_tokens"`      // 最大输出 token，仅 UI 展示
-	SupportsTools        *bool    `json:"supports_tools"`         // 是否支持工具调用，仅 UI 展示
-	SupportsVision       *bool    `json:"supports_vision"`        // 是否支持视觉，仅 UI 展示
+	ContextLength        *int     `json:"context_length"`         // 上下文窗口：下发 Ollama 作 num_ctx，并作为 max_tokens 的上限保护；同时经 /api/tags、/api/show 暴露给 VS Copilot
+	MaxOutputTokens      *int     `json:"max_output_tokens"`      // 输出能力上限：仅作为 max_tokens 的上限保护（不生成 max_tokens）；经 /api/tags、/api/show 暴露给 VS Copilot
+	SupportsTools        *bool    `json:"supports_tools"`         // 是否支持工具调用：经 /api/tags、/api/show 暴露给 VS Copilot（不参与请求参数校验）
+	SupportsVision       *bool    `json:"supports_vision"`        // 是否支持视觉：经 /api/tags、/api/show 暴露给 VS Copilot（不参与请求参数校验）
 	Temperature          *float64 `json:"temperature"`            // 默认温度，请求未显式设置时作为 fallback
 	TopP                 *float64 `json:"top_p"`                  // 默认 top_p，请求未显式设置时作为 fallback
 	MaxTokens            *int     `json:"max_tokens"`             // 默认 max_tokens，请求未显式设置时作为 fallback

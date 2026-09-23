@@ -231,6 +231,20 @@ func proxyDefenseEnabled(cfg *config.AppConfig) bool {
 // 注意：本函数当前不检查 Defense.Enabled，始终只保留首选候选。
 // 这是设计决策——提供商等上游网关内部负责渠道轮换，
 // 代理层跨 provider 自动兜底会掩盖真实 provider 错误、放大请求与计费。
+// emptyMessagesDiagnostic 构造"messages 缺失或为空"的 400 诊断。
+func emptyMessagesDiagnostic(model string) proxyDiagnosticError {
+	return proxyDiagnosticError{
+		Message: "messages 字段是必填的且至少需要一条消息",
+		Type:    "invalid_request_error",
+		Code:    "invalid_request_error",
+		Details: proxyDiagnosticDetails{
+			RequestedModel: model,
+			ResolvedModel:  model,
+			Hint:           "请在请求体中提供非空的 messages 数组，例如 [{\"role\":\"user\",\"content\":\"hi\"}]。",
+		},
+	}
+}
+
 func applyDefenseCandidatePolicy(cfg *config.AppConfig, candidates []provider.Candidate) []provider.Candidate {
 	// VS Stable 默认只执行首选候选：提供商这类上游网关内部本身负责渠道轮换。
 	// 代理层跨 provider 自动兜底会掩盖真实 provider 错误、放大请求与计费，
@@ -841,6 +855,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "解析请求失败", http.StatusBadRequest)
 		return
 	}
+	// messages 是必填且至少一条：与 OpenAI 官方行为及本代理 /v1/messages 的校验保持一致。
+	// 缺少校验时会把空消息列表原样发给上游，既消耗上游配额/计费，
+	// 又让用户看到上游的模糊报错而不是明确的本地校验失败。
+	if len(req.Messages) == 0 {
+		writeProxyDiagnosticError(w, http.StatusBadRequest, emptyMessagesDiagnostic(req.Model))
+		return
+	}
 	setRequestToolDiagnosticHeader(w, &req)
 
 	cfg, registry, catalog := s.snapshot()
@@ -1278,6 +1299,12 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// 与 /v1/chat/completions、/v1/messages 保持一致：messages 必填且至少一条。
+	// 否则会把空消息列表发给上游（消耗配额，且用户看到的是上游的模糊报错）。
+	if len(messages) == 0 {
+		writeProxyDiagnosticError(w, http.StatusBadRequest, emptyMessagesDiagnostic(modelName))
+		return
+	}
 
 	stream := false
 	if s, ok := ollamaReq["stream"].(bool); ok {
@@ -1308,6 +1335,12 @@ func (s *Server) handleOllamaChat(w http.ResponseWriter, r *http.Request) {
 			Stream:   stream,
 		}
 
+		// Ollama 协议要求生成参数嵌套在 options 内，这里严格按该契约解析。
+		// 刻意**不**接受顶层的 max_tokens/max_output_tokens 等字段作为兜底：
+		// 顶层 max_output_tokens 表达的是"输出能力上限"，与"本次生成长度"是两回事，
+		// 一旦把它当生成参数接收，就会重演 2026-09 那次
+		//「能力上限被当成 max_tokens 发给上游 → 上游判超限 → VS Copilot 不可用」。
+		// 顶层未知字段属于 schema 之外，忽略它不影响可用性。
 		if options, ok := ollamaReq["options"].(map[string]any); ok {
 			req.OptionsExtra = rawMessagesFromMap(options, providerOllamaOptionKnownFields())
 			if v, ok := options["temperature"].(float64); ok {

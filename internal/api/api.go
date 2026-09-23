@@ -1483,6 +1483,17 @@ func (s *Server) searchModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"models": results})
 }
 
+// enrichModelDefaults 在**保存前**把 catalog 的模型能力补齐进 model config 并做安全检查。
+//
+// 这是有意设计，不要为了"配置文件整洁"而移除：
+//
+//	· VS Copilot BYOM 依赖本代理暴露的模型元数据，运行期发现不能把已知模型塌缩成
+//	  通用兜底上限（见 f318102 "Preserve authoritative model"）；
+//	· 落盘的显式值让用户配置保持自洽与权威，避免 catalog 变动悄悄改变既有行为；
+//	· applySafeModelFallbacks 强制 max_output_tokens <= context_length，是必要不变式。
+//
+// 注意：读取侧（/api/tags、/api/show、/v1/models）会再做一次 catalog+config 合并，
+// 因此这里的补齐不会造成"只有落盘才对"的依赖；两侧都成立是有意为之的双保险。
 func (s *Server) enrichModelDefaults(cfg *config.AppConfig) {
 	if cfg == nil {
 		return
@@ -1544,6 +1555,10 @@ func applyProfileDefaults(model *config.ModelConfig, profile provider.ModelProfi
 	}
 }
 
+// applySafeModelFallbacks 保证落盘的模型能力自洽：补齐空值，并强制
+// max_output_tokens <= context_length（f318102 引入的不变式）。
+// 缺少这道钳制时，配置里可能出现"输出上限大于上下文窗口"的自相矛盾值，
+// 使 /api/tags、/api/show 暴露给 VS Copilot 的元数据不可信。
 func applySafeModelFallbacks(model *config.ModelConfig) {
 	if model.ContextLength == nil || *model.ContextLength <= 0 {
 		model.ContextLength = intPtr(128000)
@@ -1768,6 +1783,13 @@ func (s *Server) testChat(c *gin.Context) {
 		Model:    req.Model,
 		Messages: []provider.Message{{Role: "user", Content: req.Message}},
 		Stream:   false,
+	}
+
+	// 关键：让管理页测试走与真实代理一致的参数处理链路（provider 能力过滤、
+	// 模型配置缺省、能力上限钳制）。否则管理页会给出"能测但 Copilot 不能用"
+	// 的假阳性——2026-09 的 max_tokens 事故正是被这种假阳性掩盖了。
+	if s.proxy != nil {
+		s.proxy.PrepareManagementTestRequest(s.configMgr.Get(), chatReq, req.Model, prov)
 	}
 
 	var resp *provider.ChatResponse

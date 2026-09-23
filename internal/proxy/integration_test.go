@@ -116,9 +116,12 @@ func (p *fakeProvider) Chat(ctx context.Context, req *provider.ChatRequest) (*pr
 	}, nil
 }
 
-func (p *fakeProvider) ChatStream(ctx context.Context, _ *provider.ChatRequest) (io.ReadCloser, error) {
+func (p *fakeProvider) ChatStream(ctx context.Context, req *provider.ChatRequest) (io.ReadCloser, error) {
 	_, p.hadDeadline = ctx.Deadline()
 	p.streamCalls++
+	// 流式是 VS Copilot 唯一使用的模式，必须和 Chat/ChatRaw 一样捕获上游请求，
+	// 否则「上游实际收到什么参数」在流式路径上完全不可观测。
+	p.lastReq = cloneChatRequest(req)
 	if p.streamErr != nil {
 		return nil, p.streamErr
 	}

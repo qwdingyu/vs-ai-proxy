@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -605,7 +606,7 @@ func SendAnthropicChatRequestWithPath(ctx context.Context, upstreamBase string, 
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	setAnthropicVersionHeader(httpReq, "")
 
 	httpResp, err := anthropicUpstreamClient.Do(httpReq)
 	if err != nil {
@@ -694,7 +695,7 @@ func sendAnthropicChatStreamRequestWithHooks(
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	setAnthropicVersionHeader(httpReq, "")
 
 	httpResp, err := anthropicUpstreamClient.Do(httpReq)
 	if err != nil {
@@ -1501,14 +1502,39 @@ func countTokens(text string) int64 {
 	return int64(len(text)) / 2
 }
 
+// maxAnthropicRequestBodyBytes 是 /v1/messages 的请求体上限。
+//
+// 必须与 /v1/chat/completions 的 maxChatRequestBodyBytes 保持一致：
+// 两个入口面向同一批用户与同一份上下文，上限不同会导致"同一个 2 MiB 请求，
+// 走 A 入口成功、走 B 入口 413"，用户无法理解。历史上这里是 1 MiB，
+// 只有主路径的 1/32，对处理大代码库的 Anthropic 原生客户端过于严格。
+const maxAnthropicRequestBodyBytes = maxChatRequestBodyBytes
+
 // readAnthropicRequestBody 读取并验证请求体。
+//
+// 超限必须显式返回 413，不能靠 io.LimitReader 静默截断：
+// 截断后 JSON 解析必然失败，用户看到的是"解析请求失败: unexpected end of JSON input"，
+// 完全看不出真实原因是"请求过大"，与 /v1/chat/completions 的 413 语义也不一致。
 func readAnthropicRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	if r.Body == nil {
 		writeAnthropicErrorResponse(w, http.StatusBadRequest, "请求体为空")
 		return nil, false
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
+	// ContentLength 已知时先做一次廉价预检，避免无谓地读满上限。
+	if r.ContentLength > maxAnthropicRequestBodyBytes {
+		writeAnthropicErrorResponse(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("请求体超过 %d MiB 限制", maxAnthropicRequestBodyBytes>>20))
+		return nil, false
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxAnthropicRequestBodyBytes))
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeAnthropicErrorResponse(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("请求体超过 %d MiB 限制", maxAnthropicRequestBodyBytes>>20))
+			return nil, false
+		}
 		writeAnthropicErrorResponse(w, http.StatusBadRequest, "读取请求体失败")
 		return nil, false
 	}
@@ -1647,6 +1673,24 @@ func anthropicUpstreamURL(baseURL string, chatPath string) string {
 // setAnthropicUpstreamAuthHeaders 设置上游 provider 鉴权头。
 // 同时写 Authorization 和 x-api-key 是为了兼容官方 Anthropic 与 Anthropic 协议网关；
 // 但 token 来源必须是 provider.APIKey，不能复用客户端到代理的认证头。
+// defaultAnthropicAPIVersion 是 Anthropic Messages API 的默认版本号。
+// 官方 API 要求请求必须携带 anthropic-version，缺失或为空会返回 400。
+const defaultAnthropicAPIVersion = "2023-06-01"
+
+// setAnthropicVersionHeader 把客户端的 anthropic-version 透传给上游，
+// 客户端未提供（或提供了空值）时回落到默认版本。
+//
+// 为什么必须有兜底：直通路径原先直接转发客户端头，客户端不带时上游会收到
+// 空串；真实 Anthropic 端点会因此 400 拒绝，而 OpenAI→Anthropic 转换路径
+// 一直是硬编码 2023-06-01，两条链路行为不一致。
+func setAnthropicVersionHeader(httpReq *http.Request, clientVersion string) {
+	version := strings.TrimSpace(clientVersion)
+	if version == "" {
+		version = defaultAnthropicAPIVersion
+	}
+	httpReq.Header.Set("anthropic-version", version)
+}
+
 func setAnthropicUpstreamAuthHeaders(httpReq *http.Request, apiKey string) {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
@@ -2097,7 +2141,7 @@ func (s *Server) forwardAnthropicRequest(ctx context.Context, cfg *config.AppCon
 	}
 
 	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
-	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
+	setAnthropicVersionHeader(httpReq, r.Header.Get("anthropic-version"))
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	httpResp, err := anthropicUpstreamClient.Do(httpReq)
@@ -2174,8 +2218,12 @@ func (s *Server) handleAnthropicPassthroughStream(
 	}
 
 	setAnthropicUpstreamAuthHeaders(httpReq, apiKey)
-	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
+	setAnthropicVersionHeader(httpReq, r.Header.Get("anthropic-version"))
 	httpReq.Header.Set("Content-Type", "application/json")
+	// 与转换路径（SendAnthropicChatStreamRequest）保持一致：流式请求必须声明
+	// Accept: text/event-stream。部分网关据此决定返回 SSE 还是聚合 JSON，
+	// 不声明时可能拿到非流式响应，导致下游解析失败。
+	httpReq.Header.Set("Accept", "text/event-stream")
 
 	httpResp, err := anthropicUpstreamClient.Do(httpReq)
 	if err != nil {

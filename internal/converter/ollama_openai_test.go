@@ -338,3 +338,110 @@ func TestBuildOllamaShowResponsePublishesArchitectureContextLength(t *testing.T)
 		t.Fatalf("input_token_limit = %#v, want 7168", modelInfo["input_token_limit"])
 	}
 }
+
+// 回归：llama.context_length 必须**无条件**存在，与 family 取值无关。
+//
+// 原测试只用 family="llama" 断言该键——恰好 architecture+"."+context_length
+// 就等于 llama.context_length，于是"通过"了；真实链路里 family 是 deepseek /
+// qwen 这类具体架构名，该键就消失，只剩 deepseek.context_length。
+//
+// 注意（事实核对 2026-09）：llama.context_length 只是**兼容性冗余键**。
+// Ollama 官方只返回 <arch>.context_length；VS Code llama.vscode 的解析规则
+// （language-model-token-limits.ts）读的是顶层 context_length / input_token_limit /
+// max_output_tokens，候选对象不含 model_info，字段表也不含 llama.context_length。
+// 保留该键是因为第三方代理实现以此为约定，且多一个键无害；但**主路径依赖的是
+// 顶层字段**，那条链路由 TestFinalTopLevelTokenBudgetFields 单独覆盖。
+func TestBuildOllamaModelInfoAlwaysExposesLlamaContextLength(t *testing.T) {
+	for _, family := range []string{"llama", "deepseek", "qwen", "glm", "kimi", "api", ""} {
+		info := BuildOllamaModelInfo("some-model", 1_048_576, 1_048_576, 131072, family, true, false)
+		got, ok := info["llama.context_length"]
+		if !ok {
+			t.Errorf("family=%q 时缺少 llama.context_length（客户端会退到 ~100K）", family)
+			continue
+		}
+		if got != 1_048_576 {
+			t.Errorf("family=%q 时 llama.context_length = %#v, want 1048576", family, got)
+		}
+		if info["general.context_length"] != 1_048_576 {
+			t.Errorf("family=%q 时 general.context_length 缺失或错误", family)
+		}
+	}
+}
+
+// 非 llama 架构时，架构限定键与 llama 键必须同时存在且一致。
+func TestBuildOllamaModelInfoKeepsArchitectureAndLlamaKeys(t *testing.T) {
+	info := BuildOllamaModelInfo("m", 262144, 262144, 8192, "deepseek", true, false)
+	if info["deepseek.context_length"] != 262144 {
+		t.Errorf("deepseek.context_length = %#v, want 262144", info["deepseek.context_length"])
+	}
+	if info["llama.context_length"] != 262144 {
+		t.Errorf("llama.context_length = %#v, want 262144（必须与架构键一致）", info["llama.context_length"])
+	}
+}
+
+// /api/show 与 /api/tags 暴露的 model_info 都必须带上该键（端到端）。
+func TestBuildOllamaShowResponseExposesLlamaContextLengthForRealFamily(t *testing.T) {
+	out, err := BuildOllamaShowResponse("deepseek-v4-flash", "deepseek-v4-flash",
+		1_048_576, 1_048_576, 131072, "deepseek", true, false, nil)
+	if err != nil {
+		t.Fatalf("BuildOllamaShowResponse 失败: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(out, &body); err != nil {
+		t.Fatalf("解码失败: %v", err)
+	}
+	modelInfo, ok := body["model_info"].(map[string]any)
+	if !ok {
+		t.Fatalf("model_info 不是对象: %#v", body["model_info"])
+	}
+	if modelInfo["llama.context_length"] != float64(1_048_576) {
+		t.Errorf("真实 family 下 llama.context_length = %#v, want 1048576",
+			modelInfo["llama.context_length"])
+	}
+}
+
+// 主路径：VS Code llama.vscode 的真实解析规则（language-model-token-limits.ts）下，
+// 我们的 /api/tags 顶层字段必须能被解析出输入/输出预算，不能退到 8192/4096。
+//
+// 该规则：
+//
+//	候选对象 = [顶层, meta, metadata, limits, top_provider]（不含 model_info）
+//	输入字段 = max_input_tokens|input_token_limit|prompt_token_limit|max_prompt_tokens|
+//	          context_length|context_window|max_context_length|max_sequence_length|
+//	          max_position_embeddings|n_ctx|n_ctx_train
+//	输出字段 = max_output_tokens|output_token_limit|completion_token_limit|
+//	          max_completion_tokens|max_generated_tokens
+func TestFinalTopLevelTokenBudgetFields(t *testing.T) {
+	info := BuildOllamaModelInfo("deepseek-v4-flash", 1_048_576, 1_048_576, 131_072, "deepseek", true, false)
+
+	inputFields := []string{"max_input_tokens", "input_token_limit", "prompt_token_limit",
+		"max_prompt_tokens", "context_length", "context_window", "max_context_length",
+		"max_sequence_length", "max_position_embeddings", "n_ctx", "n_ctx_train"}
+	outputFields := []string{"max_output_tokens", "output_token_limit", "completion_token_limit",
+		"max_completion_tokens", "max_generated_tokens"}
+
+	pick := func(fields []string) (string, float64) {
+		for _, f := range fields {
+			if v, ok := info[f].(int); ok && v > 0 {
+				return f, float64(v)
+			}
+		}
+		return "", 0
+	}
+
+	inField, inVal := pick(inputFields)
+	if inField == "" {
+		t.Fatal("顶层无可解析的输入预算字段：VS Code 会退到 8192")
+	}
+	if inVal != 1_048_576 {
+		t.Errorf("%s = %v, want 1048576", inField, inVal)
+	}
+	outField, outVal := pick(outputFields)
+	if outField == "" {
+		t.Fatal("顶层无可解析的输出预算字段：VS Code 会退到 4096")
+	}
+	if outVal != 131_072 {
+		t.Errorf("%s = %v, want 131072", outField, outVal)
+	}
+	t.Logf("VS Code 规则解析：输入 ← %s=%v，输出 ← %s=%v", inField, inVal, outField, outVal)
+}

@@ -274,9 +274,27 @@ func BuildOllamaModelInfo(
 ) map[string]any {
 	architecture := coalesceString(family, "api")
 	return map[string]any{
-		"general.architecture":           architecture,
-		"general.basename":               basename,
-		"general.context_length":         ctxLength,
+		"general.architecture":   architecture,
+		"general.basename":       basename,
+		"general.context_length": ctxLength,
+		// llama.context_length 是兼容性冗余键。
+		//
+		// 事实核对（2026-09）：
+		//   - Ollama 官方 /api/show 只返回 <arch>.context_length（如 gemma4.context_length），
+		//     并不存在"通用 llama.context_length"。
+		//   - VS Code 的 llama.vscode 扩展按 language-model-token-limits.ts 解析：
+		//     候选对象为 [顶层, meta, metadata, limits, top_provider]，字段含
+		//     context_length / input_token_limit / max_output_tokens 等，
+		//     **不含** model_info，也不含 llama.context_length。
+		//   - 因此本代理的顶层 context_length / input_token_limit / max_output_tokens
+		//     才是被客户端真正读取的字段（已有测试覆盖）。
+		//
+		// 这里仍然补上 llama.context_length，是因为：
+		//   1. 部分第三方代理实现（如 CopilotWithOllama）以此为约定，补它成本为零；
+		//   2. 某些客户端实现细节未公开，多一个键不会有害，缺一个键可能退到极小默认值
+		//      （llama.vscode 探测失败会退到 8192 输入 / 4096 输出）。
+		// 它**不是**主路径依赖项，不要据此判断上下文能力是否已正确暴露。
+		"llama.context_length":           ctxLength,
 		architecture + ".context_length": ctxLength,
 		"context_length":                 ctxLength,
 		"max_output_tokens":              maxOutput,
