@@ -40,7 +40,7 @@ PLATFORM_ALIAS := \
 	windows/amd64:windows-x64
 
 # ─── 默认目标 ──────────────────────────────────────────
-.PHONY: all build build-all install release release-notes tool-check i18n-check vuln-check release-check windows-res ensure-windows-res clean
+.PHONY: all build build-all install release release-notes tool-check i18n-check vuln-check contract-matrix e2e-check release-check windows-res ensure-windows-res clean
 
 all: build
 
@@ -136,8 +136,22 @@ contract-matrix:
 	go test ./internal/proxy -run 'TestMatrix_' -count=1 -v
 	go test ./internal/proxy -run 'TestMatrix_' -count=1 -race
 
+# ─── 真实二进制端到端核查（发布门槛）─────────────────────
+# 验证的是**构建产物**而不是代码：把真正要发布的二进制跑起来，走完
+# VS Copilot BYOM 的完整链路（发现 → 路由 → 请求正确性 → 协议一致性 → 流式工具调用）。
+#
+# 为什么必须有这一层：2026-09 的 max_tokens 事故中，代码层测试全绿、管理页也能测通，
+# 但真实二进制会把「输出能力上限」当作 max_tokens 发给上游（实测 131072），
+# 导致 VS Copilot 完全不可用。这类**产物级**缺陷只有跑真实产物才能拦住。
+#
+# 脚本完全隔离：XDG_CONFIG_HOME 指向临时目录、本地 mock 上游、端口自动选取，
+# 不触碰用户真实配置，也不访问任何真实 provider。
+e2e-check: build
+	@echo "🔎 真实二进制端到端核查..."
+	@python3 tests/e2e_binary_check.py --binary ./$(APP_NAME)$(if $(filter windows,$(shell go env GOOS)),.exe,)
+
 # ─── 发布前完整核查 ────────────────────────────────────
-release-check: tool-check vuln-check i18n-check contract-matrix
+release-check: tool-check vuln-check i18n-check contract-matrix e2e-check
 	go test ./... -count=1
 	go test -race ./... -count=1
 	go vet ./...
