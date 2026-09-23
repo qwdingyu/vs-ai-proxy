@@ -1,0 +1,12 @@
+# UseAI (api.eforge.xyz) 50-round soak 2026-07-23
+- Window: 2026-07-23T12:40:58Z..12:55:04Z
+- MODE=proxy-only SIZES=400000 REPEAT=50 COOLDOWN=10s
+- Success: **26/50 = 52%**
+- Errors: `{'-': 26, 'upstream_no_response': 19, 'upstream_stream_interrupted': 5}`
+- States: `{'downstream_started': 26, 'upstream_waiting_response_headers': 19, 'upstream_connected': 5}`
+- Sequence (S=ok F=fail): `SSFFSFFFFFSSSFSSSSSFSSFFFSSFFSFSFSFFFSSSSFFSFSFSFS`
+- Max streaks: success=5, fail=5
+- Half split: first25=52% second25=52%
+- Success latency ms: {'p50': 4130.025, 'p95': 7788.013, 'min': 2951.754, 'max': 8171.053, 'n': 26}
+- Fail latency ms: {'p50': 3095.62, 'p95': 3115.168, 'min': 3089.145, 'max': 3122.623, 'n': 24}
+- Fail clusters (start-end,len): [(3, 4, 2), (6, 10, 5), (14, 14, 1), (20, 20, 1), (23, 25, 3), (28, 29, 2), (31, 31, 1), (33, 33, 1), (35, 37, 3), (42, 43, 2), (45, 45, 1), (47, 47, 1), (49, 49, 1)]

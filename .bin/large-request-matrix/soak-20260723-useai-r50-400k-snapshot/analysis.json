@@ -1,0 +1,165 @@
+{
+  "when": "2026-07-23T12:40:58Z..12:55:04Z",
+  "host": "api.eforge.xyz (useai provider)",
+  "mode": "proxy-only",
+  "size": 400000,
+  "repeat": 50,
+  "cooldown_seconds": 10,
+  "successes": 26,
+  "failures": 24,
+  "success_rate": 0.52,
+  "error_codes": {
+    "-": 26,
+    "upstream_no_response": 19,
+    "upstream_stream_interrupted": 5
+  },
+  "stream_states": {
+    "downstream_started": 26,
+    "upstream_waiting_response_headers": 19,
+    "upstream_connected": 5
+  },
+  "fail_rounds": [
+    3,
+    4,
+    6,
+    7,
+    8,
+    9,
+    10,
+    14,
+    20,
+    23,
+    24,
+    25,
+    28,
+    29,
+    31,
+    33,
+    35,
+    36,
+    37,
+    42,
+    43,
+    45,
+    47,
+    49
+  ],
+  "max_success_streak": 5,
+  "max_fail_streak": 5,
+  "sequence": "SSFFSFFFFFSSSFSSSSSFSSFFFSSFFSFSFSFFFSSSSFFSFSFSFS",
+  "first_half_rate": 0.52,
+  "second_half_rate": 0.52,
+  "window_rates": {
+    "5": {
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.5086956521739131,
+      "first": 0.6,
+      "last": 0.6
+    },
+    "10": {
+      "min": 0.3,
+      "max": 0.8,
+      "mean": 0.5219512195121951,
+      "first": 0.3,
+      "last": 0.5
+    },
+    "20": {
+      "min": 0.45,
+      "max": 0.65,
+      "mean": 0.5274193548387097,
+      "first": 0.55,
+      "last": 0.5
+    }
+  },
+  "success_latency_ms": {
+    "p50": 4130.025,
+    "p95": 7788.013,
+    "min": 2951.754,
+    "max": 8171.053,
+    "n": 26
+  },
+  "fail_latency_ms": {
+    "p50": 3095.62,
+    "p95": 3115.168,
+    "min": 3089.145,
+    "max": 3122.623,
+    "n": 24
+  },
+  "fail_clusters": [
+    [
+      3,
+      4,
+      2
+    ],
+    [
+      6,
+      10,
+      5
+    ],
+    [
+      14,
+      14,
+      1
+    ],
+    [
+      20,
+      20,
+      1
+    ],
+    [
+      23,
+      25,
+      3
+    ],
+    [
+      28,
+      29,
+      2
+    ],
+    [
+      31,
+      31,
+      1
+    ],
+    [
+      33,
+      33,
+      1
+    ],
+    [
+      35,
+      37,
+      3
+    ],
+    [
+      42,
+      43,
+      2
+    ],
+    [
+      45,
+      45,
+      1
+    ],
+    [
+      47,
+      47,
+      1
+    ],
+    [
+      49,
+      49,
+      1
+    ]
+  ],
+  "compare_to_prior_20r_useai": {
+    "prior_success_rate": 0.9,
+    "prior_runs": 20,
+    "note": "earlier dual-provider soak window; not same wall-clock period"
+  },
+  "compare_to_official_deepseek_20r": {
+    "success_rate": 1.0,
+    "runs": 20
+  }
+}

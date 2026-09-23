@@ -1,0 +1,2009 @@
+SOAK_START 2026-07-23T12:40:58Z REPEAT=50 MODE=proxy-only SIZES=400000 CASES=useai only
+
+===== round=1/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12346 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 5491.285,
+    "total_ms": 5492.006,
+    "upload_bytes": 400008,
+    "download_bytes": 9496,
+    "sse_events": 35,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 5489.345074,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 1, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 5492.006, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 5489.345074, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=2/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12347 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3777.397,
+    "total_ms": 3778.034,
+    "upload_bytes": 400008,
+    "download_bytes": 8682,
+    "sse_events": 32,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3775.3331000000003,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 2, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3778.034, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3775.3331000000003, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=3/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12348 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3107.735,
+    "total_ms": 3108.246,
+    "upload_bytes": 400008,
+    "download_bytes": 688,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3105.190019,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3105ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 3, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3108.246, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3105.190019, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3105ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=4/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12349 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3088.714,
+    "total_ms": 3089.145,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3086.631662,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3087ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 4, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3089.145, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3086.631662, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3087ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=5/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12350 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 4052.32,
+    "total_ms": 4052.893,
+    "upload_bytes": 400008,
+    "download_bytes": 6152,
+    "sse_events": 23,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 4049.793854,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 5, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 4052.893, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 4049.793854, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=6/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12351 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3095.211,
+    "total_ms": 3095.561,
+    "upload_bytes": 400008,
+    "download_bytes": 688,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3092.6700889999997,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3093ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 6, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3095.561, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3092.6700889999997, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3093ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=7/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12352 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3095.689,
+    "total_ms": 3096.043,
+    "upload_bytes": 400008,
+    "download_bytes": 680,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3093.674688,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3094ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 7, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3096.043, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3093.674688, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3094ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=8/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12353 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3098.096,
+    "total_ms": 3098.393,
+    "upload_bytes": 400008,
+    "download_bytes": 488,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3095.901256,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_connected",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_stream_interrupted",
+    "error_reason": "上游响应流中断",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游响应流中断；耗时 3096ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 8, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3098.393, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_stream_interrupted", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3095.901256, "stream_state": "upstream_connected", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted", "diagnostic_summary": "上游响应流中断；耗时 3096ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=9/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12354 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3092.975,
+    "total_ms": 3093.358,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3090.686566,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3091ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 9, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3093.358, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3090.686566, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3091ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=10/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12355 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3094.577,
+    "total_ms": 3094.953,
+    "upload_bytes": 400008,
+    "download_bytes": 495,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3092.5896869999997,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_connected",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_stream_interrupted",
+    "error_reason": "上游响应流中断",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游响应流中断；耗时 3093ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 10, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3094.953, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_stream_interrupted", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3092.5896869999997, "stream_state": "upstream_connected", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted", "diagnostic_summary": "上游响应流中断；耗时 3093ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=11/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12356 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3922.772,
+    "total_ms": 3923.259,
+    "upload_bytes": 400008,
+    "download_bytes": 6412,
+    "sse_events": 24,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3921.035113,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 11, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3923.259, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3921.035113, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=12/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12357 =====
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3683.479,
+    "total_ms": 3684.142,
+    "upload_bytes": 400008,
+    "download_bytes": 10058,
+    "sse_events": 37,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3681.757375,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12",
+    "tool_outcome": "truncated_no_tools"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 12, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3684.142, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3681.757375, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=13/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12358 =====
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 8170.51,
+    "total_ms": 8171.053,
+    "upload_bytes": 400008,
+    "download_bytes": 10337,
+    "sse_events": 38,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 8168.724664000001,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12",
+    "tool_outcome": "truncated_no_tools"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 13, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 8171.053, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 8168.724664000001, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=14/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12359 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3099.121,
+    "total_ms": 3099.486,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3095.957174,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3096ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 14, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3099.486, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3095.957174, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3096ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=15/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12360 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 7397.615,
+    "total_ms": 7398.029,
+    "upload_bytes": 400008,
+    "download_bytes": 7352,
+    "sse_events": 27,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 7395.764047000001,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 15, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 7398.029, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 7395.764047000001, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=16/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12361 =====
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 7787.573,
+    "total_ms": 7788.013,
+    "upload_bytes": 400008,
+    "download_bytes": 10043,
+    "sse_events": 37,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 7785.966829999999,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12",
+    "tool_outcome": "truncated_no_tools"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 16, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 7788.013, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 7785.966829999999, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=17/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12362 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3630.71,
+    "total_ms": 3631.216,
+    "upload_bytes": 400008,
+    "download_bytes": 4293,
+    "sse_events": 16,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3629.024631,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 17, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3631.216, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3629.024631, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=18/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12363 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 5277.771,
+    "total_ms": 5278.223,
+    "upload_bytes": 400008,
+    "download_bytes": 8451,
+    "sse_events": 31,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 5275.67708,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 18, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 5278.223, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 5275.67708, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=19/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12364 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 5799.808,
+    "total_ms": 5800.432,
+    "upload_bytes": 400008,
+    "download_bytes": 10273,
+    "sse_events": 38,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 5797.681946,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 19, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 5800.432, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 5797.681946, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=20/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12365 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3092.138,
+    "total_ms": 3092.481,
+    "upload_bytes": 400008,
+    "download_bytes": 688,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3089.648944,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3090ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 20, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3092.481, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3089.648944, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3090ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=21/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12366 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3566.679,
+    "total_ms": 3567.362,
+    "upload_bytes": 400008,
+    "download_bytes": 8165,
+    "sse_events": 30,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3565.020487,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 21, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3567.362, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3565.020487, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=22/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12367 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 7157.802,
+    "total_ms": 7158.16,
+    "upload_bytes": 400008,
+    "download_bytes": 8711,
+    "sse_events": 32,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 7156.046755,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 22, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 7158.16, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 7156.046755, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=23/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12368 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3092.463,
+    "total_ms": 3093.071,
+    "upload_bytes": 400008,
+    "download_bytes": 679,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3090.3651980000004,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3090ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 23, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3093.071, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3090.3651980000004, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3090ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=24/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12369 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3093.691,
+    "total_ms": 3094.0,
+    "upload_bytes": 400008,
+    "download_bytes": 488,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3091.6525739999997,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_connected",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_stream_interrupted",
+    "error_reason": "上游响应流中断",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游响应流中断；耗时 3092ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 24, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3094.0, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_stream_interrupted", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3091.6525739999997, "stream_state": "upstream_connected", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted", "diagnostic_summary": "上游响应流中断；耗时 3092ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=25/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12370 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3095.998,
+    "total_ms": 3096.35,
+    "upload_bytes": 400008,
+    "download_bytes": 687,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3094.0749570000003,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3094ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 25, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3096.35, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3094.0749570000003, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3094ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=26/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12371 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 5924.596,
+    "total_ms": 5925.074,
+    "upload_bytes": 400008,
+    "download_bytes": 8692,
+    "sse_events": 32,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 5922.867718,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 26, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 5925.074, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 5922.867718, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=27/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12372 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 2951.409,
+    "total_ms": 2951.754,
+    "upload_bytes": 400008,
+    "download_bytes": 7019,
+    "sse_events": 26,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 2949.690677,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 27, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 2951.754, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 2949.690677, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=28/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12373 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3122.35,
+    "total_ms": 3122.623,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3113.6464419999998,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3114ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 28, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3122.623, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3113.6464419999998, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3114ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=29/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12374 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3097.125,
+    "total_ms": 3097.557,
+    "upload_bytes": 400008,
+    "download_bytes": 679,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3094.677438,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3095ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 29, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3097.557, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3094.677438, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3095ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=30/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12375 =====
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3217.179,
+    "total_ms": 3217.682,
+    "upload_bytes": 400008,
+    "download_bytes": 10049,
+    "sse_events": 37,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3215.2644060000002,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12",
+    "tool_outcome": "truncated_no_tools"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 30, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3217.682, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3215.2644060000002, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=31/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12376 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3114.737,
+    "total_ms": 3115.168,
+    "upload_bytes": 400008,
+    "download_bytes": 688,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3111.6759589999997,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3112ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 31, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3115.168, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3111.6759589999997, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3112ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=32/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12377 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3149.008,
+    "total_ms": 3149.472,
+    "upload_bytes": 400008,
+    "download_bytes": 6170,
+    "sse_events": 23,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3147.25301,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 32, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3149.472, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3147.25301, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=33/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12378 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3094.325,
+    "total_ms": 3094.638,
+    "upload_bytes": 400008,
+    "download_bytes": 488,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3091.9450739999997,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_connected",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_stream_interrupted",
+    "error_reason": "上游响应流中断",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游响应流中断；耗时 3092ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 33, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3094.638, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_stream_interrupted", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3091.9450739999997, "stream_state": "upstream_connected", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted", "diagnostic_summary": "上游响应流中断；耗时 3092ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=34/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12379 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 4007.623,
+    "total_ms": 4008.077,
+    "upload_bytes": 400008,
+    "download_bytes": 8719,
+    "sse_events": 32,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 4005.7451469999996,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 34, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 4008.077, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 4005.7451469999996, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=35/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12380 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3089.262,
+    "total_ms": 3089.561,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3087.280828,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3087ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 35, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3089.561, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3087.280828, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3087ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=36/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12381 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3095.687,
+    "total_ms": 3095.962,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3093.467732,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3093ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 36, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3095.962, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3093.467732, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3093ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=37/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12382 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3092.375,
+    "total_ms": 3092.672,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3090.299313,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3090ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 37, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3092.672, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3090.299313, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3090ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=38/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12383 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3443.498,
+    "total_ms": 3443.846,
+    "upload_bytes": 400008,
+    "download_bytes": 8893,
+    "sse_events": 33,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3441.6650139999997,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 38, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3443.846, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3441.6650139999997, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=39/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12384 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 4637.645,
+    "total_ms": 4638.233,
+    "upload_bytes": 400008,
+    "download_bytes": 4816,
+    "sse_events": 18,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 4635.83755,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 39, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 4638.233, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 4635.83755, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=40/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12385 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 5500.464,
+    "total_ms": 5500.857,
+    "upload_bytes": 400008,
+    "download_bytes": 8386,
+    "sse_events": 31,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 5498.698055,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 40, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 5500.857, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 5498.698055, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=41/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12386 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 4799.762,
+    "total_ms": 4800.131,
+    "upload_bytes": 400008,
+    "download_bytes": 8449,
+    "sse_events": 31,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 4797.429236,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 41, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 4800.131, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 4797.429236, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=42/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12387 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3094.136,
+    "total_ms": 3094.488,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3092.192536,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3092ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 42, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3094.488, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3092.192536, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3092ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=43/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12388 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3098.234,
+    "total_ms": 3098.608,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3095.4107409999997,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3095ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 43, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3098.608, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3095.4107409999997, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3095ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=44/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12389 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 6211.207,
+    "total_ms": 6211.573,
+    "upload_bytes": 400008,
+    "download_bytes": 4301,
+    "sse_events": 16,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 6209.216888,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 44, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 6211.573, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 6209.216888, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=45/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12390 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3110.225,
+    "total_ms": 3110.514,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3107.300144,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3107ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 45, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3110.514, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3107.300144, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3107ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=46/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12391 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 3631.831,
+    "total_ms": 3632.518,
+    "upload_bytes": 400008,
+    "download_bytes": 7335,
+    "sse_events": 27,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 3630.005347,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 46, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3632.518, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3630.005347, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=47/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12392 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3091.883,
+    "total_ms": 3092.278,
+    "upload_bytes": 400008,
+    "download_bytes": 681,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3089.666233,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_waiting_response_headers",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_no_response",
+    "error_reason": "上游接收后未响应",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游已接收但未返回响应头；耗时 3090ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 47, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3092.278, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_no_response", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3089.666233, "stream_state": "upstream_waiting_response_headers", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_no_response (upstream_attempts=1 last=waiting_response_headers/upstream_no_response)", "diagnostic_summary": "上游已接收但未返回响应头；耗时 3090ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_waiting_response_headers", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=48/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12393 =====
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 4129.487,
+    "total_ms": 4130.025,
+    "upload_bytes": 400008,
+    "download_bytes": 10590,
+    "sse_events": 39,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 4127.5158010000005,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12",
+    "tool_outcome": "truncated_no_tools"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 48, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 4130.025, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 4127.5158010000005, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=49/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12394 =====
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "502",
+    "ttfb_ms": 3095.249,
+    "total_ms": 3095.62,
+    "upload_bytes": 400008,
+    "download_bytes": 488,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 502,
+    "elapsed_ms": 3093.211056,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "upstream_connected",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "error_code": "upstream_stream_interrupted",
+    "error_reason": "上游响应流中断",
+    "error_action": "稍后重试，或切换到更稳定的同模型渠道。",
+    "diagnostic_summary": "上游响应流中断；耗时 3093ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected",
+    "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted",
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 49, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "502", "proxy_curl_rc": 0, "proxy_elapsed_ms": 3095.62, "proxy_sse_done": false, "proxy_error_kind": null, "error_code": "upstream_stream_interrupted", "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 3093.211056, "stream_state": "upstream_connected", "network_peer": null, "attempts_summary": "useai/deepseek-v4-flash 3.1s upstream_stream_interrupted", "diagnostic_summary": "上游响应流中断；耗时 3093ms；请求体 390.6 KB；上游体 390.6 KB；流状态 upstream_connected", "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== round=50/50 provider=useai display=UseAI model=deepseek-v4-flash target_bytes=400000 port=12395 =====
+  "direct": {
+    "curl_rc": 0,
+    "status": "000",
+    "ttfb_ms": null,
+    "total_ms": null,
+    "upload_bytes": null,
+    "download_bytes": null,
+    "sse_events": 0,
+    "sse_done": false,
+    "error_kind": null,
+    "skipped": true
+  },
+  "proxy": {
+    "curl_rc": 0,
+    "status": "200",
+    "ttfb_ms": 4934.532,
+    "total_ms": 4934.954,
+    "upload_bytes": 400008,
+    "download_bytes": 10297,
+    "sse_events": 38,
+    "sse_done": true,
+    "error_kind": null
+  },
+  "proxy_diagnostic": {
+    "status_code": 200,
+    "elapsed_ms": 4932.699787,
+    "request_bytes": 400008,
+    "upstream_bytes": 400000,
+    "stream_state": "downstream_started",
+    "configured_timeout_seconds": 90,
+    "effective_timeout_seconds": 90,
+    "request_tools": "declared: adapt_plan,apply_patch,ask_question,clarify_requirements,code_search,create_file,detect_memories,edit_file +12"
+  }
+}
+
+脱敏诊断结果已保存: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/useai-large-diagnostic/result.json
+SUMMARY {"round": 50, "mode": "proxy-only", "provider_id": "useai", "display_provider": "UseAI", "model": "deepseek-v4-flash", "target_bytes": 400000, "script_rc": 0, "direct_status": "000", "direct_curl_rc": 0, "direct_elapsed_ms": null, "direct_sse_done": false, "direct_error_kind": null, "proxy_status": "200", "proxy_curl_rc": 0, "proxy_elapsed_ms": 4934.954, "proxy_sse_done": true, "proxy_error_kind": null, "error_code": null, "request_bytes": 400000, "upstream_bytes": 400000, "delta_bytes": 0, "elapsed_ms": 4932.699787, "stream_state": "downstream_started", "network_peer": null, "attempts_summary": null, "diagnostic_summary": null, "cancel_reason": null, "fallback_mode": null, "effective_timeout_seconds": 90, "response_tools": null}
+
+===== matrix summary =====
+round=1	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=5492.006
+round=2	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3778.034
+round=3	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3108.246
+round=4	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3089.145
+round=5	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=4052.893
+round=6	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3095.561
+round=7	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3096.043
+round=8	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_stream_interrupted	state=upstream_connected	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3098.393
+round=9	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3093.358
+round=10	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_stream_interrupted	state=upstream_connected	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3094.953
+round=11	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3923.259
+round=12	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3684.142
+round=13	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=8171.053
+round=14	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3099.486
+round=15	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=7398.029
+round=16	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=7788.013
+round=17	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3631.216
+round=18	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=5278.223
+round=19	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=5800.432
+round=20	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3092.481
+round=21	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3567.362
+round=22	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=7158.16
+round=23	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3093.071
+round=24	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_stream_interrupted	state=upstream_connected	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3094.0
+round=25	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3096.35
+round=26	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=5925.074
+round=27	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=2951.754
+round=28	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3122.623
+round=29	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3097.557
+round=30	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3217.682
+round=31	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3115.168
+round=32	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3149.472
+round=33	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_stream_interrupted	state=upstream_connected	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3094.638
+round=34	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=4008.077
+round=35	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3089.561
+round=36	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3095.962
+round=37	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3092.672
+round=38	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3443.846
+round=39	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=4638.233
+round=40	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=5500.857
+round=41	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=4800.131
+round=42	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3094.488
+round=43	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3098.608
+round=44	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=6211.573
+round=45	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3110.514
+round=46	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3632.518
+round=47	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_no_response	state=upstream_waiting_response_headers	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3092.278
+round=48	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=4130.025
+round=49	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=502/rc=0/done=False	code=upstream_stream_interrupted	state=upstream_connected	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=3095.62
+round=50	useai	deepseek-v4-flash	400000	direct=000/rc=0/done=False	proxy=200/rc=0/done=True	code=-	state=downstream_started	peer=-	req=400000	up=400000	delta=0	direct_ms=None	proxy_ms=4934.954
+
+===== aggregate =====
+useai	deepseek-v4-flash	400000	runs=50	success_rate=52.00%	errors={'-': 26, 'upstream_no_response': 19, 'upstream_stream_interrupted': 5}	states={'downstream_started': 26, 'upstream_waiting_response_headers': 19, 'upstream_connected': 5}	direct_err={'-': 50}	proxy_err={'-': 50}	proxy_p50=3122.623	proxy_p95=7398.029
+
+矩阵结果: /Users/dingyuwang/0-X/4-go/vs-ai-proxy/.bin/large-request-matrix/summary.json
+SOAK_END rc=0 2026-07-23T12:55:04Z
