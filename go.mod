@@ -2,7 +2,11 @@ module github.com/dingyuwang/vs-ai-proxy
 
 go 1.25.0
 
-toolchain go1.25.12
+// go1.25.13 修复了 go1.25.12 标准库中的 6 个漏洞（GO-2026-6088 encoding/xml、
+// GO-2026-5972 encoding/asn1、GO-2026-5026 net/http 等），govulncheck 会因此
+// 阻塞发布（make release-check → vuln-check）。
+// 升级到 1.25.13 后 `go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...` 归零。
+toolchain go1.25.13
 
 require (
 	github.com/gin-gonic/gin v1.10.0
